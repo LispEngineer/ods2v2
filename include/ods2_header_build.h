@@ -77,6 +77,9 @@ typedef struct {
                                    ("Read Me.txt;1"), stored in the
                                    FI5 ident area as ISO Latin-1 or
                                    UCS-2 (see ods5_names.h). */
+    uint32_t       highwater;  /* FH2$L_HIGHWATER: 0 = not set (the ODS-2 convention here);
+                                   at level 5 VMS writes HIBLK + 1 when every allocated
+                                   block has been written */
     bool           no_access_date; /* level 5: leave FI5$Q_ACCDATE zero, as VMS
                                    does for a symbolic link */
     unsigned       level;      /* 0 or 2: a level 2 header with an FI2

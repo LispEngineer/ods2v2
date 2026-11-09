@@ -1407,6 +1407,7 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
     spec.extents = &extent;
     spec.extent_count = 1;
     spec.hiblk = content_blocks;
+    if (vol->ods5) spec.highwater = content_blocks + 1; /* the whole allocation is written, below */
     spec.efblk = 1;   /* just the sentinel block so far */
     spec.ffbyte = 2;  /* sentinel is 2 bytes */
     if (vol->ods5) {
@@ -1442,6 +1443,16 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
 
     r = ods2_write_file_block(vol, new_header, 1, content_block);
     if (!r.ok) return r;
+    if (vol->ods5) {
+        /* the rest of the allocation as zeros, so that HIGHWATER = HIBLK + 1
+           (as VMS V8.4 makes a directory) tells the truth */
+        unsigned v;
+        memset(content_block, 0, sizeof(content_block));
+        for (v = 2; v <= content_blocks; v++) {
+            r = ods2_write_file_block(vol, new_header, v, content_block);
+            if (!r.ok) return r;
+        }
+    }
 
     /* Insert an entry for the new directory into the parent -
        growing the parent's own allocation automatically if none of
@@ -1928,6 +1939,9 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
     /* Records the whole file's size in every header, as the record
        attributes are copied into extension headers too. */
     spec.hiblk = (uint32_t) total_allocated;
+    /* every allocated block is written (zero-filled past the data), which is what
+       VMS V8.4 records on a level 5 volume: HIGHWATER = HIBLK + 1 */
+    if (vol->ods5) spec.highwater = (uint32_t) total_allocated + 1;
     /* End-of-file mark per spec 6.1.5/6.1.6, in the preferred form
        VMS itself writes: EFBLK is the VBN holding the EOF position,
        FFBYTE the bytes in use there. Content ending exactly on a

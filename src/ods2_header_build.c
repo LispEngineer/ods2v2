@@ -167,6 +167,7 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
         core->recprot = 0;
         header_out[ODS5_FH2_LINKCOUNT] = 1;
     }
+    core->highwater = spec->highwater;
     core->backlink = spec->backlink;
 
     if (level5) {

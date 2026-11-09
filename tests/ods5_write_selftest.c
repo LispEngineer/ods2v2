@@ -245,6 +245,11 @@ static void check_fi5(ods2_volume_t *vol, ods2_fid_t fid, const char *name, unsi
     assert(h[0] == 40);                                  /* IDOFFSET */
     assert(rd16(h + 74) == 1);                           /* FH2$W_LINKCOUNT */
     assert(rd16(h + 56) == 0);                           /* RECPROT, as VMS V8.4 */
+    {   /* FH2$L_HIGHWATER = HIBLK + 1: every allocated block written, as VMS V8.4 records it */
+        uint32_t hiblk = ((uint32_t) rd16(h + 24) << 16) | rd16(h + 26); /* word-swapped longword */
+        uint32_t hw = (uint32_t) rd16(h + 76) | ((uint32_t) rd16(h + 78) << 16);
+        assert(hw == hiblk + 1);
+    }
     assert(h[2] == 0xff && h[3] == 0xff);                /* no ACL, no reserved area */
     assert(ods5_complete_name(name, full, sizeof(full)));
     snprintf(with_version, sizeof(with_version), "%.600s;1", full);
