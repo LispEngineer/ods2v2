@@ -96,14 +96,14 @@ $(BUILD)/ods2_directory_selftest: tests/ods2_directory_selftest.c src/ods2_direc
 samples/synthetic_disk.img: samples/sample.bin samples/indexf_headers.bin samples/root_dir.bin tools/build_synthetic_disk.py
 	python3 tools/build_synthetic_disk.py
 
-$(BUILD)/ods2_volume_selftest: tests/ods2_volume_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c include/ods2_volume.h include/ods2_time.h samples/synthetic_disk.img src/ods5_names.c src/ods5_fold_table.h include/ods5_names.h | $(BUILD)
-	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_volume_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c src/ods5_names.c -o $@
+$(BUILD)/ods2_volume_selftest: tests/ods2_volume_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c include/ods2_volume.h include/ods2_time.h samples/synthetic_disk.img src/ods5_names.c src/ods5_header.c src/ods5_fold_table.h include/ods5_names.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_volume_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c src/ods5_names.c src/ods5_header.c -o $@
 
 $(BUILD)/ods2_wildcard_selftest: tests/ods2_wildcard_selftest.c src/ods2_wildcard.c include/ods2_wildcard.h src/ods5_names.c src/ods5_fold_table.h include/ods5_names.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_wildcard_selftest.c src/ods2_wildcard.c src/ods5_names.c -o $@
 
-$(BUILD)/ods2_read_file_selftest: tests/ods2_read_file_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c include/ods2_volume.h include/ods2_time.h src/ods5_names.c src/ods5_fold_table.h include/ods5_names.h | $(BUILD)
-	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_read_file_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c src/ods5_names.c -o $@
+$(BUILD)/ods2_read_file_selftest: tests/ods2_read_file_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c include/ods2_volume.h include/ods2_time.h src/ods5_names.c src/ods5_header.c src/ods5_fold_table.h include/ods5_names.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_read_file_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c src/ods5_names.c src/ods5_header.c -o $@
 
 $(BUILD)/ods2_header_build_selftest: tests/ods2_header_build_selftest.c src/ods2_header_build.c src/ods5_names.c src/ods2_time.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c include/ods2_header_build.h include/ods2_time.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_header_build_selftest.c src/ods2_header_build.c src/ods5_names.c src/ods2_time.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c -o $@
@@ -268,6 +268,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@sh tests/cli_ods5_names_check.sh
 	@echo "--- CLI ODS-5 files check ---"
 	@sh tests/cli_ods5_files_check.sh
+	@echo "--- cli_ods5_write_check ---"
+	@sh tests/cli_ods5_write_check.sh
 	@echo "--- CLI recursive DIR regression check ---"
 	@if command -v timeout >/dev/null 2>&1; then \
 		rm -f samples/cli_regression_disk.img; \

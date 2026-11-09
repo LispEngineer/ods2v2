@@ -98,5 +98,7 @@
 #define ODS5_FAT_BLOCK_SPECIAL  3u
 #define ODS5_FAT_SYMLINK        4u       /* pre-V8.2 */
 #define ODS5_FAT_SYMBOLIC_LINK  5u
+/* Longest symbolic link target: ATR$S_SYMLINK. */
+#define ODS5_SYMLINK_MAX        1024
 
 #endif /* ODS5_ONDISK_H */

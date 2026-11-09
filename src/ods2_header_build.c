@@ -195,7 +195,7 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
         ods2_store_vms_time(ident + ODS5_FI5_CREDATE, vms_now);
         ods2_store_vms_time(ident + ODS5_FI5_REVDATE, vms_now);
         if (spec->seg_num == 0) {
-            ods2_store_vms_time(ident + ODS5_FI5_ACCDATE, vms_now);
+            if (!spec->no_access_date) ods2_store_vms_time(ident + ODS5_FI5_ACCDATE, vms_now);
             ods2_store_vms_time(ident + ODS5_FI5_ATTDATE, vms_now);
             /* length hint: all ones on a directory, "invalidated"
                (0x8000000000000000 twice) on a file, as VMS writes them */

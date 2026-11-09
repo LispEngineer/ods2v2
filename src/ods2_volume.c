@@ -25,6 +25,7 @@
 #include "ods2_volume.h"
 #include "ods2_validate.h"
 #include "ods5_ondisk.h"
+#include "ods5_header.h"
 #include "ods2_bitmap.h"
 #include "ods2_header_build.h"
 #include "ods2_directory_write.h"
@@ -52,6 +53,10 @@ static ods2_result_t not_writable(const ods2_volume_t *vol)
     }
     return fail("volume was not mounted for write (use ods2_mount_write)");
 }
+
+static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
+                                           const char *name, uint16_t version, ods2_fid_t fid,
+                                           uint8_t extra_flags);
 
 /* Uppercases a string in place. Real VMS always stores filenames and
    directory names uppercase - "create/dir [decus]" on real VMS
@@ -1404,6 +1409,12 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
     spec.hiblk = content_blocks;
     spec.efblk = 1;   /* just the sentinel block so far */
     spec.ffbyte = 2;  /* sentinel is 2 bytes */
+    if (vol->ods5) {
+        /* every directory VMS V8.4 made has FFBYTE 0 and EFBLK one past its
+           last block in use (ODS5_FORMAT_NOTES.md 11) */
+        spec.efblk = 2;
+        spec.ffbyte = 0;
+    }
 
     {
         char ident[ODS5_MAX_LITERAL_NAME + 16]; /* dirname is already bounded
@@ -1521,7 +1532,8 @@ static bool memory_source_read(void *ctx_, uint8_t *buf, size_t n)
 
 static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_header,
                                  const char *name, ods2_content_source_t *src,
-                                 const ods2_record_attrs_t *attrs, ods2_fid_t *new_fid_out);
+                                 const ods2_record_attrs_t *attrs, unsigned special,
+                                 ods2_fid_t *new_fid_out);
 
 const char *ods2_check_record_attrs(const ods2_record_attrs_t *attrs, size_t content_len)
 {
@@ -1627,7 +1639,105 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
     if (why != NULL) {
         return fail(why);
     }
-    return create_file(vol, parent_header, name, src, attrs, new_fid_out);
+    return create_file(vol, parent_header, name, src, attrs, 0, new_fid_out);
+}
+
+ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
+                               ods2_fid_t target)
+{
+    uint8_t dir_header[512], target_header[512];
+    ods2_head_core_t *core = (ods2_head_core_t *) target_header;
+    ods2_fid_t existing;
+    char link_name[ODS5_MAX_LITERAL_NAME + 8];
+    const char *why;
+    unsigned count;
+    ods2_result_t r;
+
+    if (!vol->writable) return not_writable(vol);
+    if (!vol->ods5 || !(vol->home.volchar & ODS5_VC_HARDLINKS)) {
+        return fail("hard links need an ODS-5 volume with the HARDLINKS characteristic "
+                    "(INITIALIZE/VOLUME_CHARACTERISTICS=HARDLINKS)");
+    }
+    why = ods5_check_new_name(name);
+    if (why != NULL) return fail(why);
+    if (!ods5_complete_name(name, link_name, sizeof(link_name))) return fail("file name too long");
+
+    r = ods2_read_header(vol, target.fid_num, target_header);
+    if (!r.ok) return r;
+    if (core->fid.fid_num != target.fid_num || core->fid.fid_seq != target.fid_seq ||
+        (core->filechar & 0x8000u)) {
+        return fail("the file to link to does not exist");
+    }
+    if ((core->struclev >> 8) != ODS5_LEVEL_5) {
+        return fail("the file to link to has a level 2 header (a reserved file): not linkable");
+    }
+    if (core->filechar & 0x2000u) {
+        return fail("a hard link to a directory is not made here");
+    }
+    if (core->seg_num != 0) return fail("the file to link to is an extension header");
+    count = (unsigned) (target_header[ODS5_FH2_LINKCOUNT] | (target_header[ODS5_FH2_LINKCOUNT + 1] << 8));
+    if (count >= 32760u) return fail("the file already has the most links a file can (32760)");
+
+    r = ods2_read_header(vol, dir_file_number, dir_header);
+    if (!r.ok) return r;
+    r = ods2_lookup_name(vol, dir_header, link_name, &existing);
+    if (r.ok) return fail("a file or directory with this name already exists in the directory");
+
+    /* the entry first (it is what can fail for lack of room), then the count */
+    r = insert_into_directory(vol, dir_file_number, link_name, 1, target, 0);
+    if (!r.ok) return r;
+    count++;
+    target_header[ODS5_FH2_LINKCOUNT] = (uint8_t) (count & 0xff);
+    target_header[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (count >> 8);
+    {
+        /* the attribute change date moves: FI5$Q_ATTDATE */
+        uint8_t *ident = target_header + (size_t) core->idoffset * 2;
+        ods2_store_vms_time(ident + ODS5_FI5_ATTDATE, ods2_vms_time_now());
+    }
+    {
+        uint16_t checksum = ods2_checksum(target_header, 255);
+        target_header[510] = (uint8_t) (checksum & 0xff);
+        target_header[511] = (uint8_t) (checksum >> 8);
+    }
+    return ods2_write_header(vol, target.fid_num, target_header);
+}
+
+ods2_result_t ods2_create_symlink(ods2_volume_t *vol, const uint8_t *parent_header,
+                                  const char *name, const char *target, ods2_fid_t *new_fid_out)
+{
+    uint8_t text[ODS5_SYMLINK_MAX + 1];
+    size_t len = 0;
+    bool wide;
+    memory_source_t ctx;
+    ods2_content_source_t src;
+    ods2_record_attrs_t attrs;
+
+    if (!vol->writable) return not_writable(vol);
+    if (!vol->ods5) return fail("symbolic links exist only on an ODS-5 volume");
+    if (vol->home.volchar & ODS5_VC_NO_SPECIAL_FILES) {
+        return fail("the volume forbids special files (symbolic links): HM2$M_NO_SPECIAL_FILES");
+    }
+    if (target[0] == '\0') return fail("a symbolic link needs a target");
+    if (!ods5_utf8_to_stored(target, text, sizeof(text), &len, &wide) || wide) {
+        return fail("a symbolic link target is ISO Latin-1 text of at most 1024 characters: "
+                    "no character above U+00FF");
+    }
+    /* What VMS V8.4 makes (CREATE/SYMLINK, ODS5T corpus): file organization
+       special (FAT byte 0 = 0x40), special type 5 in the byte after it,
+       RSIZE 32767, EFBLK 1 / FFBYTE the target's length; the data is the
+       target text from VBN 1; the directory entry carries DIR$V_SPECIAL. */
+    attrs.rtype = (uint8_t) (ODS5_FAT_ORG_SPECIAL << 4);
+    attrs.rattrib = ODS5_FAT_SYMBOLIC_LINK;
+    attrs.rsize = 32767;
+    attrs.maxrec = 0;
+    ctx.data = text;
+    ctx.pos = 0;
+    src.length = len;
+    src.read = memory_source_read;
+    src.ctx = &ctx;
+    src.problem = NULL;
+    src.var_records = false;
+    return create_file(vol, parent_header, name, &src, &attrs, ODS5_FAT_SYMBOLIC_LINK, new_fid_out);
 }
 
 ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
@@ -1649,13 +1759,14 @@ ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
         src.ctx = &ctx;
         src.problem = NULL;
         src.var_records = false;
-        return create_file(vol, parent_header, name, &src, &attrs, new_fid_out);
+        return create_file(vol, parent_header, name, &src, &attrs, 0, new_fid_out);
     }
 }
 
 static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_header,
                                  const char *name, ods2_content_source_t *src,
-                                 const ods2_record_attrs_t *attrs, ods2_fid_t *new_fid_out)
+                                 const ods2_record_attrs_t *attrs, unsigned special,
+                                 ods2_fid_t *new_fid_out)
 {
     size_t content_len = src->length;
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
@@ -1813,6 +1924,7 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
     spec.rattrib = attrs->rattrib;
     spec.rsize = attrs->rsize;
     spec.maxrec = attrs->maxrec;
+    spec.no_access_date = (special != 0); /* VMS leaves a symbolic link's access date unset */
     /* Records the whole file's size in every header, as the record
        attributes are copied into extension headers too. */
     spec.hiblk = (uint32_t) total_allocated;
@@ -1825,7 +1937,9 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
        than the real content, and an empty file as 512 bytes.) */
     spec.efblk = (uint32_t) (content_len / 512) + 1;
     spec.ffbyte = (uint16_t) (content_len % 512);
-    spec.filechar = (extent_count == 1) ? 0x0080 : 0; /* FH2$M_CONTIG only when truly one piece */
+    /* FH2$M_CONTIG only when truly one piece - and on an ODS-5 volume not at all: the
+       files VMS V8.4 makes there (ODS5T corpus) have no characteristics */
+    spec.filechar = (extent_count == 1 && !vol->ods5) ? 0x0080 : 0;
     snprintf(ident, sizeof(ident), "%s;1", name);
     spec.ident_name = ident;
 
@@ -1864,7 +1978,8 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
     /* Insert an entry for the new file into the parent - growing the
        parent's own allocation automatically if none of its existing
        content blocks have room. */
-    r = ods2_insert_into_directory(vol, parent_core->fid.fid_num, name, 1, spec.fid);
+    r = insert_into_directory(vol, parent_core->fid.fid_num, name, 1, spec.fid,
+                              special != 0 ? ODS5_DIR_SPECIAL_FLAG : 0);
     if (!r.ok) return r;
 
     *new_fid_out = spec.fid;
@@ -1937,8 +2052,10 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
     for (i = 0; i < old_count; i++) allocated += old_extents[i].block_count;
 
     if (used > allocated) {
-        /* One Format 1 retrieval pointer maps at most 256 blocks. */
-        unsigned max_blocks = (256u / vol->home.cluster) * vol->home.cluster;
+        /* One contiguous extent: a Format 1 pointer maps at most 256 blocks, a
+           Format 2 one 16384; a directory is held in memory while it is
+           changed, so 65536 blocks (32 MiB) is the limit here. */
+        unsigned max_blocks = (65536u / vol->home.cluster) * vol->home.cluster;
         unsigned want = allocated * 2;
         uint32_t lbn;
         unsigned got;
@@ -1947,8 +2064,8 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
         size_t map_end = (size_t) core->acoffset * 2;
 
         if (used > max_blocks) {
-            return fail("directory would need more than 256 blocks, more than "
-                        "one contiguous extent can map here - not yet supported");
+            return fail("directory would need more than 65536 blocks (32 MiB), "
+                        "the most this program keeps in one contiguous extent");
         }
         if (want < used) want = used;
         if (want > max_blocks) want = max_blocks;
@@ -2080,8 +2197,19 @@ static ods2_result_t load_directory(ods2_volume_t *vol, const uint8_t *dir_heade
  * after it, the following blocks moving down one - so the order holds
  * across blocks and every block inside the end-of-file holds entries.
  * VMS's own directory search depends on that order. */
+static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
+                                           const char *name, uint16_t version, ods2_fid_t fid,
+                                           uint8_t extra_flags);
+
 ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
                                           const char *name, uint16_t version, ods2_fid_t fid)
+{
+    return insert_into_directory(vol, dir_file_number, name, version, fid, 0);
+}
+
+static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
+                                           const char *name, uint16_t version, ods2_fid_t fid,
+                                           uint8_t extra_flags)
 {
     uint8_t dir_header[512];
     uint8_t *blocks = NULL;
@@ -2097,8 +2225,8 @@ ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_n
     if (!r.ok) return r;
 
     t = ods2_dir_choose_block(blocks, used, name);
-    if (ods2_insert_dir_entry_level(blocks + (size_t) t * 512, 512, name, version, fid,
-                                    vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2)) {
+    if (ods2_insert_dir_entry_flags(blocks + (size_t) t * 512, 512, name, version, fid,
+                                    vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, extra_flags)) {
         if (ods2_file_content_length(dir_header) == 0 ||
             !below_highwater(dir_header, t + 1)) {
             /* An end-of-file that didn't cover even block 1, or a block
@@ -2111,8 +2239,8 @@ ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_n
         uint8_t combined[1024];
         memcpy(combined, blocks + (size_t) t * 512, 512);
         memset(combined + 512, 0, 512);
-        if (!ods2_insert_dir_entry_level(combined, sizeof(combined), name, version, fid,
-                                         vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2)) {
+        if (!ods2_insert_dir_entry_flags(combined, sizeof(combined), name, version, fid,
+                                         vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, extra_flags)) {
             free(blocks);
             return fail("internal error: a block plus one record overflowed 1024 "
                         "bytes (should be unreachable)");
@@ -2211,6 +2339,46 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
     return ok();
 }
 
+/* Removes just the (name, version) entry from the directory - trying each
+   block in use until the record holding it is found. Removing the whole
+   record instead (as an earlier version did) would also drop every other
+   version of the name stored there, leaving their headers allocated but
+   unreachable. A block left with no entries is removed and the blocks after
+   it move up, as the VMS file system does, so every block inside the
+   end-of-file holds entries. */
+static ods2_result_t remove_directory_entry(ods2_volume_t *vol, unsigned dir_file_number,
+                                            uint8_t *dir_header, const char *name,
+                                            uint16_t target_version)
+{
+    uint8_t *blocks = NULL;
+    unsigned used, v;
+    bool removed = false;
+    ods2_result_t r = load_directory(vol, dir_header, 0, &blocks, &used);
+    if (!r.ok) return r;
+    for (v = 0; v < used && !removed; v++) {
+        uint8_t *block = blocks + (size_t) v * 512;
+        if (!ods2_remove_dir_version(block, 512, name, target_version)) continue;
+        removed = true;
+        if (used > 1 && ods2_dir_block_is_empty(block)) {
+            memmove(block, block + 512, (size_t) (used - v - 1) * 512);
+            r = store_directory(vol, dir_file_number, dir_header, blocks, used - 1,
+                                used, v);
+        } else if (!below_highwater(dir_header, v + 1)) {
+            r = store_directory(vol, dir_file_number, dir_header, blocks, used,
+                                used, v);
+        } else {
+            r = ods2_write_file_block(vol, dir_header, v + 1, block);
+        }
+    }
+    free(blocks);
+    if (!r.ok) return r;
+    if (!removed) {
+        return fail("internal error: entry existed at lookup time but was not "
+                    "found for removal (should be unreachable)");
+    }
+    return ok();
+}
+
 ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const char *name)
 {
     return ods2_delete_version(vol, dir_file_number, name, ODS2_VERSION_HIGHEST, NULL);
@@ -2228,7 +2396,6 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
     int extent_count;
     int i;
     ods2_result_t r;
-    bool removed = false;
 
     if (!vol->writable) {
         return not_writable(vol);
@@ -2243,6 +2410,49 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
     r = ods2_read_header(vol, target_fid.fid_num, target_header);
     if (!r.ok) return r;
     target_core = (ods2_head_core_t *) target_header;
+
+    if (vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS) &&
+        (target_core->struclev >> 8) == ODS5_LEVEL_5 && target_core->seg_num == 0) {
+        /* A file with several links: deleting one link takes its directory
+           entry and one off the count; the file goes with the last. The
+           header holds the primary link's directory and name, so the primary
+           link of a file that has others is not deleted here. */
+        unsigned links = (unsigned) (target_header[ODS5_FH2_LINKCOUNT] |
+                                     (target_header[ODS5_FH2_LINKCOUNT + 1] << 8));
+        if (links > 1) {
+            ods5_ident_t id;
+            const char *why;
+            char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
+            bool primary = false;
+            if (ods5_read_ident(target_header, &id, &why) &&
+                target_core->backlink.fid_num == dir_file_number &&
+                ods5_complete_name(id.name, a, sizeof(a)) && ods5_complete_name(name, b, sizeof(b)) &&
+                ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0 &&
+                id.version == target_version) {
+                primary = true;
+            }
+            if (primary) {
+                return fail("this is the file's primary link (its header names this directory and "
+                            "name) and the file has other links: delete the others first");
+            }
+            r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+            if (!r.ok) return r;
+            links--;
+            target_header[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
+            target_header[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (links >> 8);
+            ods2_store_vms_time(target_header + (size_t) target_core->idoffset * 2 + ODS5_FI5_ATTDATE,
+                                ods2_vms_time_now());
+            {
+                uint16_t checksum = ods2_checksum(target_header, 255);
+                target_header[510] = (uint8_t) (checksum & 0xff);
+                target_header[511] = (uint8_t) (checksum >> 8);
+            }
+            r = ods2_write_header(vol, target_fid.fid_num, target_header);
+            if (!r.ok) return r;
+            if (version_out != NULL) *version_out = target_version;
+            return ok();
+        }
+    }
 
     /* Refuse to delete a non-empty directory - matches VMS's own
        DELETE/DIRECTORY behavior and avoids silently orphaning its
@@ -2321,41 +2531,8 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
     r = ods2_write_header(vol, target_fid.fid_num, target_header);
     if (!r.ok) return r;
 
-    /* Remove just this version's entry from the parent - trying each
-       block in use until the record holding it is found. Removing the
-       whole record instead (as an earlier version did) would also drop
-       every other version of the name stored there, leaving their
-       headers allocated but unreachable. A block left with no entries
-       is removed and the blocks after it move up, as the VMS file
-       system does, so every block inside the end-of-file holds
-       entries. */
-    {
-        uint8_t *blocks = NULL;
-        unsigned used, v;
-        r = load_directory(vol, dir_header, 0, &blocks, &used);
-        if (!r.ok) return r;
-        for (v = 0; v < used && !removed; v++) {
-            uint8_t *block = blocks + (size_t) v * 512;
-            if (!ods2_remove_dir_version(block, 512, name, target_version)) continue;
-            removed = true;
-            if (used > 1 && ods2_dir_block_is_empty(block)) {
-                memmove(block, block + 512, (size_t) (used - v - 1) * 512);
-                r = store_directory(vol, dir_file_number, dir_header, blocks, used - 1,
-                                    used, v);
-            } else if (!below_highwater(dir_header, v + 1)) {
-                r = store_directory(vol, dir_file_number, dir_header, blocks, used,
-                                    used, v);
-            } else {
-                r = ods2_write_file_block(vol, dir_header, v + 1, block);
-            }
-        }
-        free(blocks);
-        if (!r.ok) return r;
-    }
-    if (!removed) {
-        return fail("internal error: entry existed at lookup time but was not "
-                    "found for removal (should be unreachable)");
-    }
+    r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+    if (!r.ok) return r;
 
     if (version_out != NULL) *version_out = target_version;
     return ok();

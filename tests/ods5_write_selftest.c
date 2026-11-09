@@ -262,7 +262,7 @@ static void check_fi5(ods2_volume_t *vol, ods2_fid_t fid, const char *name, unsi
     assert(rd16(ident + ODS5_FI5_REVISION) == 1);
     assert(rd64(ident + ODS5_FI5_CREDATE) != 0);
     assert(rd64(ident + ODS5_FI5_REVDATE) == rd64(ident + ODS5_FI5_CREDATE));
-    assert(rd64(ident + ODS5_FI5_ACCDATE) != 0);
+    assert((h[20] >> 4) == ODS5_FAT_ORG_SPECIAL || rd64(ident + ODS5_FI5_ACCDATE) != 0); /* a symbolic link has none */
     assert(rd64(ident + ODS5_FI5_ATTDATE) != 0);
     assert(rd64(ident + ODS5_FI5_EXPDATE) == 0 && rd64(ident + ODS5_FI5_BAKDATE) == 0);
     assert(rd64(ident + ODS5_FI5_EX_RECATTR) == 0);
@@ -708,6 +708,73 @@ int main(void)
         }
         assert(!ods2_delete(&vol, 4, "NOSUCH.TXT").ok);
         printf("PASS: files with ISO Latin-1, UCS-2 and plain names deleted, entries removed\n");
+    }
+
+
+    /* --- symbolic links and hard links --- */
+    {
+        uint8_t root[512], h[512], blk[512];
+        ods2_fid_t sl, plain, found;
+        ods2_result_t lr;
+        unsigned links;
+
+        plain = make_file(&vol, 4, "Target File.txt", "target data\n", 12);
+        root_header(&vol, root);
+        lr = ods2_create_symlink(&vol, root, "Link To Target", "Target File.txt", &sl);
+        if (!lr.ok) printf("symlink: %s\n", lr.problem);
+        assert(lr.ok);
+        check_fi5(&vol, sl, "Link To Target", ODS5_NAME_ISL1, false);
+        assert(ods2_read_header(&vol, sl.fid_num, h).ok);
+        assert(h[20] == 0x40 && h[21] == 5);                  /* FAT: special file, type symbolic link */
+        assert(rd16(h + 22) == 32767);                        /* RSIZE, as VMS */
+        assert(ods2_file_content_length(h) == 15);            /* EFBLK 1, FFBYTE = the target's length */
+        assert(rd64(h + 80 + ODS5_FI5_ACCDATE) == 0);         /* VMS leaves the access date unset */
+        assert(rd64(h + 80 + ODS5_FI5_ATTDATE) != 0);
+        assert(ods2_read_file_block(&vol, h, 1, blk).ok);
+        assert(memcmp(blk, "Target File.txt", 15) == 0);      /* the data is the target text */
+        assert((rd16(h + 52) & 0x0080u) == 0);                /* not CONTIG: VMS made it so */
+        assert(record_flags(&vol, 4, "Link To Target", NULL) == (0x08 | 0x40));  /* ISL1 | DIR$V_SPECIAL */
+        /* a target with an ISO Latin-1 character is stored as one byte; above U+00FF is refused */
+        root_header(&vol, root);
+        assert(ods2_create_symlink(&vol, root, "latin link", "caf\xC3\xA9.txt", &found).ok);
+        assert(ods2_read_header(&vol, found.fid_num, h).ok);
+        assert(ods2_file_content_length(h) == 8);
+        assert(ods2_read_file_block(&vol, h, 1, blk).ok && memcmp(blk, "caf\xE9.txt", 8) == 0);
+        root_header(&vol, root);
+        assert(!ods2_create_symlink(&vol, root, "wide link", "\xE6\x97\xA5.txt", &found).ok);
+        assert(!ods2_create_symlink(&vol, root, "empty link", "", &found).ok);
+        assert(!ods2_create_symlink(&vol, root, "Link To Target", "x", &found).ok);   /* exists */
+        printf("PASS: symbolic links: special FAT, type 5, data = target text, SPECIAL directory flag, no access date\n");
+
+        /* hard links (the volume has HARDLINKS) */
+        assert(ods2_read_header(&vol, plain.fid_num, h).ok && rd16(h + 74) == 1);
+        assert(ods2_create_link(&vol, 4, "Second Name.txt", plain).ok);
+        assert(ods2_create_link(&vol, 4, "third.txt", plain).ok);
+        assert(ods2_read_header(&vol, plain.fid_num, h).ok);
+        links = rd16(h + 74);
+        assert(links == 3);
+        assert(ods2_validate_head(h).ok);
+        root_header(&vol, root);
+        assert(ods2_lookup_name(&vol, root, "second name.TXT", &found).ok && found.fid_num == plain.fid_num);
+        assert(!ods2_create_link(&vol, 4, "third.txt", plain).ok);          /* the name exists */
+        {
+            ods2_fid_t dirfid;
+            assert(ods2_create_directory(&vol, root, "Links", &dirfid).ok);
+            assert(!ods2_create_link(&vol, 4, "dirlink", dirfid).ok);       /* not to a directory */
+        }
+        /* deleting the primary link of a file that has others is refused; the others go one by one */
+        assert(!ods2_delete(&vol, 4, "Target File.txt").ok);
+        assert(ods2_delete(&vol, 4, "Second Name.txt").ok);
+        assert(ods2_read_header(&vol, plain.fid_num, h).ok && rd16(h + 74) == 2);
+        assert(ods2_delete(&vol, 4, "third.txt").ok);
+        assert(ods2_read_header(&vol, plain.fid_num, h).ok && rd16(h + 74) == 1);
+        assert(ods2_delete(&vol, 4, "Target File.txt").ok);                  /* the last link frees the file */
+        assert(ods2_read_header(&vol, plain.fid_num, h).ok && (rd16(h + 52) & 0x8000u));
+        assert(ods2_delete(&vol, 4, "Link To Target").ok);
+        assert(ods2_delete(&vol, 4, "latin link").ok);
+        assert(ods2_delete(&vol, 4, "Links.DIR").ok);
+        printf("PASS: hard links raise and lower the link count; the file goes with its last link; "
+               "directories and a repeated name are refused\n");
     }
 
     /* --- delete everything created: the space and the file numbers come back --- */

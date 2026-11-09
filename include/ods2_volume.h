@@ -310,6 +310,25 @@ ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
                                 const char *name, const uint8_t *content, size_t content_len,
                                 uint8_t rtype, ods2_fid_t *new_fid_out);
 
+/* Creates a symbolic link `name` in the directory `parent_header`, as VMS
+ * V8.4's CREATE/SYMLINK does: a special file (FAT file organization 4,
+ * special type 5) whose data is `target`, ISO Latin-1 text (UTF-8 here, no
+ * character above U+00FF, at most 1024 bytes), from VBN 1, EOF = its length;
+ * the directory entry carries the DIR$V_SPECIAL flag and the access date is
+ * left unset. ODS-5 only, and not on a volume with HM2$M_NO_SPECIAL_FILES.
+ * The name rules and the duplicate check are those of ods2_create_file(). */
+ods2_result_t ods2_create_symlink(ods2_volume_t *vol, const uint8_t *parent_header,
+                                  const char *name, const char *target, ods2_fid_t *new_fid_out);
+
+/* Makes another directory entry `name` (version 1) in the directory
+ * `dir_file_number` for the existing file `target`, as VMS's SET FILE/ENTER
+ * does on a volume with the HARDLINKS characteristic, and raises the file's
+ * link count (FH2$W_LINKCOUNT) and attribute change date. Refused on any
+ * other volume (there the extra entries are mere aliases with no link count),
+ * for a directory, and for a file that has the maximum number of links. */
+ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
+                               ods2_fid_t target);
+
 /* RMS record attributes for a new file (FH2$W_RECATTR, spec 3.5.2.9).
    Record formats (FAT$B_RTYPE, sequential organization): */
 #define ODS2_RFM_UDF   0 /* FAB$C_UDF: undefined - a stream of bytes */

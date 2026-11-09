@@ -115,6 +115,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include "ods2_volume.h"
 #include "ods2_path.h"
 #include "ods2_wildcard.h"
@@ -1702,6 +1703,254 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
     }
 }
 
+/* A directory spelling's own header, with its literal name resolved: the
+   directory part of a path as resolve_dir() wants it. Shared by the
+   commands that make several things in one directory. */
+
+/* CREATE/SYMLINK=<target> <link-path>   (also SYMLINK <link-path> <target>):
+   a symbolic link as VMS V8.4 makes it. The target is literal text (as
+   typed: UTF-8, ISO Latin-1 characters only), not a spelling. */
+static void cmd_symlink(ods2_volume_t *vol, const ods2_parsed_path_t *p, const char *target)
+{
+    uint8_t dir_header[512];
+    ods2_fid_t dir_fid, new_fid;
+    char literal[ODS2_PATH_MAX], shown[ODS2_PATH_MAX];
+    ods2_result_t r;
+    char effective_dir[ODS2_PATH_MAX];
+
+    if (p->filename[0] == '\0') {
+        report_error("%%ODS2-E-BADPATH, no link name given\n");
+        return;
+    }
+    if (ods5_unescape(p->filename, strlen(p->filename), literal, sizeof(literal)) == (size_t) -1) {
+        report_error("%%ODS2-E-BADNAME, malformed ^ escape in the link name\n");
+        return;
+    }
+    resolve_effective_path(p, effective_dir, sizeof(effective_dir));
+    r = resolve_dir(vol, effective_dir, dir_header, &dir_fid);
+    if (!r.ok) {
+        report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
+        return;
+    }
+    r = ods2_create_symlink(vol, dir_header, literal, target, &new_fid);
+    if (!r.ok) {
+        report_error("%%ODS2-E-SYMLINK, %s\n", r.problem);
+        return;
+    }
+    {
+        char completed[ODS2_PATH_MAX];
+        if (ods5_complete_name(literal, completed, sizeof(completed))) {
+            display_name(completed, shown, sizeof(shown));
+        } else {
+            snprintf(shown, sizeof(shown), "%s", literal);
+        }
+    }
+    printf("%%ODS2-I-SYMLINK, %s;1 -> %s\n", shown, target);
+}
+
+/* LINK <new-path> <existing-path>   (also SET FILE/ENTER=<new-path> <existing-path>):
+   another directory entry for an existing file, on a HARDLINKS volume. */
+static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods2_parsed_path_t *ep)
+{
+    uint8_t dir_header[512], target_dir[512];
+    ods2_fid_t dir_fid, target_dir_fid, target_fid;
+    char literal[ODS2_PATH_MAX], tliteral[ODS2_PATH_MAX], effective_dir[ODS2_PATH_MAX];
+    ods2_result_t r;
+
+    if (np->filename[0] == '\0' || ep->filename[0] == '\0') {
+        report_error("%%ODS2-E-BADPATH, LINK needs a file name for the new entry and for the file\n");
+        return;
+    }
+    if (ods5_unescape(np->filename, strlen(np->filename), literal, sizeof(literal)) == (size_t) -1 ||
+        ods5_unescape(ep->filename, strlen(ep->filename), tliteral, sizeof(tliteral)) == (size_t) -1) {
+        report_error("%%ODS2-E-BADNAME, malformed ^ escape in a file name\n");
+        return;
+    }
+    resolve_effective_path(ep, effective_dir, sizeof(effective_dir));
+    r = resolve_dir(vol, effective_dir, target_dir, &target_dir_fid);
+    if (r.ok) r = ods2_lookup_name_version(vol, target_dir, tliteral, ep->version, &target_fid, NULL);
+    if (!r.ok) {
+        report_error("%%ODS2-E-FNF, the file to link to was not found\n");
+        return;
+    }
+    resolve_effective_path(np, effective_dir, sizeof(effective_dir));
+    r = resolve_dir(vol, effective_dir, dir_header, &dir_fid);
+    if (!r.ok) {
+        report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
+        return;
+    }
+    r = ods2_create_link(vol, dir_fid.fid_num, literal, target_fid);
+    if (!r.ok) {
+        report_error("%%ODS2-E-LINK, %s\n", r.problem);
+        return;
+    }
+    printf("%%ODS2-I-LINKED, %s;1 is a link to file (%u,%u,%u)\n", np->filename,
+           (unsigned) target_fid.fid_num, (unsigned) target_fid.fid_seq, (unsigned) target_fid.fid_rvn);
+}
+
+/* IMPORT <linux-directory> <path>: copies a Linux directory tree onto the
+   volume as EXPORT writes one: UTF-8 names (a "%2F" in a Linux name is a '/'
+   in the VMS name), directories made as needed, regular files as Stream_LF,
+   Linux symbolic links as VMS symbolic links (ODS-5). Names VMS would refuse
+   and files that already exist are reported and skipped. */
+typedef struct {
+    ods2_volume_t *vol;
+    int files, dirs, links, errors, skipped;
+    unsigned long long bytes;
+} import_stats_t;
+
+static int import_name_cmp(const struct dirent **a, const struct dirent **b)
+{
+    return strcmp((*a)->d_name, (*b)->d_name);
+}
+
+static void import_decode_name(const char *linux_name, char *out, size_t cap)
+{
+    size_t n = 0;
+    while (*linux_name && n + 1 < cap) {
+        if (linux_name[0] == '%' && linux_name[1] == '2' && (linux_name[2] == 'F' || linux_name[2] == 'f')) {
+            out[n++] = '/';
+            linux_name += 3;
+        } else {
+            out[n++] = *linux_name++;
+        }
+    }
+    out[n] = '\0';
+}
+
+static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_file_number, int depth)
+{
+    struct dirent **list = NULL;
+    int count, i;
+
+    if (depth > 200) {
+        report_error("%%ODS2-E-DEEP, %s: directories nested more than 200 levels\n", local_dir);
+        st->errors++;
+        return;
+    }
+    count = scandir(local_dir, &list, NULL, import_name_cmp);
+    if (count < 0) {
+        report_error("%%ODS2-E-OPENIN, could not read directory %s: %s\n", local_dir, strerror(errno));
+        st->errors++;
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        const char *entry = list[i]->d_name;
+        char path[ODS2_PATH_MAX * 2], literal[ODS2_PATH_MAX], shown[ODS2_PATH_MAX];
+        uint8_t dir_header[512];
+        struct stat sb;
+        ods2_result_t r;
+        ods2_fid_t fid;
+
+        if (strcmp(entry, ".") == 0 || strcmp(entry, "..") == 0) continue;
+        snprintf(path, sizeof(path), "%s/%s", local_dir, entry);
+        import_decode_name(entry, literal, sizeof(literal));
+        display_name(literal, shown, sizeof(shown));
+        if (lstat(path, &sb) != 0) {
+            report_error("%%ODS2-E-OPENIN, %s: %s\n", path, strerror(errno));
+            st->errors++;
+            continue;
+        }
+        r = ods2_read_header(st->vol, dir_file_number, dir_header);
+        if (!r.ok) {
+            report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
+            st->errors++;
+            continue;
+        }
+        if (S_ISDIR(sb.st_mode)) {
+            char dirname[ODS2_PATH_MAX + 8];
+            snprintf(dirname, sizeof(dirname), "%s.DIR", literal);
+            if (ods2_lookup_name(st->vol, dir_header, dirname, &fid).ok) {
+                /* already there: put the files into it */
+            } else {
+                r = ods2_create_directory(st->vol, dir_header, literal, &fid);
+                if (!r.ok) {
+                    report_error("%%ODS2-E-CREATEERR, %s: %s\n", shown, r.problem);
+                    st->errors++;
+                    continue;
+                }
+                st->dirs++;
+            }
+            import_tree(st, path, fid.fid_num, depth + 1);
+        } else if (S_ISREG(sb.st_mode)) {
+            host_input_t in;
+            ods2_content_source_t src;
+            ods2_record_attrs_t attrs;
+            if (ods2_lookup_name(st->vol, dir_header, literal, &fid).ok) {
+                fprintf(stderr, "%%ODS2-W-EXISTS, %s already exists: skipped\n", shown);
+                st->skipped++;
+                continue;
+            }
+            if (!host_input_open(path, &in)) {
+                st->errors++;
+                continue;
+            }
+            memset(&src, 0, sizeof(src));
+            src.length = in.length;
+            src.read = host_input_read;
+            src.ctx = &in;
+            src.problem = in.problem;
+            attrs.rtype = ODS2_RFM_STMLF;
+            attrs.rattrib = 0;
+            attrs.rsize = 512;
+            attrs.maxrec = 512;
+            r = ods2_create_file_source(st->vol, dir_header, literal, &src, &attrs, &fid);
+            fclose(in.f);
+            if (!r.ok) {
+                report_error("%%ODS2-E-COPYERR, %s: %s\n", shown, r.problem);
+                st->errors++;
+                continue;
+            }
+            st->files++;
+            st->bytes += in.length;
+        } else if (S_ISLNK(sb.st_mode)) {
+            char target[ODS5_SYMLINK_MAX + 2];
+            ssize_t n = readlink(path, target, sizeof(target) - 1);
+            if (n <= 0 || n > ODS5_SYMLINK_MAX) {
+                report_error("%%ODS2-E-SYMLINK, %s: cannot read the link or its target is too long\n", shown);
+                st->errors++;
+                continue;
+            }
+            target[n] = '\0';
+            r = ods2_create_symlink(st->vol, dir_header, literal, target, &fid);
+            if (!r.ok) {
+                report_error("%%ODS2-E-SYMLINK, %s: %s\n", shown, r.problem);
+                st->errors++;
+                continue;
+            }
+            st->links++;
+        } else {
+            fprintf(stderr, "%%ODS2-W-SPECIAL, %s is not a regular file, directory or link: skipped\n", shown);
+            st->skipped++;
+        }
+    }
+    for (i = 0; i < count; i++) free(list[i]);
+    free(list);
+}
+
+static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods2_parsed_path_t *p)
+{
+    import_stats_t st;
+    uint8_t dir_header[512];
+    ods2_fid_t dir_fid;
+    ods2_result_t r;
+    char effective_dir[ODS2_PATH_MAX];
+
+    memset(&st, 0, sizeof(st));
+    st.vol = vol;
+    resolve_effective_path(p, effective_dir, sizeof(effective_dir));
+    r = resolve_dir(vol, effective_dir, dir_header, &dir_fid);
+    if (!r.ok) {
+        report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
+        return;
+    }
+    import_tree(&st, local_dir, dir_fid.fid_num, 0);
+    printf("%%ODS2-I-IMPORTED, %d file%s (%llu bytes), %d director%s, %d symbolic link%s imported "
+           "from %s; %d skipped, %d error%s\n", st.files, st.files == 1 ? "" : "s", st.bytes,
+           st.dirs, st.dirs == 1 ? "y" : "ies", st.links, st.links == 1 ? "" : "s", local_dir,
+           st.skipped, st.errors, st.errors == 1 ? "" : "s");
+}
+
 /* "VOLUME", abbreviated to at least "VOL", with any qualifiers after
    it ("VOLUME/LABEL=X"). */
 static bool is_volume_word(const char *token)
@@ -2041,6 +2290,11 @@ static void print_help(void)
            "                             a text file as variable-length records with\n"
            "                             CR carriage control (VMS's native text), one\n"
            "                             per line; with /ATTRIBUTES for other RAT/MRS\n"
+           "  IMPORT <linux-dir> <path>  copy a Linux directory tree onto the disk (UTF-8 names,\n"
+           "                             directories made, symbolic links kept, ODS-5)\n"
+           "  SYMLINK <link-path> <target>   make a symbolic link (ODS-5; as CREATE/SYMLINK=target)\n"
+           "  LINK <new-path> <existing-path> another directory entry for a file, with its link\n"
+           "                             count (HARDLINKS volume; as SET FILE/ENTER=new existing)\n"
            "  TYPE path                  print a file's content\n"
            "  DELETE path                delete a file (one version) or empty directory\n"
            "  SET DEFAULT path           set the current default directory\n"
@@ -2273,6 +2527,52 @@ static bool execute_line(ods2_volume_t *vol, char *line)
         cmd_create_directory(vol, &p);
         return true;
     }
+    if (matches(verb, "SYMLINK") || matches(tokens[0], "CREATE/SYMLINK") ||
+        (quals != NULL && matches(verb, "CREATE") && matches(quals, "/SYMLINK"))) {
+        /* SYMLINK <link-path> <target>; CREATE/SYMLINK=<target> <link-path> (VMS) */
+        ods2_parsed_path_t p;
+        const char *target = NULL, *link = NULL;
+        if (quals != NULL && strchr(quals, '=') != NULL) {
+            target = strchr(quals, '=') + 1;
+            link = (n > 1) ? tokens[1] : NULL;
+        } else if (n > 2) {
+            link = tokens[1];
+            target = tokens[2];
+        }
+        if (link == NULL || target == NULL || target[0] == '\0') {
+            report_error("%%ODS2-E-NOPARM, usage: SYMLINK <link-path> <target>\n");
+            return true;
+        }
+        if (!ods2_parse_path(link, &p)) {
+            report_error("%%ODS2-E-BADPATH, could not parse %s\n", link);
+            return true;
+        }
+        if (refuse_wild_dir(&p, "SYMLINK", link)) return true;
+        cmd_symlink(vol, &p, target);
+        return true;
+    }
+    if (matches(verb, "LINK") || (matches(tokens[0], "SET") && n > 1 && strncmp(tokens[1], "FILE/ENTER=", 11) == 0)) {
+        /* LINK <new-path> <existing-path>; SET FILE/ENTER=<new-path> <existing-path> */
+        ods2_parsed_path_t np, ep;
+        const char *newp = NULL, *oldp = NULL;
+        if (matches(verb, "LINK")) {
+            if (n > 2) { newp = tokens[1]; oldp = tokens[2]; }
+        } else {
+            const char *eq = strchr(tokens[1], '=');
+            if (eq != NULL && n > 2) { newp = eq + 1; oldp = tokens[2]; }
+        }
+        if (newp == NULL || oldp == NULL) {
+            report_error("%%ODS2-E-NOPARM, usage: LINK <new-path> <existing-path>\n");
+            return true;
+        }
+        if (!ods2_parse_path(newp, &np) || !ods2_parse_path(oldp, &ep)) {
+            report_error("%%ODS2-E-BADPATH, could not parse the paths\n");
+            return true;
+        }
+        if (refuse_wild_dir(&np, "LINK", newp) || refuse_wild_dir(&ep, "LINK", oldp)) return true;
+        cmd_link(vol, &np, &ep);
+        return true;
+    }
     if (matches(verb, "COPY") || matches(verb, "PUT") || matches(verb, "IMPORT")) {
         ods2_parsed_path_t p;
         ods2_record_attrs_t attrs;
@@ -2295,6 +2595,18 @@ static bool execute_line(ods2_volume_t *vol, char *line)
             return true;
         }
         if (refuse_wild_dir(&p, "COPY", tokens[2])) return true;
+        {
+            struct stat sb;
+            if (matches(verb, "IMPORT") && stat(tokens[1], &sb) == 0 && S_ISDIR(sb.st_mode)) {
+                if (p.filename[0] != '\0') {
+                    report_error("%%ODS2-E-BADPATH, IMPORT of a directory needs a directory "
+                                 "path, not a file name\n");
+                    return true;
+                }
+                cmd_import_tree(vol, tokens[1], &p);
+                return true;
+            }
+        }
         cmd_copy(vol, tokens[1], &p, &attrs, &opts);
         return true;
     }

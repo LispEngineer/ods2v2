@@ -77,6 +77,8 @@ typedef struct {
                                    ("Read Me.txt;1"), stored in the
                                    FI5 ident area as ISO Latin-1 or
                                    UCS-2 (see ods5_names.h). */
+    bool           no_access_date; /* level 5: leave FI5$Q_ACCDATE zero, as VMS
+                                   does for a symbolic link */
     unsigned       level;      /* 0 or 2: a level 2 header with an FI2
                                    ident area (ODS-2); 5: a level 5
                                    header with an FI5 ident area,

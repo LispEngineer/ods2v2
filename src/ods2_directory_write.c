@@ -183,6 +183,13 @@ bool ods2_insert_dir_entry_level(uint8_t *block, size_t block_size,
                                  const char *name, uint16_t version, ods2_fid_t fid,
                                  unsigned level)
 {
+    return ods2_insert_dir_entry_flags(block, block_size, name, version, fid, level, 0);
+}
+
+bool ods2_insert_dir_entry_flags(uint8_t *block, size_t block_size,
+                                 const char *name, uint16_t version, ods2_fid_t fid,
+                                 unsigned level, uint8_t extra_flags)
+{
     size_t pos = 0;
     size_t insert_pos = (size_t) -1; /* not yet found */
     size_t end_pos; /* position of the sentinel (or end of valid content) */
@@ -202,7 +209,7 @@ bool ods2_insert_dir_entry_level(uint8_t *block, size_t block_size,
         unsigned type;
         if (!ods5_stored_name(name, stored, sizeof(stored), &namecount, &type)) return false;
         name_bytes = stored;
-        flags = (uint8_t) (type << ODS5_DIR_NAMETYPE_SHIFT);
+        flags = (uint8_t) ((type << ODS5_DIR_NAMETYPE_SHIFT) | extra_flags);
         verlimit = 32767;
     } else {
         name_bytes = (const uint8_t *) name;
