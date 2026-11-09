@@ -36,6 +36,10 @@
 #include <stdint.h>
 #include "ods2_volume.h"
 
+#define ODS2_INIT_SECURITY_PROFILE 0
+#define ODS2_INIT_SECURITY_EMPTY   1
+#define ODS2_INIT_SECURITY_ZERO    2
+
 typedef struct {
     uint64_t    blocks;      /* volume size in 512-byte blocks (at least 8192) */
     const char *label;       /* 1-12 characters, upper-cased; see ods2_make_volume_label() */
@@ -44,6 +48,8 @@ typedef struct {
                                 0x80 NO_SPECIAL_FILES are valid at level 5 only), NOHIGHWATER ... */
     unsigned    cluster;     /* cluster factor; 0 = the default for the size */
     uint32_t    maxfiles;    /* 0 = the default, blocks / (2 * cluster + 2) */
+    unsigned    security;    /* SECURITY.SYS (file 10) content: ODS2_INIT_SECURITY_PROFILE (the default),
+                                _EMPTY (EFBLK 1: nothing written) or _ZERO (one block of zeros) */
 } ods2_init_options_t;
 
 /* Creates the file `path` (which must not exist) as an empty volume. The

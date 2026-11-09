@@ -239,7 +239,7 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
                 ext[0].lbn = sec_lbn; ext[0].block_count = c;
                 spec.extents = ext; spec.extent_count = 1;
                 spec.hiblk = c;
-                spec.efblk = 2;
+                spec.efblk = (opt->security == ODS2_INIT_SECURITY_EMPTY) ? 1 : 2;
                 spec.highwater = c + 1;
                 break;
             default:
@@ -248,12 +248,50 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
             if (!ods2_build_file_header(hdr, &spec)) { fclose(img.f); remove(path); return fail("could not build a reserved file header"); }
             ((ods2_head_core_t *) hdr)->fileprot = files[n - 1].fileprot;
             if (level == ODS5_LEVEL_5) hdr[ODS5_FH2_LINKCOUNT] = 1; /* V8.4: link count 1 on ODS-5 volumes */
+            if (n == 10) {
+                /* VMS writes the volume's security profile into SECURITY.SYS right after creating
+                   it: revision 2, revised 0.06 s after it was created (corpus header dump) */
+                uint8_t *ident = hdr + ((ods2_head_core_t *) hdr)->idoffset * 2;
+                put16(ident + 20, 2);
+                ods2_store_vms_time(ident + 30, now + 600000);
+            }
             set_checksum(hdr, 255, 510);
             if (!put_block(&img, hdr_lbn0 + n - 1, hdr)) goto io_error;
             if (n == 1) {                                  /* the backup index file header: first block of its cluster */
                 if (!put_block(&img, alt_idx_lbn, hdr)) goto io_error;
             }
         }
+    }
+
+    /* ---- SECURITY.SYS block 1: the volume security profile ---- */
+    if (opt->security == ODS2_INIT_SECURITY_PROFILE) {
+        /* The record VMS INITIALIZE writes (read from VMS-made volumes: byte 8 on is the same
+           on every volume of V7.x and V8.4 measured, ODS5_FORMAT_NOTES.md 12): an 8-byte
+           identifier, the record length (90), then fixed items, and at the end the volume
+           label as a 12-byte field. The first eight bytes differ on every volume. */
+        static const uint8_t fixed[72] = {
+            0x5a, 0x00, 0x00, 0x00, 0x06, 0x00, 0x02, 0x00, 0, 0, 0, 0, 0, 0, 0, 0,
+            0x0c, 0x00, 0x08, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x06, 0x00, 0x02, 0x08, 0x08, 0x00,
+            0x0c, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x09, 0x00, 0x14, 0x00,
+            0xe0, 0xff, 0xff, 0xff, 0xe0, 0xff, 0xff, 0xff, 0xf0, 0xff, 0xff, 0xff, 0xf0, 0xff, 0xff, 0xff,
+            0x17, 0x00, 0x08, 0x00, 0, 0, 0, 0
+        };
+        uint8_t sec[512];
+        memset(sec, 0, sizeof(sec));
+        put32(sec + 0, (uint32_t) (now & 0xffffffffu));            /* identifier */
+        memcpy(sec + 8, fixed, sizeof(fixed));
+        put16(sec + 80 - 2, 0x14);                                 /* item type: the volume label */
+        put16(sec + 80, 12);
+        memcpy(sec + 82, label, 12);
+        {
+            int k;
+            for (k = 11; k >= 0 && sec[82 + k] == ' '; k--) sec[82 + k] = 0;   /* zero padded, as VMS writes it */
+        }
+        if (!put_block(&img, sec_lbn, sec)) goto io_error;
+    } else if (opt->security == ODS2_INIT_SECURITY_ZERO) {
+        uint8_t sec[512];
+        memset(sec, 0, sizeof(sec));
+        if (!put_block(&img, sec_lbn, sec)) goto io_error;
     }
 
     /* ---- index file bitmap: files 1-10 in use ---- */

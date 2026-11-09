@@ -35,6 +35,7 @@
  *     --nohighwater           HM2$M_NOHIGHWATER
  *     --cluster=N             cluster factor (default by size)
  *     --maxfiles=N            maximum number of files
+ *     --security=profile|empty|zero   what SECURITY.SYS holds (default: the profile record VMS writes)
  *
  * The image file must not exist yet; nothing is ever written to an existing file.
  */
@@ -90,6 +91,9 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--no-special-files") == 0) opt.volchar |= ODS5_VC_NO_SPECIAL_FILES;
         else if (strcmp(argv[i], "--nohighwater") == 0) opt.volchar |= ODS5_VC_NOHIGHWATER;
         else if (starts(argv[i], "--cluster=")) opt.cluster = (unsigned) atoi(argv[i] + 10);
+        else if (strcmp(argv[i], "--security=profile") == 0) opt.security = ODS2_INIT_SECURITY_PROFILE;
+        else if (strcmp(argv[i], "--security=empty") == 0) opt.security = ODS2_INIT_SECURITY_EMPTY;
+        else if (strcmp(argv[i], "--security=zero") == 0) opt.security = ODS2_INIT_SECURITY_ZERO;
         else if (starts(argv[i], "--maxfiles=")) opt.maxfiles = (uint32_t) strtoul(argv[i] + 11, NULL, 10);
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
     }

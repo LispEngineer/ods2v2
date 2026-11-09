@@ -43,6 +43,26 @@ for spec in "8192 5" "10000 2" "65536 5" "300M 5" "100M 2" "1G 5 --cluster=3" "1
         "$(python3 -I tests/ods5check.py "$img" | tail -1)"
 done
 
+# SECURITY.SYS: the profile record VMS INITIALIZE writes (label at +82), revision 2; --security=empty writes nothing
+img="$TMP/sec.img"
+$INIT "$img" 64M --label=SECLBL >/dev/null 2>&1
+check "SECURITY.SYS block 1 holds the security profile record with the label" "5a000000 SECLBL" \
+    "$(python3 -I - "$img" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'rb'); f.seek(512); h = f.read(512)
+base = struct.unpack_from('<I', h, 24)[0] + struct.unpack_from('<H', h, 32)[0]
+f.seek((base + 9) * 512); hdr = f.read(512)
+lbn = (((struct.unpack_from('<H', hdr, hdr[1] * 2)[0] >> 8) & 0x3f) << 16) | struct.unpack_from('<H', hdr, hdr[1] * 2 + 2)[0]
+f.seek(lbn * 512); b = f.read(512)
+print('%s %s' % (b[8:12].hex(), b[82:94].rstrip(b'\0').decode()))
+PY
+)"
+rm -f "$img"
+$INIT "$img" 64M --security=empty >/dev/null 2>&1
+check "--security=empty leaves SECURITY.SYS with EFBLK 1" "1" \
+    "$(./ods2_dump_header "$img" 10 2>/dev/null | sed -n 's/.*efblk(raw)=65536.*/1/p' | head -1)"
+rm -f "$img"
+
 img="$TMP/v5.img"
 $INIT "$img" 64M --structure=5 --hardlinks --access-dates >/dev/null 2>&1
 check "init --hardlinks --access-dates sets the characteristics" "ACCESS_DATES, HARDLINKS" \
