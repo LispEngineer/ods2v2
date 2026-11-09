@@ -46,7 +46,7 @@ done
 # SECURITY.SYS: the profile record VMS INITIALIZE writes (label at +82), revision 2; --security=empty writes nothing
 img="$TMP/sec.img"
 $INIT "$img" 64M --label=SECLBL >/dev/null 2>&1
-check "SECURITY.SYS block 1 holds the security profile record with the label" "5a000000 SECLBL" \
+check "SECURITY.SYS block 1: record length 82+label, label last, checksum = XOR of the longwords from offset 8" "88 SECLBL ok" \
     "$(python3 -I - "$img" <<'PY'
 import struct, sys
 f = open(sys.argv[1], 'rb'); f.seek(512); h = f.read(512)
@@ -54,7 +54,10 @@ base = struct.unpack_from('<I', h, 24)[0] + struct.unpack_from('<H', h, 32)[0]
 f.seek((base + 9) * 512); hdr = f.read(512)
 lbn = (((struct.unpack_from('<H', hdr, hdr[1] * 2)[0] >> 8) & 0x3f) << 16) | struct.unpack_from('<H', hdr, hdr[1] * 2 + 2)[0]
 f.seek(lbn * 512); b = f.read(512)
-print('%s %s' % (b[8:12].hex(), b[82:94].rstrip(b'\0').decode()))
+n = struct.unpack_from('<I', b, 8)[0]
+x = 0
+for k in range(8, n // 4 * 4, 4): x ^= struct.unpack_from('<I', b, k)[0]
+print('%d %s %s' % (n, b[82:n].decode(), 'ok' if x == struct.unpack_from('<I', b, 0)[0] and struct.unpack_from('<H', b, 80)[0] == n - 78 else 'BAD'))
 PY
 )"
 rm -f "$img"

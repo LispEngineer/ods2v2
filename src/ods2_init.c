@@ -254,28 +254,39 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
 
     /* ---- SECURITY.SYS block 1: the volume security profile ---- */
     if (opt->security == ODS2_INIT_SECURITY_PROFILE) {
-        /* The record VMS INITIALIZE writes (read from VMS-made volumes: byte 8 on is the same
-           on every volume of V7.x and V8.4 measured, ODS5_FORMAT_NOTES.md 12): an 8-byte
-           identifier, the record length (90), then fixed items, and at the end the volume
-           label as a 12-byte field. The first eight bytes differ on every volume. */
-        static const uint8_t fixed[72] = {
-            0x5a, 0x00, 0x00, 0x00, 0x06, 0x00, 0x02, 0x00, 0, 0, 0, 0, 0, 0, 0, 0,
-            0x0c, 0x00, 0x08, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x06, 0x00, 0x02, 0x08, 0x08, 0x00,
-            0x0c, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x09, 0x00, 0x14, 0x00,
-            0xe0, 0xff, 0xff, 0xff, 0xe0, 0xff, 0xff, 0xff, 0xf0, 0xff, 0xff, 0xff, 0xf0, 0xff, 0xff, 0xff,
-            0x17, 0x00, 0x08, 0x00, 0, 0, 0, 0
+        /* The record VMS INITIALIZE writes (V8.4 measured by ods5-vms on 13 volumes it initialized,
+           and the never-mounted VMS 7.x volume ods2-empty.dsk): longword 0 is a checksum, the XOR
+           of the whole longwords from offset 8 up to the record's length (a trailing partial longword is
+           left out); longword 1 is 0x220 on the [1,4] volumes measured (its meaning is not known; it
+           is not covered by the checksum); offset 8 the record length, 82 + the length of the label;
+           fixed items follow, among them the owner UIC at offset 28; the record ends with the label (type
+           0x14, item length = label length + 4). Whatever follows the record in VMS's block is leftover
+           memory and not needed. */
+        static const uint8_t fixed[66] = {      /* offsets 12 .. 77, as VMS V8.4 writes them (the owner UIC at 28 is set below) */
+            0x06, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x0c, 0x00, 0x08, 0x00, 0x04, 0x00, 0x01, 0x00, 0x02, 0x00, 0x06, 0x00,
+            0x02, 0x08, 0x08, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x09, 0x00, 0x14, 0x00, 0xe0, 0xff, 0xff, 0xff, 0xe0, 0xff,
+            0xff, 0xff, 0xf0, 0xff, 0xff, 0xff, 0xf0, 0xff, 0xff, 0xff, 0x17, 0x00,
+            0x08, 0x00, 0x00, 0x00, 0x00, 0x00
         };
         uint8_t sec[512];
+        size_t k, llen = 12, reclen;
+        uint32_t x = 0;
         memset(sec, 0, sizeof(sec));
-        put32(sec + 0, (uint32_t) (now & 0xffffffffu));            /* identifier */
-        memcpy(sec + 8, fixed, sizeof(fixed));
-        put16(sec + 80 - 2, 0x14);                                 /* item type: the volume label */
-        put16(sec + 80, 12);
-        memcpy(sec + 82, label, 12);
-        {
-            int k;
-            for (k = 11; k >= 0 && sec[82 + k] == ' '; k--) sec[82 + k] = 0;   /* zero padded, as VMS writes it */
+        while (llen > 0 && (label[llen - 1] == ' ')) llen--;
+        memcpy(sec + 12, fixed, 66);               /* 12 .. 77 */
+        put16(sec + 78, 0x14);                      /* item type: the volume label */
+        put16(sec + 80, (unsigned) llen + 4);       /* item length */
+        memcpy(sec + 82, label, llen);
+        reclen = 82 + llen;
+        put32(sec + 8, (uint32_t) reclen);
+        put16(sec + 28, 4); put16(sec + 30, 1);     /* owner UIC [1,4], as in the home block */
+        put32(sec + 4, opt->security_lw1_given ? opt->security_lw1 : 0x220);
+        for (k = 8; k + 4 <= reclen; k += 4) {
+            x ^= (uint32_t) sec[k] | ((uint32_t) sec[k + 1] << 8) | ((uint32_t) sec[k + 2] << 16) | ((uint32_t) sec[k + 3] << 24);
         }
+        put32(sec + 0, x);
         if (!put_block(&img, sec_lbn, sec)) goto io_error;
     } else if (opt->security == ODS2_INIT_SECURITY_ZERO) {
         uint8_t sec[512];

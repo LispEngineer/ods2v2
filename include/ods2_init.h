@@ -34,6 +34,7 @@
 #define ODS2_INIT_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "ods2_volume.h"
 
 #define ODS2_INIT_SECURITY_PROFILE 0
@@ -48,6 +49,8 @@ typedef struct {
                                 0x80 NO_SPECIAL_FILES are valid at level 5 only), NOHIGHWATER ... */
     unsigned    cluster;     /* cluster factor; 0 = the default for the size */
     uint32_t    maxfiles;    /* 0 = the default, blocks / (2 * cluster + 2) */
+    bool        security_lw1_given;  /* longword 1 of the security record: security_lw1 instead of 0x220 */
+    uint32_t    security_lw1;
     unsigned    security;    /* SECURITY.SYS (file 10) content: ODS2_INIT_SECURITY_PROFILE (the default),
                                 _EMPTY (EFBLK 1: nothing written) or _ZERO (one block of zeros) */
 } ods2_init_options_t;

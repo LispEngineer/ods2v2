@@ -94,6 +94,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--security=profile") == 0) opt.security = ODS2_INIT_SECURITY_PROFILE;
         else if (strcmp(argv[i], "--security=empty") == 0) opt.security = ODS2_INIT_SECURITY_EMPTY;
         else if (strcmp(argv[i], "--security=zero") == 0) opt.security = ODS2_INIT_SECURITY_ZERO;
+        else if (starts(argv[i], "--security-lw1=")) { opt.security_lw1_given = true; opt.security_lw1 = (uint32_t) strtoul(argv[i] + 15, NULL, 0); }
         else if (starts(argv[i], "--maxfiles=")) opt.maxfiles = (uint32_t) strtoul(argv[i] + 11, NULL, 10);
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
     }
