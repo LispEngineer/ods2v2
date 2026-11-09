@@ -634,6 +634,45 @@ static void test_directory_revision(void)
     printf("PASS: an entry inserted in place leaves a directory's revision count and date alone (as VMS)\n");
 }
 
+/* Batch phvs2-w1 (OpenVMS VAX V7.3): a directory that ods2v2 made on ODS-2 with EOF block 1 / FFBYTE 2 passed that FFBYTE
+   on to the directory VAX CREATE/DIRECTORY made inside it (EOF 2,2: BADIRECTORY). New directories have EOF 2/0 as VMS makes them,
+   and writing into an old one puts its end-of-file right (count and date untouched). */
+static void test_directory_eof(void)
+{
+    ods2_init_options_t opt;
+    ods2_volume_t vol;
+    uint8_t root[512], d[512];
+    ods2_fid_t sub;
+    uint16_t sum;
+    unsigned level;
+
+    for (level = 2; level <= 5; level += 3) {
+        uint16_t rev_before;
+        memset(&opt, 0, sizeof(opt));
+        opt.blocks = 8192; opt.label = "DIREOF"; opt.level = level;
+        remove(DISK_PATH);
+        assert(ods2_initialize(DISK_PATH, &opt).ok);
+        assert(ods2_mount_write(DISK_PATH, &vol).ok);
+        root_header(&vol, root);
+        assert(ods2_create_directory(&vol, root, "sub", &sub).ok);
+        assert(ods2_read_header(&vol, sub.fid_num, d).ok);
+        assert(rd16(d + 28) == 0 && rd16(d + 30) == 2 && rd16(d + 32) == 0);   /* EFBLK 2 (word swapped), FFBYTE 0 */
+        /* make it the old kind: EFBLK 1, FFBYTE 2 */
+        d[28] = 0; d[29] = 0; d[30] = 1; d[31] = 0; d[32] = 2; d[33] = 0;
+        sum = ods2_checksum(d, 255); d[510] = (uint8_t) (sum & 0xff); d[511] = (uint8_t) (sum >> 8);
+        assert(ods2_write_header(&vol, sub.fid_num, d).ok);
+        rev_before = rd16(d + 80 + (level == 5 ? ODS5_FI5_REVISION : 20));
+        make_file(&vol, sub.fid_num, "one.txt", "x", 1);
+        assert(ods2_read_header(&vol, sub.fid_num, d).ok);
+        assert(rd16(d + 28) == 0 && rd16(d + 30) == 2 && rd16(d + 32) == 0);   /* put right by the write */
+        assert(ods2_file_content_length(d) == 512);
+        assert(rd16(d + 80 + (level == 5 ? ODS5_FI5_REVISION : 20)) == rev_before);
+        ods2_dismount(&vol);
+        remove(DISK_PATH);
+    }
+    printf("PASS: a directory with the old EOF (block 1, byte 2) gets EOF block 2, byte 0 when written to; new directories have it\n");
+}
+
 int main(void)
 {
     ods2_volume_t vol;
@@ -1003,6 +1042,7 @@ int main(void)
     test_fragmented();
     test_linkcount_and_failures();
     test_directory_revision();
+    test_directory_eof();
     printf("\nods5_write_selftest: all checks passed\n");
     return 0;
 }
