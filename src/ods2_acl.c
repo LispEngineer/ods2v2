@@ -27,11 +27,21 @@
  */
 #include "ods2_acl.h"
 #include "ods2_ondisk.h"
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
-#define ACE_TYPE_ID 1u        /* identifier ACE */
-#define ACE_FLAG_DEFAULT 0x0100u       /* measured: the directory default-protection ACE has flags word 0x0100 */
+/* ACE types and flag bits, as measured on VMS V8.4-2L2 (ODS5_FORMAT_NOTES 15.8) */
+#define ACE_TYPE_ID 1u         /* identifier ACE */
+#define ACE_TYPE_DEFPROT 9u    /* DEFAULT_PROTECTION */
+#define ACE_TYPE_AUDIT 5u      /* AUDIT=class */
+#define ACE_TYPE_ALARM 6u      /* ALARM=class */
+#define ACE_TYPE_CREATOR 13u   /* CREATOR */
+#define ACE_FLAG_DEFAULT 0x0100u
+#define ACE_FLAG_PROTECTED 0x0200u
+#define ACE_FLAG_NOPROPAGATE 0x0800u
+#define ACE_FLAG_SUCCESS 0x0001u   /* audit and alarm ACEs */
+#define ACE_FLAG_FAILURE 0x0002u
 
 static uint32_t rd32(const uint8_t *p)
 {
@@ -40,12 +50,14 @@ static uint32_t rd32(const uint8_t *p)
 
 void ods2_acl_format_id(uint32_t id, char *out, size_t cap)
 {
-    if (id == 0x80000005u) {            /* measured on V8.4: IDENTIFIER=NETWORK */
-        snprintf(out, cap, "NETWORK");
-    } else if ((id & 0x80000000u) == 0) {
+    static const char *const system_ids[] = { NULL, "BATCH", "DIALUP", "INTERACTIVE", "LOCAL", "NETWORK", "REMOTE" };
+    if ((id & 0xFFFFFFF8u) == 0x80000000u && (id & 7u) >= 1 && (id & 7u) <= 6) {
+        snprintf(out, cap, "%s", system_ids[id & 7u]);   /* measured: BATCH 1 DIALUP 2 INTERACTIVE 3 LOCAL 4 NETWORK 5 REMOTE 6 */
+    } else if ((id & 0xC0000000u) == 0) {
         unsigned group = id >> 16, member = id & 0xFFFFu;
         char g[16], m[16];
-        if (group == 0xFFFFu) snprintf(g, sizeof(g), "*"); else snprintf(g, sizeof(g), "%o", group);
+        /* wildcards (measured): group 0x3FFF, member 0xFFFF */
+        if (group == 0x3FFFu) snprintf(g, sizeof(g), "*"); else snprintf(g, sizeof(g), "%o", group);
         if (member == 0xFFFFu) snprintf(m, sizeof(m), "*"); else snprintf(m, sizeof(m), "%o", member);
         snprintf(out, cap, "[%s,%s]", g, m);
     } else {
@@ -53,7 +65,7 @@ void ods2_acl_format_id(uint32_t id, char *out, size_t cap)
     }
 }
 
-static void format_access(uint32_t a, char *out, size_t cap)
+static void format_access(uint32_t a, unsigned flags, int with_sf, char *out, size_t cap)
 {
     static const struct { uint32_t bit; const char *name; } names[] = {
         { 1, "READ" }, { 2, "WRITE" }, { 4, "EXECUTE" }, { 8, "DELETE" }, { 16, "CONTROL" } };
@@ -63,7 +75,20 @@ static void format_access(uint32_t a, char *out, size_t cap)
         if (a & names[i].bit) n += (size_t) snprintf(out + n, cap - n, "%s%s", n ? "+" : "", names[i].name);
     }
     if (a & ~31u) n += (size_t) snprintf(out + n, cap - n, "%s%%X%X", n ? "+" : "", (unsigned) (a & ~31u));
+    if (with_sf) {
+        if (flags & ACE_FLAG_SUCCESS) n += (size_t) snprintf(out + n, cap - n, "%sSUCCESS", n ? "+" : "");
+        if (flags & ACE_FLAG_FAILURE) n += (size_t) snprintf(out + n, cap - n, "%sFAILURE", n ? "+" : "");
+    }
     if (n == 0) snprintf(out, cap, "NONE");
+}
+
+/* a protection mask (a set bit denies): R W E D, then C */
+static void format_prot(uint32_t denied, char *out, size_t cap)
+{
+    static const char letters[] = "RWEDC";
+    size_t n = 0, i;
+    for (i = 0; i < 5 && n + 1 < cap; i++) if (!(denied & (1u << i))) out[n++] = letters[i];
+    out[n] = '\0';
 }
 
 size_t ods2_acl_walk(const uint8_t *header, void (*visit)(void *, const char *), void *ctx)
@@ -76,22 +101,57 @@ size_t ods2_acl_walk(const uint8_t *header, void (*visit)(void *, const char *),
         unsigned size = header[o], type = header[o + 1];
         unsigned flags = (unsigned) header[o + 2] | (unsigned) header[o + 3] << 8;
         char text[512];
+        bool done = false;
         if (o + size > end || size < 4) {
             snprintf(text, sizeof(text), "(damaged ACE at offset %zu)", o);
             visit(ctx, text);
             return count + 1;
         }
-        if (type == ACE_TYPE_ID && size >= 12 && (size - 8) % 4 == 0 && (flags & ~ACE_FLAG_DEFAULT) == 0) {
-            char ids[256] = "", acc[128], one[32];
+        if (type == ACE_TYPE_ID && size >= 12 && (size - 8) % 4 == 0 &&
+            (flags & ~(ACE_FLAG_DEFAULT | ACE_FLAG_PROTECTED | ACE_FLAG_NOPROPAGATE)) == 0) {
+            char ids[256] = "", acc[128], one[32], opts[64] = "";
             size_t k, n = 0;
             for (k = 8; k < size; k += 4) {
                 ods2_acl_format_id(rd32(header + o + k), one, sizeof(one));
                 n += (size_t) snprintf(ids + n, sizeof(ids) - n, "%s%s", k > 8 ? "+" : "", one);
             }
-            format_access(rd32(header + o + 4), acc, sizeof(acc));
-            snprintf(text, sizeof(text), "(IDENTIFIER=%s%s,ACCESS=%s)", ids,
-                     (flags & ACE_FLAG_DEFAULT) ? ",OPTIONS=DEFAULT" : "", acc);
-        } else {
+            if (flags & (ACE_FLAG_DEFAULT | ACE_FLAG_PROTECTED | ACE_FLAG_NOPROPAGATE)) {
+                snprintf(opts, sizeof(opts), ",OPTIONS=%s%s%s%s%s",
+                         (flags & ACE_FLAG_DEFAULT) ? "DEFAULT" : "",
+                         ((flags & ACE_FLAG_DEFAULT) && (flags & (ACE_FLAG_PROTECTED | ACE_FLAG_NOPROPAGATE))) ? "+" : "",
+                         (flags & ACE_FLAG_PROTECTED) ? "PROTECTED" : "",
+                         ((flags & ACE_FLAG_PROTECTED) && (flags & ACE_FLAG_NOPROPAGATE)) ? "+" : "",
+                         (flags & ACE_FLAG_NOPROPAGATE) ? "NOPROPAGATE" : "");
+            }
+            format_access(rd32(header + o + 4), 0, 0, acc, sizeof(acc));
+            snprintf(text, sizeof(text), "(IDENTIFIER=%s%s,ACCESS=%s)", ids, opts, acc);
+            done = true;
+        } else if (type == ACE_TYPE_CREATOR && size == 8 && flags == 0) {
+            char acc[128];
+            format_access(rd32(header + o + 4), 0, 0, acc, sizeof(acc));
+            snprintf(text, sizeof(text), "(CREATOR,ACCESS=%s)", acc);
+            done = true;
+        } else if ((type == ACE_TYPE_AUDIT || type == ACE_TYPE_ALARM) && size >= 8 &&
+                   (flags & ~(ACE_FLAG_SUCCESS | ACE_FLAG_FAILURE)) == 0) {
+            char acc[128], cls[64];
+            size_t cl = size - 8;
+            if (cl >= sizeof(cls)) cl = sizeof(cls) - 1;
+            memcpy(cls, header + o + 8, cl);
+            while (cl > 0 && (cls[cl - 1] == ' ' || cls[cl - 1] == '\0')) cl--;
+            cls[cl] = '\0';
+            format_access(rd32(header + o + 4), flags, 1, acc, sizeof(acc));
+            snprintf(text, sizeof(text), "(%s=%s,ACCESS=%s)", type == ACE_TYPE_ALARM ? "ALARM" : "AUDIT", cls, acc);
+            done = true;
+        } else if (type == ACE_TYPE_DEFPROT && size == 24 && flags == 0 && rd32(header + o + 4) == 0) {
+            char s_[8], o_[8], g_[8], w_[8];
+            format_prot(rd32(header + o + 8), s_, sizeof(s_));
+            format_prot(rd32(header + o + 12), o_, sizeof(o_));
+            format_prot(rd32(header + o + 16), g_, sizeof(g_));
+            format_prot(rd32(header + o + 20), w_, sizeof(w_));
+            snprintf(text, sizeof(text), "(DEFAULT_PROTECTION,SYSTEM:%s,OWNER:%s,GROUP:%s,WORLD:%s)", s_, o_, g_, w_);
+            done = true;
+        }
+        if (!done) {
             size_t k, n = (size_t) snprintf(text, sizeof(text), "(ACE type %u, flags %%X%04X, data", type, flags);
             for (k = 4; k < size && n + 4 < sizeof(text); k++) n += (size_t) snprintf(text + n, sizeof(text) - n, " %02X", header[o + k]);
             snprintf(text + n, sizeof(text) - n, ")");

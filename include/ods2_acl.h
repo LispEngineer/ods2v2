@@ -28,9 +28,13 @@
  *
  * The ACL area of a header lies between FH2$B_ACOFFSET*2 and FH2$B_RSOFFSET*2 (an
  * offset of 255 means "none"). Each ACE: size (1 byte), type (1), flags (2), then data.
- * Layouts decoded here are those measured on VMS-made volumes (ODS5_FORMAT_NOTES.md 15):
- *   type 1 (identifier ACE), size 12 + 4 per extra identifier: access (4), identifier(s) (4 each).
- * Every other ACE is shown as its raw bytes, so that nothing is hidden.
+ * Layouts decoded here are those measured on VMS-made volumes (ODS5_FORMAT_NOTES.md 15.2, 15.8):
+ *   type 1 identifier ACE, size 12 + 4 per extra identifier: access (4), identifier(s) (4 each); flags
+ *     0x0100 DEFAULT, 0x0200 PROTECTED, 0x0800 NOPROPAGATE;
+ *   type 13 CREATOR (size 8: access); type 9 DEFAULT_PROTECTION (size 24: 0, then the system, owner,
+ *     group and world masks, a set bit denying); types 5 AUDIT and 6 ALARM (size 16: access, the 8-byte
+ *     class name; flags 1 SUCCESS, 2 FAILURE).
+ * Every other ACE (and any unmeasured flag) is shown as its raw bytes, so that nothing is hidden.
  */
 #ifndef ODS2_ACL_H
 #define ODS2_ACL_H

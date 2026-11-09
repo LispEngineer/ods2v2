@@ -86,6 +86,40 @@ int main(void)
 
     ods2_acl_format_id(0x80010001u, id, sizeof(id)); check("unnamed general identifier in hex", strcmp(id, "%X80010001") == 0);
 
+
+    /* batch m3 (VMS V8.4-2L2, ACLS.LOG): the bytes of the ACEs SET ACL made and VMS's own text */
+    {
+        struct { const char *name; uint8_t b[32]; size_t n; const char *vms; } t[] = {
+            { "INTERACTIVE", {0x0c,1,0,0, 1,0,0,0, 3,0,0,0x80}, 12, "(IDENTIFIER=INTERACTIVE,ACCESS=READ)" },
+            { "BATCH", {0x0c,1,0,0, 1,0,0,0, 1,0,0,0x80}, 12, "(IDENTIFIER=BATCH,ACCESS=READ)" },
+            { "DIALUP", {0x0c,1,0,0, 1,0,0,0, 2,0,0,0x80}, 12, "(IDENTIFIER=DIALUP,ACCESS=READ)" },
+            { "LOCAL", {0x0c,1,0,0, 1,0,0,0, 4,0,0,0x80}, 12, "(IDENTIFIER=LOCAL,ACCESS=READ)" },
+            { "NETWORK", {0x0c,1,0,0, 1,0,0,0, 5,0,0,0x80}, 12, "(IDENTIFIER=NETWORK,ACCESS=READ)" },
+            { "REMOTE", {0x0c,1,0,0, 1,0,0,0, 6,0,0,0x80}, 12, "(IDENTIFIER=REMOTE,ACCESS=READ)" },
+            { "[200,*]", {0x0c,1,0,0, 1,0,0,0, 0xff,0xff,0x80,0}, 12, "(IDENTIFIER=[200,*],ACCESS=READ)" },
+            { "[*,1]", {0x0c,1,0,0, 1,0,0,0, 1,0,0xff,0x3f}, 12, "(IDENTIFIER=[*,1],ACCESS=READ)" },
+            { "[*,*]", {0x0c,1,0,0, 1,0,0,0, 0xff,0xff,0xff,0x3f}, 12, "(IDENTIFIER=[*,*],ACCESS=READ)" },
+            { "three identifiers", {0x14,1,0,0, 1,0,0,0, 2,0,1,0, 5,0,0,0x80, 1,0,0,0x80}, 20, "(IDENTIFIER=[1,2]+NETWORK+BATCH,ACCESS=READ)" },
+            { "all accesses", {0x0c,1,0,0, 0x1f,0,0,0, 3,0,1,0}, 12, "(IDENTIFIER=[1,3],ACCESS=READ+WRITE+EXECUTE+DELETE+CONTROL)" },
+            { "PROTECTED", {0x0c,1,0,0x02, 1,0,0,0, 5,0,1,0}, 12, "(IDENTIFIER=[1,5],OPTIONS=PROTECTED,ACCESS=READ)" },
+            { "NOPROPAGATE", {0x0c,1,0,0x08, 1,0,0,0, 6,0,1,0}, 12, "(IDENTIFIER=[1,6],OPTIONS=NOPROPAGATE,ACCESS=READ)" },
+            { "CREATOR", {0x08,0x0d,0,0, 1,0,0,0}, 8, "(CREATOR,ACCESS=READ)" },
+            { "DEFAULT_PROTECTION", {0x18,9,0,0, 0,0,0,0, 0x10,0,0,0, 0x18,0,0,0, 0x1e,0,0,0, 0x1f,0,0,0}, 24,
+              "(DEFAULT_PROTECTION,SYSTEM:RWED,OWNER:RWE,GROUP:R,WORLD:)" },
+            { "ALARM", {0x10,6,2,0, 3,0,0,0, 'S','E','C','U','R','I','T','Y'}, 16, "(ALARM=SECURITY,ACCESS=READ+WRITE+FAILURE)" },
+            { "ALARM, all", {0x10,6,3,0, 0x1f,0,0,0, 'S','E','C','U','R','I','T','Y'}, 16,
+              "(ALARM=SECURITY,ACCESS=READ+WRITE+EXECUTE+DELETE+CONTROL+SUCCESS+FAILURE)" },
+            { "AUDIT", {0x10,5,3,0, 1,0,0,0, 'S','E','C','U','R','I','T','Y'}, 16, "(AUDIT=SECURITY,ACCESS=READ+SUCCESS+FAILURE)" },
+        };
+        size_t k;
+        for (k = 0; k < sizeof(t) / sizeof(t[0]); k++) {
+            ngot = 0;
+            header_with(h, t[k].b, t[k].n);
+            check(t[k].name, ods2_acl_walk(h, visit, NULL) == 1 && strcmp(got[0], t[k].vms) == 0);
+            if (strcmp(got[0], t[k].vms) != 0) printf("  got %s\n", got[0]);
+        }
+    }
+
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("all ods2_acl checks passed\n");
     return 0;
