@@ -198,7 +198,7 @@ def main():
             if mine in vmd5[fid]:
                 match['sequential, raw bytes' if org == 0 else 'non-sequential, raw bytes'] += 1
             elif org in (1, 2):
-                match['Indexed/Relative: VMS hashes the records in key order'] += 1
+                match['Indexed/Relative: MD5 of the raw bytes differs from VMS's (not established what VMS hashes; not compared)'] += 1
                 log('CONTENT Indexed/Relative file %s (organisation %d): the MD5 of its bytes differs, as expected' % (fid, org))
             else:
                 match['MISMATCH'] += 1; problems += 1

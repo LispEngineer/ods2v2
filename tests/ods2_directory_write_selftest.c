@@ -80,15 +80,22 @@ int main(void)
     assert(entries[0].fid.fid_num == 11);
     printf("PASS: insert into an empty block, read back correctly\n");
 
-    /* Explicit check: DIR$W_VERLIMIT must be 1, matching every real
-       VMS-written record examined (000000.DIR, BACKUP.SYS, INDEXF.SYS,
-       etc. all show 1) - not 0, despite the spec summary calling this
-       field "ignored".  Visible difference from every native
-       entry, found by dumping actual bytes from a real disk. */
+    /* DIR$W_VERLIMIT of a new entry: 32767 (no limit), as on every user file of every VMS-made volume read (the 1 of
+       the reserved files' entries made VMS purge version 1 when version 2 was made: physical VAX96, 9-NOV-2026),
+       or the default version limit of the directory it goes into (ods2_insert_dir_entry_vl). */
     {
         uint16_t verlimit = (uint16_t) block[2] | ((uint16_t) block[3] << 8);
-        assert(verlimit == 1);
-        printf("PASS: DIR$W_VERLIMIT is 1, matching real VMS-written records\n");
+        uint8_t vb[512];
+        ods2_fid_t vf = fid;
+        assert(verlimit == 32767);
+        memset(vb, 0, sizeof(vb));
+        vb[0] = 0xff; vb[1] = 0xff;
+        assert(ods2_insert_dir_entry_vl(vb, sizeof(vb), "LIMITED.TXT", 1, vf, 2, 0, 3));
+        assert(((uint16_t) vb[2] | ((uint16_t) vb[3] << 8)) == 3);
+        assert(ods2_set_dir_entry_verlimit(vb, sizeof(vb), "limited.txt", 32767) == 1);
+        assert(((uint16_t) vb[2] | ((uint16_t) vb[3] << 8)) == 32767);
+        assert(ods2_set_dir_entry_verlimit(vb, sizeof(vb), "OTHER.TXT", 5) == 0);
+        printf("PASS: DIR$W_VERLIMIT is 32767 (or the directory's default); SET FILE/VERSION_LIMIT's block routine\n");
     }
 
     /* Test 2: insert a second entry into the same block. */

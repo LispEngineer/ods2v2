@@ -452,6 +452,7 @@ def main():
         used_blocks = max(used_blocks, 0)
         where = 'dir %d (%s)' % (n, d['name'] if d else '?')
         lst = []
+        vl1 = []
         prevkey = None
         for bi in range(used_blocks):
             blk = data[bi * 512:(bi + 1) * 512]
@@ -494,6 +495,8 @@ def main():
                 if (size + 2 - (ent - pos)) % 8:
                     fnd.err('%s: record %r: odd tail length' % (where, nm))
                 vl = u16(blk, pos + 2)
+                if vl == 1 and not (n == 4 and (nm.upper().endswith('.SYS') or nm.upper() == '000000.DIR')):
+                    vl1.append(nm)
                 key = fold_name(nm if '.' in nm else nm + '.')
                 if v.level == 5 and not (flags & 0x40):
                     exp = stored_type_for(nm if '.' in nm else nm + '.')
@@ -521,6 +524,12 @@ def main():
                 nrec += 1
             if nrec == 0 and used_blocks > 1 and False:
                 fnd.err('%s block %d: empty block inside the EOF' % (where, bi + 1))
+        if vl1:
+            # every entry of a VMS-made volume has a version limit of 32767 or the directory's default (and explicit
+            # SET FILE/VERSION_LIMIT values, never 1: AXP1SYS has 40,000); ods2v2 wrote 1 on ODS-2 volumes until
+            # the fix, and VMS then purges version 1 of such a file as soon as it makes version 2
+            fnd.warn('%s: %d entries have version limit 1, e.g. %r: VMS purges version 1 when it makes version 2 '
+                     '(ods2v2 before the fix wrote this; SET FILE/VERSION_LIMIT=32767 puts it right)' % (where, len(vl1), vl1[0]))
         seen_nv = set()
         for ent in lst:
             key = (ent[0], ent[2])   # exact: the VMS-made asim8 ODS-5 disk has lp.COM and LP.COM in one directory
@@ -534,8 +543,9 @@ def main():
     for dn, lst in entries.items():
         for nm, ntype, ver, fid, flags, vl in lst:
             fnum = fid[0] | (fid[3] << 16)
-            referenced.add(fnum)
             hd = headers.get(fnum)
+            if hd is None or u16(hd, 10) == fid[1]:
+                referenced.add(fnum)
             if hd is None:
                 if fnum in pending:
                     # VMS removes the entry before it frees anything; on the VMS-made AXP1 system disk none of
@@ -547,7 +557,15 @@ def main():
                     fnd.err('dir %d: %r;%d -> file %d has no valid header' % (dn, nm, ver, fnum))
                 continue
             if u16(hd, 10) != fid[1]:
-                fnd.err('dir %d: %r;%d -> file %d: sequence %d, header has %d' % (dn, nm, ver, fnum, fid[1], u16(hd, 10)))
+                if u16(hd, 10) > fid[1]:
+                    # VMS gives a reused file number a new sequence number. On a volume without HARDLINKS,
+                    # deleting the primary name of a file leaves its other names in place (measured, notes
+                    # 15), so an entry with an older sequence number is a stale alias VMS itself makes.
+                    fnd.warn('dir %d: %r;%d -> file %d: a stale alias (entry sequence %d, the file now using the number has %d)'
+                             % (dn, nm, ver, fnum, fid[1], u16(hd, 10)))
+                else:
+                    fnd.err('dir %d: %r;%d -> file %d: sequence %d, header has %d' % (dn, nm, ver, fnum, fid[1], u16(hd, 10)))
+                continue
             bl = u16(hd, 66) | (hd[71] << 16)
             if bl == dn:
                 dir_of_primary.setdefault(fnum, []).append((nm, ver))

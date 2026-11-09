@@ -26,6 +26,7 @@
 #include "ods5_names.h"
 #include <ctype.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 bool ods2_wildcard_match(const char *pattern, const char *name)
@@ -38,15 +39,15 @@ bool ods2_wildcard_match(const char *pattern, const char *name)
 
 /* --- Directory specifications (see ods2_wildcard.h) --- */
 
-/* Deeper than any real volume: VMS allows 8 directory levels, and
-   ellipses only shorten what has to be written down. */
-#define MAX_DIR_TOKENS 256
+/* A name is at most this many characters as written (with its ^ escapes). The number of names in a
+   specification or path is not limited: the tokens are allocated, so that a tree as deep as a volume can hold
+   (VMS V7.3-2 made 400 levels; a walk must not lose the part below some fixed depth) is matched like any other. */
 #define MAX_DIR_NAME   768
 
 typedef struct {
     bool ellipsis;              /* "..." rather than a name */
     const char *start;          /* where it begins in the source string */
-    char name[MAX_DIR_NAME];    /* the name, nul-terminated (not for "...") */
+    size_t len;                 /* the length of the name as written (not for "...") */
 } dir_token_t;
 
 static bool starts_ellipsis(const char *s)
@@ -54,31 +55,33 @@ static bool starts_ellipsis(const char *s)
     return s[0] == '.' && s[1] == '.' && s[2] == '.';
 }
 
-/* Splits a spec (allow_ellipsis) or a concrete path (!allow_ellipsis)
-   into tokens. Returns the count, or -1 if malformed or too long. */
-static int tokenize_dir(const char *s, dir_token_t *toks, bool allow_ellipsis)
+/* Splits a spec (allow_ellipsis) or a concrete path (!allow_ellipsis) into tokens, allocated in *toks (free()
+   it). Returns the count, or -1 if malformed (or out of memory); *toks is then NULL. */
+static int tokenize_dir(const char *s, dir_token_t **toks_out, bool allow_ellipsis)
 {
     int n = 0;
     size_t i = 0;
+    dir_token_t *toks = malloc((strlen(s) / 2 + 2) * sizeof(*toks));
 
+    *toks_out = NULL;
+    if (toks == NULL) return -1;
     while (s[i] != '\0') {
-        if (n == MAX_DIR_TOKENS) return -1;
         if (allow_ellipsis && starts_ellipsis(s + i)) {
             toks[n].ellipsis = true;
             toks[n].start = s + i;
-            toks[n].name[0] = '\0';
+            toks[n].len = 0;
             n++;
             i += 3;
             /* After an ellipsis: the end, a name straight away
                ("A...B"), or one separating dot then a name
                ("A....B" - VMS accepts both). */
             if (s[i] == '.') {
-                if (s[i + 1] == '\0' || s[i + 1] == '.') return -1;
+                if (s[i + 1] == '\0' || s[i + 1] == '.') goto bad;
                 i++;
             }
             continue;
         }
-        if (s[i] == '.') return -1; /* empty name */
+        if (s[i] == '.') goto bad; /* empty name */
         {
             size_t len = 0;
             toks[n].ellipsis = false;
@@ -89,26 +92,43 @@ static int tokenize_dir(const char *s, dir_token_t *toks, bool allow_ellipsis)
                 if (s[i + len] == '^' && s[i + len + 1] != '\0') len++;
                 len++;
             }
-            if (len >= MAX_DIR_NAME) return -1;
-            memcpy(toks[n].name, s + i, len);
-            toks[n].name[len] = '\0';
-            /* A concrete path's names are literal: the characters their
-               spellings stand for, to be matched against a spec's pattern. */
-            if (!allow_ellipsis) {
-                char literal[MAX_DIR_NAME];
-                size_t k = ods5_unescape(toks[n].name, len, literal, sizeof(literal));
-                if (k != (size_t) -1) memcpy(toks[n].name, literal, k + 1);
-            }
+            if (len >= MAX_DIR_NAME) goto bad;
+            toks[n].len = len;
             n++;
             i += len;
         }
         if (s[i] == '.') {
             if (allow_ellipsis && starts_ellipsis(s + i)) continue;
             i++; /* separator */
-            if (s[i] == '\0') return -1; /* trailing dot */
+            if (s[i] == '\0') goto bad; /* trailing dot */
         }
     }
+    *toks_out = toks;
     return n;
+bad:
+    free(toks);
+    return -1;
+}
+
+/* The name of a token as a NUL-terminated string in out (MAX_DIR_NAME bytes). A concrete path's names are literal:
+   the characters their spellings stand for, to be matched against a spec's pattern. */
+static void token_text(const dir_token_t *t, bool literal, char *out)
+{
+    memcpy(out, t->start, t->len);
+    out[t->len] = '\0';
+    if (literal) {
+        char lit[MAX_DIR_NAME];
+        size_t k = ods5_unescape(out, t->len, lit, sizeof(lit));
+        if (k != (size_t) -1) memcpy(out, lit, k + 1);
+    }
+}
+
+static bool token_match(const dir_token_t *p, const dir_token_t *c)
+{
+    char pat[MAX_DIR_NAME], name[MAX_DIR_NAME];
+    token_text(p, false, pat);
+    token_text(c, true, name);
+    return ods2_wildcard_match(pat, name);
 }
 
 static bool match_tokens(const dir_token_t *p, int np, const dir_token_t *c, int nc)
@@ -119,7 +139,7 @@ static bool match_tokens(const dir_token_t *p, int np, const dir_token_t *c, int
         return match_tokens(p + 1, np - 1, c, nc) ||
                (nc > 0 && match_tokens(p, np, c + 1, nc - 1));
     }
-    return nc > 0 && ods2_wildcard_match(p[0].name, c[0].name) &&
+    return nc > 0 && token_match(&p[0], &c[0]) &&
            match_tokens(p + 1, np - 1, c + 1, nc - 1);
 }
 
@@ -132,14 +152,16 @@ static bool descend_tokens(const dir_token_t *p, int np, const dir_token_t *c, i
         return descend_tokens(p + 1, np - 1, c, nc) ||
                descend_tokens(p, np, c + 1, nc - 1);
     }
-    return ods2_wildcard_match(p[0].name, c[0].name) &&
+    return token_match(&p[0], &c[0]) &&
            descend_tokens(p + 1, np - 1, c + 1, nc - 1);
 }
 
 bool ods2_dir_spec_valid(const char *spec)
 {
-    dir_token_t toks[MAX_DIR_TOKENS];
-    return tokenize_dir(spec, toks, true) >= 0;
+    dir_token_t *toks;
+    int n = tokenize_dir(spec, &toks, true);
+    free(toks);
+    return n >= 0;
 }
 
 /* '*', '%' or '?' that is not escaped by a ^. */
@@ -166,37 +188,47 @@ bool ods2_dir_spec_has_wildcard(const char *spec)
 
 bool ods2_dir_spec_match(const char *spec, const char *path)
 {
-    dir_token_t p[MAX_DIR_TOKENS], c[MAX_DIR_TOKENS];
-    int np = tokenize_dir(spec, p, true);
-    int nc = tokenize_dir(path, c, false);
-    if (np < 0 || nc < 0) return false;
-    return match_tokens(p, np, c, nc);
+    dir_token_t *p, *c;
+    int np = tokenize_dir(spec, &p, true);
+    int nc = tokenize_dir(path, &c, false);
+    bool r = np >= 0 && nc >= 0 && match_tokens(p, np, c, nc);
+    free(p);
+    free(c);
+    return r;
 }
 
 bool ods2_dir_spec_could_descend(const char *spec, const char *path)
 {
-    dir_token_t p[MAX_DIR_TOKENS], c[MAX_DIR_TOKENS];
-    int np = tokenize_dir(spec, p, true);
-    int nc = tokenize_dir(path, c, false);
-    if (np < 0 || nc < 0) return false;
-    return descend_tokens(p, np, c, nc);
+    dir_token_t *p, *c;
+    int np = tokenize_dir(spec, &p, true);
+    int nc = tokenize_dir(path, &c, false);
+    bool r = np >= 0 && nc >= 0 && descend_tokens(p, np, c, nc);
+    free(p);
+    free(c);
+    return r;
 }
 
 const char *ods2_dir_spec_split_prefix(const char *spec, char *prefix_out,
                                        size_t prefix_out_size)
 {
-    dir_token_t toks[MAX_DIR_TOKENS];
-    int n = tokenize_dir(spec, toks, true);
+    dir_token_t *toks;
+    int n = tokenize_dir(spec, &toks, true);
     int k = 0;
     size_t prefix_len = 0;
+    const char *rest;
 
     if (n < 0 || prefix_out_size == 0) return NULL;
-    while (k < n && !toks[k].ellipsis && !ods2_dir_spec_has_wildcard(toks[k].name)) {
-        prefix_len = (size_t) (toks[k].start - spec) + strlen(toks[k].name);
+    while (k < n && !toks[k].ellipsis) {
+        char name[MAX_DIR_NAME];
+        token_text(&toks[k], false, name);
+        if (ods2_dir_spec_has_wildcard(name)) break;
+        prefix_len = (size_t) (toks[k].start - spec) + toks[k].len;
         k++;
     }
+    rest = (k < n) ? toks[k].start : spec + strlen(spec);
+    free(toks);
     if (prefix_len >= prefix_out_size) return NULL;
     memcpy(prefix_out, spec, prefix_len);
     prefix_out[prefix_len] = '\0';
-    return (k < n) ? toks[k].start : spec + strlen(spec);
+    return rest;
 }

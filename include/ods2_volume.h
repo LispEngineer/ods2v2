@@ -63,6 +63,7 @@ typedef struct {
        Not for callers to touch. */
     struct ods2_txn *txn;
     int            txn_depth;
+    uint32_t       volsize;      /* SCB$L_VOLSIZE of BITMAP.SYS (0 if it could not be read): no write goes at or past it */
     bool           write_failed; /* sticky: a change failed part way through its write; no more writes on this mount */
 } ods2_volume_t;
 
@@ -107,6 +108,10 @@ void ods2_dismount(ods2_volume_t *vol);
    exists. Reads any header, primary or extension (seg_num > 0). */
 /* The FID of a directory entry or header link, as something this code can follow: RVN 0 (a volume set is
    not supported), NMX 0 until 24-bit file numbers are. */
+/* The problem ods2_read_header_fid() gives for an entry whose file is gone (a stale alias: a VMS state, compare
+   r.problem with it, not an I/O or format error). */
+extern const char ods2_stale_entry[];
+
 ods2_result_t ods2_check_fid(ods2_fid_t fid);
 
 /* Reads the header the FID names; refuses a FID ods2_check_fid() refuses. Use this, not ods2_read_header()
@@ -288,6 +293,9 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
  */
 ods2_result_t ods2_indexf_map_extent(uint8_t *indexf_header, uint32_t lbn, unsigned block_count);
 
+/* Directories between [000000] and the directory with this header (0 for [000000] itself). */
+ods2_result_t ods2_directory_depth(ods2_volume_t *vol, const uint8_t *dir_header, unsigned *depth_out);
+
 /* Creates a new, empty subdirectory named `name` (e.g. "NETLIB020",
  * without ".DIR" - that's appended internally, matching VMS
  * convention) within the directory described by `parent_header`.
@@ -354,6 +362,17 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
  * on a volume without HARDLINKS; VMS keeps no count there) is dangling, and its slot may since have
  * been reused by another file: VMS then says "no such file" (measured, ODS5_FORMAT_NOTES 15.7). */
 bool ods2_header_is_file(const uint8_t *header, ods2_fid_t fid);
+
+/* SIMH disk container footer: simh/simh appends 512 bytes ("simh" signature, then simulator, drive type, sizes, a CRC)
+   to a raw disk container it opens for write. 0: none. 1: the image is the volume plus the footer (the footer is not
+   volume data and is never read or written). 2: the footer lies inside the volume (on an image of 4 GiB or more a
+   32-bit overflow puts it into the last data block): the last block may be lost, and the volume is not mounted for
+   write. msg describes it. */
+int ods2_image_footer(ods2_volume_t *vol, char *msg, size_t cap);
+
+/* True, with a message in msg, when the storage control block (BITMAP.SYS VBN 1) is one OpenVMS ANALYZE would
+   call invalid (%ANALDISK-W-CHKSCB); read only. */
+bool ods2_scb_problem(ods2_volume_t *vol, char *msg, size_t cap);
 
 /* RMS record attributes for a new file (FH2$W_RECATTR, spec 3.5.2.9).
    Record formats (FAT$B_RTYPE, sequential organization): */
@@ -456,6 +475,11 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
 ods2_result_t ods2_read_file_stream(ods2_volume_t *vol, const uint8_t *header,
                                      bool (*sink)(void *ctx, const uint8_t *data, size_t n),
                                      void *ctx, size_t *bytes_out, bool *sink_failed_out);
+
+/* SET FILE/VERSION_LIMIT: sets the version limit of the entries named `name` in the directory (all versions); *changed
+ * is the number of directory records changed. For volumes written before ods2v2 gave entries VMS's limit (32767). */
+ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
+                                           uint16_t limit, unsigned *changed);
 
 /* Inserts (name, version, fid) into the directory whose header is at
  * `dir_file_number`, trying each of its existing content blocks

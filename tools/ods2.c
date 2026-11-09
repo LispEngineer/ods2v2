@@ -132,7 +132,7 @@
 #include "ods5_names.h"
 #include "ods5_header.h"
 
-#define MAX_LINE 1024
+#define MAX_LINE 8192   /* a command line; a longer one is refused, never cut (a cut path names another file) */
 #define MAX_TOKENS 8
 
 /* Current default directory for this session (SET DEFAULT), dot-
@@ -363,11 +363,13 @@ static void display_name(const char *literal, char *out, size_t cap)
 
 /* The names of a bracketed path (dot-separated spelling) joined with '/',
    as UTF-8 literals: "Lots^.Of^.Periods.X" -> "Lots.Of.Periods/X". */
-static void spelling_to_slash_path(const char *spelling, char *out, size_t cap)
+static char *spelling_to_slash_path(const char *spelling)
 {
     const char *p = spelling;
-    size_t len = 0;
+    size_t len = 0, cap = strlen(spelling) * 3 + 8;   /* a name grows at most threefold (%XX) */
+    char *out = malloc(cap);
 
+    if (out == NULL) return NULL;
     out[0] = '\0';
     while (*p) {
         const char *end = p;
@@ -386,10 +388,11 @@ static void spelling_to_slash_path(const char *spelling, char *out, size_t cap)
             }
         }
         len += (size_t) snprintf(out + len, cap - len, "/%s", literal);
-        if (len >= cap) { out[cap - 1] = '\0'; return; }
+        if (len >= cap) { len = cap - 1; out[len] = '\0'; break; }   /* cannot happen: cap covers the longest result */
         p = end;
         if (*p == '.') p++;
     }
+    return out;
 }
 
 static const char *rfm_name(unsigned rtype)
@@ -598,8 +601,8 @@ static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_d
                 continue;
             }
             if (g_paths_mode) {
-                char slash[ODS2_PATH_MAX];
-                spelling_to_slash_path(dir_path, slash, sizeof(slash));
+                char *slash = spelling_to_slash_path(dir_path);
+                if (slash == NULL) { report_error("%%ODS2-E-NOMEM, out of memory\n"); return shown; }
                 {
                     /* a '/' inside a name would read as a separator, a control character
                        would reach the terminal: %XX, as EXPORT does */
@@ -609,6 +612,7 @@ static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_d
                     }
                     printf("%s/%s;%u", slash, safe, entries[i].version);
                 }
+                free(slash);
                 if (g_paths_fid) {
                     printf("\t%u,%u,%u", ods2_fid_number(entries[i].fid),
                            (unsigned) entries[i].fid.fid_seq, (unsigned) entries[i].fid.fid_rvn);
@@ -695,10 +699,38 @@ static void canonical_dir_path(ods2_volume_t *vol, char *path, size_t cap)
     snprintf(path, cap, "%s", result);
 }
 
-/* VMS allows 255 directory levels; this is a finite backstop against a
-   directory cycle on a corrupted disk image. */
-#define MAX_RECURSION_DEPTH 255
+/* A tree as deep as the volume holds is walked: OpenVMS V7.3-2 made 400 levels, and its own wildcard walk stops
+   at 256, so a VMS-made volume can hold more than ods2v2 creates (255) and more than VMS lists. The walk keeps
+   the path in one growing string and a small frame per level, so that the depth is limited by memory and by
+   this bound on the C stack only; a tree deeper than the bound is reported, never cut off silently. */
+#define WALK_MAX_DEPTH 2048
 #define MAX_DIR_VISITS 1000000
+
+/* A growing string. */
+typedef struct { char *s; size_t len, cap; } gstr_t;
+
+static bool gstr_append(gstr_t *g, const char *add, size_t n)
+{
+    if (g->len + n + 1 > g->cap) {
+        size_t cap = g->cap ? g->cap : 256;
+        char *ns;
+        while (cap < g->len + n + 1) cap *= 2;
+        ns = realloc(g->s, cap);
+        if (ns == NULL) return false;
+        g->s = ns;
+        g->cap = cap;
+    }
+    memcpy(g->s + g->len, add, n);
+    g->len += n;
+    g->s[g->len] = '\0';
+    return true;
+}
+
+static void gstr_truncate(gstr_t *g, size_t len)
+{
+    g->len = len;
+    if (g->s != NULL) g->s[len] = '\0';
+}
 
 /* State for one DIR across a wildcard directory spec. */
 typedef struct {
@@ -711,33 +743,34 @@ typedef struct {
     int files_shown;
     int errors;
     long visits;                   /* directories read so far, aliases counted each time */
-    /* The directories on the current recursion path, [0..depth]: their
-       FIDs and absolute paths, to refuse an entry that points back at
-       one of them (a loop). Aliases that are not ancestors are still
-       followed, as VMS does. */
-    ods2_fid_t path_fid[MAX_RECURSION_DEPTH + 1];
-    const char *path_name[MAX_RECURSION_DEPTH + 1];
+    gstr_t abs;                    /* the absolute path of the directory being walked, as a spelling */
+    gstr_t rel;                    /* the same relative to where the walk began */
+    /* The directories on the current recursion path, [0..depth]: their FIDs and the length of their absolute
+       path in `abs`, to refuse an entry that points back at one of them (a loop). Aliases that are not
+       ancestors are still followed, as VMS does. */
+    ods2_fid_t *path_fid;
+    size_t *path_len;
+    size_t path_cap;
 } dir_walk_t;
 
 /* Walks the tree below the start directory depth first, in directory
  * order (alphabetical, as VMS stores them), listing every directory
- * whose path relative to the start matches w->spec. `abs_path` is the
- * directory's absolute path, `rel_path` the same directory relative to
- * where the walk began ("" for the start itself). Subtrees that cannot
- * contain a match are never read. This one walk serves every DIR:
- * "[A]" (spec "" - just the start), "[A...]" (spec "..."), "[*]",
- * "[*...]", "[A...B]" and so on. */
-static void walk_directories(dir_walk_t *w, const char *abs_path, const char *rel_path,
-                             int depth)
+ * whose path relative to the start matches w->spec. The directory is
+ * given by its header and FID; w->abs holds its absolute path, w->rel the
+ * same directory relative to where the walk began ("" for the start
+ * itself). Subtrees that cannot contain a match are never read. This one
+ * walk serves every DIR: "[A]" (spec "" - just the start), "[A...]" (spec
+ * "..."), "[*]", "[*...]", "[A...B]" and so on. */
+static void walk_directories(dir_walk_t *w, ods2_fid_t dir_fid, int depth)
 {
-    uint8_t dir_header[512];
-    ods2_fid_t dir_fid;
     ods2_dir_entry_t *entries = NULL;
+    uint8_t dir_header[512];
     int count = 0, i;
     ods2_result_t r;
-    bool here = ods2_dir_spec_match(w->spec, rel_path);
-    bool deeper = ods2_dir_spec_could_descend(w->spec, rel_path);
+    bool here = ods2_dir_spec_match(w->spec, w->rel.s);
+    bool deeper = ods2_dir_spec_could_descend(w->spec, w->rel.s);
     char *bufs;
+    size_t abs_len = w->abs.len, rel_len = w->rel.len;
 
     if (!here && !deeper) return;
     /* A directory reached through aliases is read again each time, as on VMS (the V8.4
@@ -751,38 +784,52 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
         }
         return;
     }
-    if (depth > MAX_RECURSION_DEPTH) {
-        report_error("%%ODS2-E-TOODEEP, recursion limit reached, skipping "
-                        "subtree under [%s]\n", abs_path);
-        w->errors++;
-        return;
-    }
-
-    r = resolve_dir(w->vol, abs_path, dir_header, &dir_fid);
+    r = ods2_read_header_fid(w->vol, dir_fid, dir_header);
     if (!r.ok) {
-        report_error("%%ODS2-E-DIRERR, [%s]: %s\n", abs_path, r.problem);
+        report_error("%%ODS2-E-DIRERR, [%s]: %s\n", w->abs.s, r.problem);
         w->errors++;
         return;
     }
     r = ods2_list_directory_alloc(w->vol, dir_header, &entries, &count);
     if (!r.ok) {
-        report_error("%%ODS2-E-LISTERR, [%s]: %s\n", abs_path, r.problem);
+        report_error("%%ODS2-E-LISTERR, [%s]: %s\n", w->abs.s, r.problem);
         w->errors++;
         return;
     }
-
+    if (depth >= WALK_MAX_DEPTH) {
+        report_error("%%ODS2-E-TOODEEP, [%s] is more than %d levels deep: this directory (%d entries) and "
+                     "everything below it are skipped\n", w->abs.s, WALK_MAX_DEPTH, count);
+        w->errors++;
+        free(entries);
+        return;
+    }
+    if ((size_t) depth >= w->path_cap) {
+        size_t nc = w->path_cap ? w->path_cap * 2 : 64;
+        ods2_fid_t *nf = realloc(w->path_fid, nc * sizeof(*nf));
+        size_t *nl;
+        if (nf != NULL) w->path_fid = nf;
+        nl = nf != NULL ? realloc(w->path_len, nc * sizeof(*nl)) : NULL;
+        if (nl != NULL) w->path_len = nl;
+        if (nf == NULL || nl == NULL) {
+            report_error("%%ODS2-E-NOMEM, out of memory walking [%s]\n", w->abs.s);
+            w->errors++;
+            free(entries);
+            return;
+        }
+        w->path_cap = nc;
+    }
     w->path_fid[depth] = dir_fid;
-    w->path_name[depth] = abs_path;
-    bufs = malloc(3 * (size_t) ODS2_PATH_MAX);
+    w->path_len[depth] = abs_len;
+    bufs = malloc(2 * (size_t) ODS2_PATH_MAX);
     if (bufs == NULL) {
-        report_error("%%ODS2-E-NOMEM, out of memory listing [%s]\n", abs_path);
+        report_error("%%ODS2-E-NOMEM, out of memory listing [%s]\n", w->abs.s);
         w->errors++;
         free(entries);
         return;
     }
 
     if (here) {
-        int shown = show_directory(w->vol, abs_path, entries, count, w->pattern, w->p);
+        int shown = show_directory(w->vol, w->abs.s, entries, count, w->pattern, w->p);
         if (shown > 0) {
             w->dirs_shown++;
             w->files_shown += shown;
@@ -791,11 +838,10 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
 
     for (i = 0; deeper && i < count; i++) {
         uint8_t sub_header[512];
-        char *name = bufs, *child_abs = bufs + ODS2_PATH_MAX,
-             *child_rel = bufs + 2 * ODS2_PATH_MAX;
-        char shown[ODS2_PATH_MAX];
+        char *name = bufs, *shown = bufs + ODS2_PATH_MAX;
         size_t len;
-        int a, b;
+        bool ok_path;
+        int d, loop = -1;
 
         /* Skip self-referential entries - root's own directory always
            contains a "000000.DIR" entry pointing straight back at
@@ -819,58 +865,94 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
         name[len - 4] = '\0';
         /* the path component is written as a spelling: a dot in a
            directory name is ^. , a space ^_ ... (it is a bracketed path) */
-        if (ods5_escape_name(name, 0, shown, sizeof(shown)) == (size_t) -1) {
+        if (ods5_escape_name(name, 0, shown, ODS2_PATH_MAX) == (size_t) -1) {
             report_error("%%ODS2-E-PATHTOOLONG, directory name too long, "
-                            "skipping subtree under [%s]\n", abs_path);
+                            "skipping subtree under [%s]\n", w->abs.s);
             w->errors++;
             continue;
         }
-        snprintf(name, ODS2_PATH_MAX, "%s", shown);
-
-        a = snprintf(child_abs, ODS2_PATH_MAX, "%s%s%s", abs_path,
-                     abs_path[0] ? "." : "", name);
-        b = snprintf(child_rel, ODS2_PATH_MAX, "%s%s%s", rel_path,
-                     rel_path[0] ? "." : "", name);
-        if (a < 0 || (size_t) a >= (size_t) ODS2_PATH_MAX || b < 0 ||
-            (size_t) b >= (size_t) ODS2_PATH_MAX) {
-            report_error("%%ODS2-E-PATHTOOLONG, path too deep to represent, "
-                            "skipping subtree under [%s]\n", abs_path);
+        /* the child's path: appended to the one string, taken off again after the walk below it */
+        ok_path = (w->abs.len == 0 || gstr_append(&w->abs, ".", 1)) &&
+                  gstr_append(&w->abs, shown, strlen(shown)) &&
+                  (w->rel.len == 0 || gstr_append(&w->rel, ".", 1)) &&
+                  gstr_append(&w->rel, shown, strlen(shown));
+        if (!ok_path) {
+            report_error("%%ODS2-E-NOMEM, out of memory walking [%s]\n", w->abs.s);
             w->errors++;
+            gstr_truncate(&w->abs, abs_len);
+            gstr_truncate(&w->rel, rel_len);
             continue;
         }
         /* Cheap name test before reading the entry's header. */
-        if (!ods2_dir_spec_match(w->spec, child_rel) &&
-            !ods2_dir_spec_could_descend(w->spec, child_rel)) {
-            continue;
+        if (!ods2_dir_spec_match(w->spec, w->rel.s) &&
+            !ods2_dir_spec_could_descend(w->spec, w->rel.s)) {
+            goto next;
         }
         /* Is it really a directory? Checked via its own header's
            FH2$M_DIRECTORY bit (0x2000), not just the .DIR suffix. */
         r = ods2_read_header_fid(w->vol, entries[i].fid, sub_header);
+        if (!r.ok && r.problem != ods2_stale_entry) {
+            /* not a stale alias (a VMS state: the name is listed, nothing is below it) but a header that cannot
+               be read: a whole subtree would be missing, so it is said (and the exit status is 1) */
+            report_error("%%ODS2-E-DIRERR, [%s]: %s\n", w->abs.s, r.problem);
+            w->errors++;
+            goto next;
+        }
         if (!r.ok || !(((ods2_head_core_t *) sub_header)->filechar & 0x2000u)) {
-            continue;
+            goto next;
         }
         /* An entry naming a directory already on the path is a loop:
            warn instead of descending until the depth limit. */
-        {
-            int d, loop = -1;
-            for (d = 0; d <= depth; d++) {
-                if (ods2_fid_number(w->path_fid[d]) == ods2_fid_number(entries[i].fid) &&
-                    w->path_fid[d].fid_seq == entries[i].fid.fid_seq) {
-                    loop = d;
-                    break;
-                }
-            }
-            if (loop >= 0) {
-                fprintf(stderr, "%%ODS2-W-DIRLOOP, [%s] is the directory [%s] "
-                                "again; not descended into\n",
-                        child_abs, w->path_name[loop][0] ? w->path_name[loop] : "000000");
-                continue;
+        for (d = 0; d <= depth; d++) {
+            if (ods2_fid_number(w->path_fid[d]) == ods2_fid_number(entries[i].fid) &&
+                w->path_fid[d].fid_seq == entries[i].fid.fid_seq) {
+                loop = d;
+                break;
             }
         }
-        walk_directories(w, child_abs, child_rel, depth + 1);
+        if (loop >= 0) {
+            fprintf(stderr, "%%ODS2-W-DIRLOOP, [%s] is the directory [%.*s] "
+                            "again; not descended into\n",
+                    w->abs.s, w->path_len[loop] ? (int) w->path_len[loop] : 6,
+                    w->path_len[loop] ? w->abs.s : "000000");
+            goto next;
+        }
+        walk_directories(w, entries[i].fid, depth + 1);
+next:
+        gstr_truncate(&w->abs, abs_len);
+        gstr_truncate(&w->rel, rel_len);
     }
     free(bufs);
     free(entries);
+}
+
+/* Starts a walk at the directory `start` (a path spelling, "" for [000000]): resolved once, then walked by FID.
+   Returns false (and reports) if the start cannot be found. */
+static bool walk_from(dir_walk_t *w, const char *start)
+{
+    uint8_t header[512];
+    ods2_fid_t fid;
+    ods2_result_t r = resolve_dir(w->vol, start, header, &fid);
+
+    if (!r.ok) {
+        report_error("%%ODS2-E-DIRERR, [%s]: %s\n", start, r.problem);
+        w->errors++;
+        return false;
+    }
+    if (!gstr_append(&w->abs, start, strlen(start)) || !gstr_append(&w->rel, "", 0)) {
+        report_error("%%ODS2-E-NOMEM, out of memory\n");
+        w->errors++;
+        return false;
+    }
+    walk_directories(w, fid, 0);
+    free(w->abs.s);
+    free(w->rel.s);
+    free(w->path_fid);
+    free(w->path_len);
+    w->abs.s = w->rel.s = NULL;
+    w->path_fid = NULL;
+    w->path_len = NULL;
+    return true;
 }
 
 /* DIR, following VMS DIRECTORY: '*' and '%' may appear in any
@@ -918,7 +1000,7 @@ static void cmd_dir(ods2_volume_t *vol, const ods2_parsed_path_t *p)
     }
     w.pattern = file_pattern;
     w.p = p;
-    walk_directories(&w, start, "", 0);
+    walk_from(&w, start);
 
     if (g_paths_mode) {
         if (w.dirs_shown == 0 && w.errors == 0) fprintf(stderr, "%%ODS2-W-NOFILES, no files found\n");
@@ -947,6 +1029,8 @@ typedef struct {
     int files, symlinks, dirs_skipped, specials_skipped, errors;
     struct seen_fid { unsigned num; uint16_t seq; char *path; } *seen;
     size_t seen_count, seen_cap;
+    char *long_dir;           /* the first directory whose Linux path was too long: [long_dir] and below are not made */
+    int long_dirs;            /* directories not made for that reason (the first is named, the rest counted) */
 } export_ctx_t;
 
 /* A name made safe for one Linux path component. */
@@ -1070,6 +1154,37 @@ static bool file_sink(void *ctx, const uint8_t *data, size_t n)
     return true;
 }
 
+/* The Linux directory for a VMS directory spelling below the export's start: x->local plus one component per level.
+   False when the path would be 4,000 characters or more (the host's limit is 4,096): the caller reports it for
+   the file or directory concerned, and nothing is ever cut short. */
+#define EXPORT_PATH_LIMIT 4000
+static bool linux_dir_for(const export_ctx_t *x, const char *dir_spelling, char *out, size_t cap)
+{
+    const char *rel = dir_spelling + strlen(x->start);
+    size_t len;
+
+    if (*rel == '.' && x->start[0] != '\0') rel++;
+    len = (size_t) snprintf(out, cap, "%s", x->local);
+    if (len >= cap || len >= EXPORT_PATH_LIMIT) return false;
+    if (!x->tree) return true;
+    while (*rel) {
+        const char *end = rel;
+        char lit[ODS2_PATH_MAX], comp[ODS2_DIR_MAX_NAME * 3 + 16];
+        size_t ul;
+        while (*end && *end != '.') { if (*end == '^' && end[1]) end++; end++; }
+        ul = ods5_unescape(rel, (size_t) (end - rel), lit, sizeof(lit));
+        if (ul == (size_t) -1) snprintf(lit, sizeof(lit), "%.*s", (int) (end - rel), rel);
+        linux_component(lit, comp, sizeof(comp));
+        if (len + strlen(comp) + 2 >= EXPORT_PATH_LIMIT || len + strlen(comp) + 2 >= cap) return false;
+        out[len++] = '/';
+        memcpy(out + len, comp, strlen(comp) + 1);
+        len += strlen(comp);
+        rel = end;
+        if (*rel == '.') rel++;
+    }
+    return true;
+}
+
 static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spelling,
                          const ods2_dir_entry_t *e)
 {
@@ -1100,33 +1215,28 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
             /* tree mode: every directory is recreated, empty ones too */
             size_t nl = strlen(e->name);
             char dname[ODS2_DIR_MAX_NAME + 8], dcomp[ODS2_DIR_MAX_NAME * 3 + 16], dpath[ODS2_PATH_MAX * 3];
-            const char *rel = dir_spelling + strlen(x->start);
-            if (*rel == '.' && x->start[0] != '\0') rel++;
             if (nl > 4 && ods2_dir_name_compare(e->name + nl - 4, 4, ".DIR", 4) == 0) {
+                char parent[ODS2_PATH_MAX * 2];
                 snprintf(dname, sizeof(dname), "%.*s", (int) (nl - 4), e->name);
                 linux_component(dname, dcomp, sizeof(dcomp));
-                {
-                    /* the Linux path of the directory it sits in, as for a file below */
-                    char parent[ODS2_PATH_MAX * 2];
-                    snprintf(parent, sizeof(parent), "%s", x->local);
-                    while (*rel) {
-                        const char *end = rel;
-                        char lit[ODS2_PATH_MAX], comp2[ODS2_DIR_MAX_NAME * 3 + 16];
-                        size_t ul;
-                        while (*end && *end != '.') { if (*end == '^' && end[1]) end++; end++; }
-                        ul = ods5_unescape(rel, (size_t) (end - rel), lit, sizeof(lit));
-                        if (ul == (size_t) -1) snprintf(lit, sizeof(lit), "%.*s", (int) (end - rel), rel);
-                        linux_component(lit, comp2, sizeof(comp2));
-                        if (strlen(parent) + strlen(comp2) + 2 < sizeof(parent)) {
-                            strcat(parent, "/");
-                            strcat(parent, comp2);
-                        }
-                        rel = end;
-                        if (*rel == '.') rel++;
+                if (!linux_dir_for(x, dir_spelling, parent, sizeof(parent)) ||
+                    strlen(parent) + strlen(dcomp) + 2 >= EXPORT_PATH_LIMIT) {
+                    /* the first such directory is named; those below it (every one of them is too long too) are
+                       counted and summarised at the end, so that one deep tree does not print hundreds of lines */
+                    x->errors++;
+                    x->long_dirs++;
+                    if (x->long_dir == NULL) {
+                        size_t ln = strlen(dir_spelling) + strlen(shown) + 3;
+                        x->long_dir = malloc(ln);
+                        if (x->long_dir != NULL) snprintf(x->long_dir, ln, "%s%s%s", dir_spelling, dir_spelling[0] ? "." : "", dname);
+                        report_error("%%ODS2-E-PATHTOOLONG, [%s]%s: the Linux path would be too long; this directory "
+                                     "and everything below it are not copied (the files in it are named one by one)\n",
+                                     dir_spelling, shown);
                     }
-                    snprintf(dpath, sizeof(dpath), "%s/%s", parent, dcomp);
+                    return;
                 }
-                if (strlen(dpath) < 4000 && make_local_dirs(dpath, strlen(x->local))) return;
+                snprintf(dpath, sizeof(dpath), "%s/%s", parent, dcomp);
+                if (make_local_dirs(dpath, strlen(x->local))) return;
                 report_error("%%ODS2-E-MKDIR, cannot create %s: %s\n", dpath, strerror(errno));
                 x->errors++;
                 return;
@@ -1143,32 +1253,10 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
     }
 
     /* the Linux directory */
-    {
-        bool too_long = false;
-        snprintf(dirpath, sizeof(dirpath), "%s", x->local);
-        if (x->tree) {
-            const char *rel = dir_spelling + strlen(x->start);
-            if (*rel == '.' && x->start[0] != '\0') rel++;
-            while (*rel) {
-                const char *end = rel;
-                char lit[ODS2_PATH_MAX];
-                size_t ul;
-                while (*end && *end != '.') { if (*end == '^' && end[1]) end++; end++; }
-                ul = ods5_unescape(rel, (size_t) (end - rel), lit, sizeof(lit));
-                if (ul == (size_t) -1) snprintf(lit, sizeof(lit), "%.*s", (int) (end - rel), rel);
-                linux_component(lit, comp, sizeof(comp));
-                if (strlen(dirpath) + strlen(comp) + 2 >= 4000) { too_long = true; break; }
-                strcat(dirpath, "/");
-                strcat(dirpath, comp);
-                rel = end;
-                if (*rel == '.') rel++;
-            }
-            if (too_long) {
-                report_error("%%ODS2-E-PATHTOOLONG, %s: the Linux path would be too long\n", shown);
-                x->errors++;
-                return;
-            }
-        }
+    if (!linux_dir_for(x, dir_spelling, dirpath, sizeof(dirpath))) {
+        report_error("%%ODS2-E-PATHTOOLONG, [%s]%s: the Linux path would be too long; not copied\n", dir_spelling, shown);
+        x->errors++;
+        return;
     }
     /* the Linux file name */
     snprintf(name, sizeof(name), "%s", e->name);
@@ -1187,6 +1275,11 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
     if (x->dest_is_dir || x->tree) {
         if (!make_local_dirs(dirpath, strlen(x->local))) {
             report_error("%%ODS2-E-MKDIR, cannot create %s: %s\n", dirpath, strerror(errno));
+            x->errors++;
+            return;
+        }
+        if (strlen(dirpath) + strlen(comp) + 2 > 4095) {
+            report_error("%%ODS2-E-PATHTOOLONG, [%s]%s: the Linux path would be too long; not copied\n", dir_spelling, shown);
             x->errors++;
             return;
         }
@@ -1360,21 +1453,129 @@ static void cmd_export(ods2_volume_t *vol, const ods2_parsed_path_t *p, const ch
     g_entry_hook = export_entry;
     g_entry_hook_ctx = &x;
     g_paths_mode = false;
-    walk_directories(&w, start, "", 0);
+    walk_from(&w, start);
     g_entry_hook = saved_hook;
     g_entry_hook_ctx = saved_ctx;
     g_paths_mode = saved_paths;
 
+    if (x.long_dirs > 1) {
+        report_error("%%ODS2-E-PATHTOOLONG, %d directories in all (from [%s] down) were not made: the Linux path "
+                     "would be too long\n", x.long_dirs, x.long_dir != NULL ? x.long_dir : "?");
+    }
+    free(x.long_dir);
     for (i = 0; i < x.seen_count; i++) free(x.seen[i].path);
     free(x.seen);
-    if (x.files + x.symlinks == 0 && x.errors == 0) {
+    if (x.files + x.symlinks == 0 && x.errors == 0 && w.errors == 0) {
         fprintf(stderr, "%%ODS2-W-NOFILES, no files found\n");
     } else {
         printf("%%ODS2-I-EXPORTED, %d file%s, %d symbolic link%s copied to %s",
                x.files, x.files == 1 ? "" : "s", x.symlinks, x.symlinks == 1 ? "" : "s", local);
         if (x.dirs_skipped) printf("; %d director%s not copied", x.dirs_skipped, x.dirs_skipped == 1 ? "y" : "ies");
+        if (x.errors + w.errors > 0) {
+            /* every file or directory that was not copied was named on stderr, and the exit status is 1 */
+            printf("; %d error%s: not everything was copied", x.errors + w.errors, x.errors + w.errors == 1 ? "" : "s");
+        }
         printf("\n");
     }
+}
+
+/* SET FILE/VERSION_LIMIT=n <spec>: the version limit of the directory entries the spec names (wildcards and [dir...]
+   work as in DIRECTORY). ods2v2 wrote 1 for the entries of ODS-2 volumes until it was fixed; VMS then purges version 1
+   when it makes version 2 of such a file (COPY, EDIT). 32767 is "no limit", what VMS writes. */
+typedef struct {
+    ods2_volume_t *vol;
+    uint16_t limit;
+    unsigned entries, records;     /* names looked at, directory records changed */
+    int errors;
+    char last_dir[ODS2_PATH_MAX];
+    char last_name[ODS2_DIR_MAX_NAME + 8];
+    bool have_last;
+} verlimit_ctx_t;
+
+static void verlimit_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spelling, const ods2_dir_entry_t *e)
+{
+    verlimit_ctx_t *x = (verlimit_ctx_t *) ctx_;
+    ods2_fid_t dfid;
+    unsigned changed = 0;
+    ods2_result_t r;
+
+    /* the reserved files and the master directory's own entry keep the limit VMS gave them (1) */
+    if (ods2_fid_number(e->fid) <= 10 && ods2_fid_number(e->fid) != 0 && e->fid.fid_nmx == 0) return;
+    /* one call per name (the walk calls the hook once per version) */
+    if (x->have_last && strcmp(x->last_dir, dir_spelling) == 0 && same_name(x->last_name, e->name)) return;
+    snprintf(x->last_dir, sizeof(x->last_dir), "%s", dir_spelling);
+    snprintf(x->last_name, sizeof(x->last_name), "%s", e->name);
+    x->have_last = true;
+    x->entries++;
+    r = ods2_lookup_path(vol, dir_spelling, &dfid);
+    if (r.ok) r = ods2_check_fid(dfid);
+    if (r.ok) r = ods2_set_entry_version_limit(vol, ods2_fid_number(dfid), e->name, x->limit, &changed);
+    if (!r.ok) {
+        report_error("%%ODS2-E-VERLIMIT, [%s]%s: %s\n", dir_spelling, e->name, r.problem);
+        x->errors++;
+        return;
+    }
+    x->records += changed;
+}
+
+static void cmd_set_version_limit(ods2_volume_t *vol, const ods2_parsed_path_t *p, uint16_t limit)
+{
+    verlimit_ctx_t x;
+    entry_hook_fn saved_hook = g_entry_hook;
+    void *saved_ctx = g_entry_hook_ctx;
+    bool saved_paths = g_paths_mode;
+    char effective[ODS2_PATH_MAX], spec[ODS2_PATH_MAX + 4], start[ODS2_PATH_MAX], pattern[ODS2_PATH_MAX + 4];
+    const char *rest;
+    dir_walk_t w;
+
+    memset(&x, 0, sizeof(x));
+    x.vol = vol;
+    x.limit = limit;
+    resolve_effective_path(p, effective, sizeof(effective));
+    snprintf(spec, sizeof(spec), "%s%s", effective, p->recursive ? "..." : "");
+    rest = ods2_dir_spec_split_prefix(spec, start, sizeof(start));
+    if (rest == NULL) {
+        report_error("%%ODS2-E-BADPATH, [%s]: invalid directory specification\n", spec);
+        return;
+    }
+    canonical_dir_path(vol, start, sizeof(start));
+    if (p->filename[0] == '\0') snprintf(pattern, sizeof(pattern), "*.*");
+    else if (ods5_find_unescaped(p->filename, '.') == NULL) snprintf(pattern, sizeof(pattern), "%s.*", p->filename);
+    else snprintf(pattern, sizeof(pattern), "%s", p->filename);
+    memset(&w, 0, sizeof(w));
+    w.vol = vol;
+    w.spec = rest;
+    w.pattern = pattern;
+    w.p = p;
+    g_entry_hook = verlimit_entry;
+    g_entry_hook_ctx = &x;
+    g_paths_mode = false;
+    walk_from(&w, start);
+    g_entry_hook = saved_hook;
+    g_entry_hook_ctx = saved_ctx;
+    g_paths_mode = saved_paths;
+    if (x.entries == 0 && w.errors == 0) {
+        fprintf(stderr, "%%ODS2-W-NOFILES, no files found\n");
+    } else {
+        printf("%%ODS2-I-VERLIMIT, %u name%s looked at, %u directory record%s changed to version limit %u\n",
+               x.entries, x.entries == 1 ? "" : "s", x.records, x.records == 1 ? "" : "s", (unsigned) limit);
+    }
+}
+
+/* The deepest directory OpenVMS VAX V7.3 reaches on an ODS-2 volume is 7 levels below [000000] (measured: deeper
+   ones give %RMS-F-DIR and DIRECTORY [...] silently stops at 7); Alpha V7.3-2 and later reach far more. ods2v2
+   creates them (up to 255 levels) but says so. Returns true when it warned. */
+#define ODS2_VAX_V73_MAX_LEVELS 7u
+static bool warn_if_too_deep_for_vax(ods2_volume_t *vol, const uint8_t *parent_header, const char *shown)
+{
+    unsigned depth = 0;
+
+    if (vol->ods5 || !ods2_directory_depth(vol, parent_header, &depth).ok) return false;
+    if (depth + 1 <= ODS2_VAX_V73_MAX_LEVELS) return false;
+    fprintf(stderr, "%%ODS2-W-DEEPDIR, [%s] is %u levels below [000000]: OpenVMS VAX V7.3 cannot reach a "
+                    "directory deeper than %u levels on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
+                    "later can\n", shown, depth + 1, ODS2_VAX_V73_MAX_LEVELS);
+    return true;
 }
 
 static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p)
@@ -1418,6 +1619,7 @@ static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p
         return;
     }
     printf("%%ODS2-I-CREATED, created [%s]\n", effective_path);
+    warn_if_too_deep_for_vax(vol, parent_header, effective_path);
 }
 
 /* A host file opened for COPY, read in order a chunk at a time
@@ -2171,6 +2373,7 @@ static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods
 typedef struct {
     ods2_volume_t *vol;
     int files, dirs, links, errors, skipped;
+    int deep;                            /* directories deeper than OpenVMS VAX V7.3 reaches (ODS-2) */
     unsigned long long bytes;
     const copy_options_t *opts;          /* /FORMAT, /ATTRIBUTES */
     const ods2_record_attrs_t *attrs_in; /* the /ATTRIBUTES given */
@@ -2187,13 +2390,18 @@ static void import_decode_name(const char *linux_name, char *out, size_t cap)
     if (ods5_unescape_from_linux(linux_name, out, cap) == (size_t) -1) snprintf(out, cap, "%s", linux_name);
 }
 
+#define IMPORT_MAX_DEPTH 500
+
 static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_file_number, int depth)
 {
     struct dirent **list = NULL;
     int count, i;
 
-    if (depth > 200) {
-        report_error("%%ODS2-E-DEEP, %s: directories nested more than 200 levels\n", local_dir);
+    /* a bounded C stack: each level holds about 8 KB of path buffers (the Linux path limit is 4,096, the
+       tree would be cut by it long before this) */
+    if (depth > IMPORT_MAX_DEPTH) {
+        report_error("%%ODS2-E-DEEP, %s: directories nested more than %d levels: this directory and "
+                     "everything below it are skipped\n", local_dir, IMPORT_MAX_DEPTH);
         st->errors++;
         return;
     }
@@ -2212,7 +2420,11 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
         ods2_fid_t fid;
 
         if (strcmp(entry, ".") == 0 || strcmp(entry, "..") == 0) continue;
-        snprintf(path, sizeof(path), "%s/%s", local_dir, entry);
+        if (snprintf(path, sizeof(path), "%s/%s", local_dir, entry) >= (int) sizeof(path)) {
+            report_error("%%ODS2-E-PATHTOOLONG, %s/%s: the path is too long: skipped\n", local_dir, entry);
+            st->errors++;
+            continue;
+        }
         import_decode_name(entry, literal, sizeof(literal));
         display_name(literal, shown, sizeof(shown));
         if (lstat(path, &sb) != 0) {
@@ -2252,6 +2464,13 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
                     continue;
                 }
                 st->dirs++;
+                {
+                    unsigned d = 0;
+                    if (!st->vol->ods5 && ods2_directory_depth(st->vol, dir_header, &d).ok &&
+                        d + 1 > ODS2_VAX_V73_MAX_LEVELS) {
+                        st->deep++;
+                    }
+                }
             }
             import_tree(st, path, ods2_fid_number(fid), depth + 1);
         } else if (S_ISREG(sb.st_mode)) {
@@ -2338,6 +2557,11 @@ static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods
         return;
     }
     import_tree(&st, local_dir, ods2_fid_number(dir_fid), 0);
+    if (st.deep > 0) {
+        fprintf(stderr, "%%ODS2-W-DEEPDIR, %d director%s deeper than %u levels below [000000] created: OpenVMS "
+                        "VAX V7.3 cannot reach them on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
+                        "later can\n", st.deep, st.deep == 1 ? "y" : "ies", ODS2_VAX_V73_MAX_LEVELS);
+    }
     printf("%%ODS2-I-IMPORTED, %d file%s (%llu bytes), %d director%s, %d symbolic link%s imported "
            "from %s; %d skipped, %d error%s\n", st.files, st.files == 1 ? "" : "s", st.bytes,
            st.dirs, st.dirs == 1 ? "y" : "ies", st.links, st.links == 1 ? "" : "s", local_dir,
@@ -2726,6 +2950,9 @@ static void print_help(void)
            "  SET DEFAULT path           set the current default directory\n"
            "  SHOW DEFAULT               show the current default directory\n"
            "  SET VOLUME/LABEL=name      relabel the volume (all home block copies)\n"
+           "  SET FILE/VERSION_LIMIT=n spec   the version limit of the entries a spec names (wildcards, [dir...]);\n"
+           "                             32767 or 0 = no limit, what VMS writes (volumes written by ods2v2 before\n"
+           "                             the fix carry 1: VMS purges version 1 when it makes version 2)\n"
            "  SHOW VOLUME                label, owner, cluster size, files, free space\n"
            "  HELP                       show this command list\n"
            "  EXIT / QUIT                leave the interactive shell\n"
@@ -3005,6 +3232,22 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
         cmd_symlink(vol, &p, target);
         return true;
     }
+    if (matches(tokens[0], "SET") && n > 1 && strncasecmp(tokens[1], "FILE/VERSION_LIMIT=", 19) == 0) {
+        /* SET FILE/VERSION_LIMIT=n <spec> */
+        ods2_parsed_path_t p;
+        char *end;
+        long limit = strtol(tokens[1] + 19, &end, 10);
+        if (n < 3 || *end != '\0' || limit < 0 || limit > 32767) {
+            report_error("%%ODS2-E-NOPARM, usage: SET FILE/VERSION_LIMIT=n <spec>   (n 0 to 32767; 0 is no limit)\n");
+            return true;
+        }
+        if (!ods2_parse_path(tokens[2], &p)) {
+            report_error("%%ODS2-E-BADPATH, could not parse %s\n", tokens[2]);
+            return true;
+        }
+        cmd_set_version_limit(vol, &p, (uint16_t) (limit == 0 ? 32767 : limit));
+        return true;
+    }
     if (matches(verb, "LINK") || (matches(tokens[0], "SET") && n > 1 && strncmp(tokens[1], "FILE/ENTER=", 11) == 0)) {
         /* LINK <new-path> <existing-path>; SET FILE/ENTER=<new-path> <existing-path> */
         ods2_parsed_path_t np, ep;
@@ -3132,6 +3375,11 @@ static int run_script(ods2_volume_t *vol, const char *script_path)
         char *p = line;
         while (*p && isspace((unsigned char) *p)) p++;
         if (*p == '\0' || *p == '!') continue;
+        if (strlen(line) == sizeof(line) - 1 && line[sizeof(line) - 2] != '\n') {
+            report_error("%%ODS2-E-LINETOOLONG, a script line is longer than %d characters: not run, and the "
+                         "rest of the script is not run\n", MAX_LINE - 1);
+            break;
+        }
         printf("ODS2> %s", line);
         if (line[strlen(line) - 1] != '\n') printf("\n");
         if (!execute_line(vol, line)) break;
@@ -3152,6 +3400,7 @@ int main(int argc, char **argv)
     ods2_volume_t vol;
     ods2_result_t r;
     int exit_code = 0;
+    int footer_state = 0;
 
     if (argc < 2) {
         fprintf(stderr, "usage: %s <disk-image> [command...]\n", argv[0]);
@@ -3163,12 +3412,21 @@ int main(int argc, char **argv)
     /* A structure version 0 volume (e.g. the OpenVMS Alpha V8.4 CD)
        is mounted for reading only, so look before opening for write. */
     r = ods2_mount(argv[1], &vol);
-    if (r.ok) g_ods5 = vol.ods5;
+    if (r.ok) {
+        char scb_msg[512];
+        g_ods5 = vol.ods5;
+        if (ods2_scb_problem(&vol, scb_msg, sizeof(scb_msg))) fprintf(stderr, "%%ODS2-W-CHKSCB, %s\n", scb_msg);
+        footer_state = ods2_image_footer(&vol, scb_msg, sizeof(scb_msg));
+        if (footer_state == 1) fprintf(stderr, "%%ODS2-I-SIMHFOOTER, %s\n", scb_msg);
+        else if (footer_state == 2) fprintf(stderr, "%%ODS2-W-SIMHFOOTER, %s\n", scb_msg);
+    }
     {
         const char *names = getenv("ODS2_NAMES");
         if (names != NULL && matches(names, "UTF8")) g_utf8_names = true;
     }
-    if (r.ok && vol.version0) {
+    if (r.ok && footer_state == 2) {
+        /* already told: read-only */
+    } else if (r.ok && vol.version0) {
         fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version is 0; "
                         "mounted read-only\n", argv[1]);
     } else if (r.ok && access(argv[1], W_OK) != 0) {
@@ -3220,12 +3478,18 @@ int main(int argc, char **argv)
         /* Single-shot: join all remaining argv into one command line. */
         char line[MAX_LINE];
         int i;
+        size_t total = 0;
         line[0] = '\0';
-        for (i = 2; i < argc; i++) {
-            if (i > 2) strncat(line, " ", sizeof(line) - strlen(line) - 1);
-            strncat(line, argv[i], sizeof(line) - strlen(line) - 1);
+        for (i = 2; i < argc; i++) total += strlen(argv[i]) + 1;
+        if (total >= sizeof(line)) {
+            report_error("%%ODS2-E-LINETOOLONG, the command is longer than %d characters: not run\n", MAX_LINE - 1);
+        } else {
+            for (i = 2; i < argc; i++) {
+                if (i > 2) strcat(line, " ");
+                strcat(line, argv[i]);
+            }
+            execute_line(&vol, line);
         }
-        execute_line(&vol, line);
         exit_code = g_command_failed ? 1 : 0;
     }
 
