@@ -2529,6 +2529,25 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
     return ods2_delete_version_info(vol, dir_file_number, name, version, version_out, NULL);
 }
 
+/* True for a file number the volume reserves for its own files: 1-9 always, 10 (SECURITY.SYS) on an ODS-5
+   volume, or on an ODS-2 volume when the entry is SECURITY.SYS in the master file directory. */
+static bool is_reserved_file(const ods2_volume_t *vol, unsigned dir_file_number, const char *name,
+                             unsigned file_number)
+{
+    if (file_number >= 1 && file_number <= 9) return true;
+    if (file_number == 10) {
+        size_t i;
+        static const char security[] = "SECURITY.SYS";
+        if (vol->ods5) return true;
+        if (dir_file_number != 4 || strlen(name) != sizeof(security) - 1) return false;
+        for (i = 0; i < sizeof(security) - 1; i++) {
+            if (toupper((unsigned char) name[i]) != security[i]) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
 ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_number,
                                        const char *name, int version, uint16_t *version_out,
                                        ods2_delete_info_t *info)
@@ -2553,6 +2572,16 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
 
     r = ods2_lookup_name_version(vol, dir_header, name, version, &target_fid, &target_version);
     if (!r.ok) return r;
+
+    /* The volume's own files cannot be deleted, whichever directory lists them (review 6, finding 1):
+       INDEXF.SYS, BITMAP.SYS, BADBLK.SYS, the master file directory, CORIMG.SYS, VOLSET.SYS, CONTIN.SYS,
+       BACKUP.SYS and BADLOG.SYS are file numbers 1-9; SECURITY.SYS is 10 on every volume INITIALIZE makes
+       (ODS-5 always; an older ODS-2 volume has no file 10, and a user file may hold the number). Deleting
+       one frees clusters the volume still depends on. */
+    if (is_reserved_file(vol, dir_file_number, name, target_fid.fid_num)) {
+        return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
+                    "SECURITY.SYS): it cannot be deleted");
+    }
 
     r = ods2_read_header(vol, target_fid.fid_num, target_header);
     if (!r.ok) return r;

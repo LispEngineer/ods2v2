@@ -290,6 +290,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@sh tests/cli_ods5_write_check.sh
 	@echo "--- cli_ods5_init_check ---"
 	@sh tests/cli_ods5_init_check.sh
+	@echo "--- cli_ods5_integrity_check ---"
+	@sh tests/cli_ods5_integrity_check.sh
 	@echo "--- cli_ods5_review_check ---"
 	@sh tests/cli_ods5_review_check.sh
 	@echo "--- cli_records_check ---"
