@@ -503,8 +503,30 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
     special = ods5_special_type(header);
     printf("  File organization:  %s\n", org_name(core->recattr.rtype >> 4));
     if (special == 0) {
-        printf("  Record format:      %s, maximum %u bytes\n",
-               rfm_name(core->recattr.rtype & 15u), (unsigned) core->recattr.maxrec);
+        /* as VMS words them: Fixed length N byte records / VFC, N byte header, maximum M bytes,
+           longest L bytes; then the record attributes */
+        unsigned rfm = core->recattr.rtype & 15u, rat = core->recattr.rattrib;
+        if (rfm == ODS2_RFM_FIX) {
+            printf("  Record format:      Fixed length %u byte records\n",
+                   (unsigned) (core->recattr.rsize ? core->recattr.rsize : core->recattr.maxrec));
+        } else if (rfm == ODS2_RFM_VFC) {
+            printf("  Record format:      VFC, %u byte header, maximum %u bytes, longest %u byte%s\n",
+                   (unsigned) (core->recattr.vfcsize ? core->recattr.vfcsize : 2u),
+                   (unsigned) core->recattr.maxrec, (unsigned) core->recattr.rsize,
+                   core->recattr.rsize == 1 ? "" : "s");
+        } else {
+            printf("  Record format:      %s, maximum %u bytes, longest %u byte%s\n", rfm_name(rfm),
+                   (unsigned) core->recattr.maxrec, (unsigned) core->recattr.rsize,
+                   core->recattr.rsize == 1 ? "" : "s");
+        }
+        {
+            const char *cc = (rat & ODS2_RAT_FTN) ? "Fortran carriage control"
+                           : (rat & ODS2_RAT_CR) ? "Carriage return carriage control"
+                           : (rat & ODS2_RAT_PRN) ? "Print file carriage control" : NULL;
+            if (rat == 0) printf("  Record attributes:  None\n");
+            else printf("  Record attributes:  %s%s\n", cc ? cc : "No carriage control",
+                        (rat & ODS2_RAT_BLK) ? ", Non-spanned" : "");
+        }
     } else {
         static const char *kinds[] = { "?", "FIFO", "character special", "block special",
                                        "symbolic link (before V8.2)", "symbolic link" };

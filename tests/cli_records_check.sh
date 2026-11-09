@@ -37,6 +37,15 @@ for f in "$TMP"/src/*; do
     $ODS2 "$TMP/rms.img" "TYPE/RAW [000000]$n" > "$TMP/out" 2>/dev/null
     cmp -s "$f" "$TMP/out" && echo "PASS: TYPE/RAW $n" || { echo "FAIL: TYPE/RAW $n"; fail=$((fail+1)); }
 done
+# DIR/FULL words the record format and attributes as VMS does
+full=$($ODS2 "$TMP/rms.img" 'DIR/FULL [000000]VFC_PRN.TXT' 2>&1)
+check "DIR/FULL: VFC format line" "Record format:      VFC, 2 byte header, maximum 0 bytes, longest 20 bytes" "$(echo "$full" | sed -n 's/^  Record format: */Record format:      /p')"
+check "DIR/FULL: print file attribute" "Record attributes:  Print file carriage control" "$(echo "$full" | sed -n 's/^  Record attributes: */Record attributes:  /p')"
+full=$($ODS2 "$TMP/rms.img" 'DIR/FULL [000000]FIX_CR.TXT' 2>&1)
+check "DIR/FULL: fixed length line" "Record format:      Fixed length 20 byte records" "$(echo "$full" | sed -n 's/^  Record format: */Record format:      /p')"
+check "DIR/FULL: CR attribute" "Record attributes:  Carriage return carriage control" "$(echo "$full" | sed -n 's/^  Record attributes: */Record attributes:  /p')"
+full=$($ODS2 "$TMP/rms.img" 'DIR/FULL [000000]VAR_BLK.TXT' 2>&1)
+check "DIR/FULL: CR and non-spanned" "Record attributes:  Carriage return carriage control, Non-spanned" "$(echo "$full" | sed -n 's/^  Record attributes: */Record attributes:  /p')"
 # a damaged VAR file (a record length over 32767) is reported, not decoded into garbage
 $ODS2 "$TMP/rms.img" "TYPE [000000]BAD_VAR.TXT" > "$TMP/out" 2> "$TMP/err"; st=$?
 check "TYPE of a damaged VAR file exits 1" 1 "$st"
