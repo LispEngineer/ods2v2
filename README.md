@@ -235,6 +235,26 @@ not touched. Other levels (3, 4, 6) are refused. The on-disk
 differences are written up, with sources, in `ODS5_FORMAT_NOTES.md` of
 the ods5-cli project.
 
+**Names.** ODS-5 keeps the case of names and allows spaces, many dots,
+ISO Latin-1 and UCS-2 characters. `DIR` shows them the way DCL does,
+with circumflex escapes: `^_` a space, `^.` a dot that is not the type
+delimiter, `^&` `^,` `^;` ... the characters DCL escapes, `^xx` an ISO
+Latin-1 byte (`^FF`, `^A0`, `^80`-`^9F`), `^Uxxxx` a character above
+U+00FF. `DIR/UTF8` (or `SET NAMES UTF8`, or `ODS2_NAMES=utf8` in the
+environment) shows the names as UTF-8 instead; `SET NAMES ESCAPED`
+switches back. The same escapes are accepted in every specification you
+type: `DIR [Lots^.Of^.Periods]two^_words*`, `DIR caf^E9.txt`; a typed
+UTF-8 character is itself. A command line is split at white space, so a
+space in a name is written `^_`. Lookups and wildcards (`*`, `%`, `?`)
+are case blind and work on whole characters, not bytes; directory names
+are shown in their stored case. Directories nest to 255 levels.
+`DIR/FULL` shows, per file, what the file header says: id, size, owner,
+protection, the dates (also the access and attribute-change dates of
+ODS-5), the link count where the volume has hard links, the record
+format, a symbolic link's target, and the primary link's name when the
+entry is an alias. `DIR/PATHS` prints one `dir/dir/NAME.EXT;ver` line
+per file, UTF-8, for scripts.
+
 ### File dates and time zones
 
 VMS keeps file dates in local time, so `ods2` stamps new files (and

@@ -132,5 +132,37 @@ Directory [Lots^.Of^.Periods]" "$("$ODS2" "$DISK" 'DIR [...]*.*' 2>/dev/null | g
 check "SET DEFAULT takes an escaped directory name" "%ODS2-I-DEFSET, default set to [Lots^.Of^.Periods]" \
     "$("$ODS2" "$DISK" 'SET DEFAULT [lots^.of^.periods]' 2>/dev/null)"
 
+check "DIR/FULL shows the file ID and the header's dates" "File ID:            (8,1,0)" \
+    "$("$ODS2" "$DISK" 'DIR/FULL [000000]BACKUP.SYS' 2>/dev/null | grep 'File ID' | sed 's/^ *//')"
+check "DIR/FULL needs no header name for a name that matches" 0 \
+    "$("$ODS2" "$DISK" 'DIR/FULL [000000]BACKUP.SYS' 2>/dev/null | grep -c 'Primary link')"
+
+# Deep directories: 120 levels, made by ods2 itself on the ODS-2 disk, then read as ODS-5.
+cp "$SRC_DISK" "$DISK"
+python3 -I - > "$DISK.cmds" <<'PY'
+p = []
+for i in range(1, 121):
+    p.append('D%d' % i)
+    print('CREATE/DIRECTORY [%s]' % '.'.join(p))
+PY
+"$ODS2" "$DISK" @"$DISK.cmds" >/dev/null 2>&1
+python3 -I - "$DISK" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b')
+f.seek(512); b = bytearray(f.read(512))
+struct.pack_into('<H', b, 12, 0x0501)
+def csum(x, words): return sum(struct.unpack_from('<%dH' % words, x, 0)) & 0xffff
+struct.pack_into('<H', b, 58, csum(b, 29))
+struct.pack_into('<H', b, 510, csum(b, 255))
+f.seek(512); f.write(b)
+PY
+check "DIR [...] walks 120 directory levels" 131 "$("$ODS2" "$DISK" 'DIR/PATHS [...]' 2>/dev/null | wc -l)"
+deep=$(python3 -I -c "print('.'.join('D%d' % i for i in range(1, 120)))")
+check "a path of 119 names resolves" "D120.DIR;1" \
+    "$("$ODS2" "$DISK" "DIR [$deep]" 2>/dev/null | grep ';' | sed 's/ *;/;/')"
+check "...and so does the same path in lower case" "D120.DIR;1" \
+    "$("$ODS2" "$DISK" "DIR [$(echo "$deep" | tr D d)]" 2>/dev/null | grep ';' | sed 's/ *;/;/')"
+rm -f "$DISK.cmds"
+
 rm -f "$DISK"
 [ "$fails" -eq 0 ] || { echo "$fails ODS-5 names check(s) failed"; exit 1; }

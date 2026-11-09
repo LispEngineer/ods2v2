@@ -112,6 +112,7 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include "ods2_volume.h"
 #include "ods2_path.h"
@@ -121,6 +122,7 @@
 #include "ods2_validate.h"
 #include "ods5_ondisk.h"
 #include "ods5_names.h"
+#include "ods5_header.h"
 
 #define MAX_LINE 1024
 #define MAX_TOKENS 8
@@ -139,6 +141,12 @@ static char g_default_dir[ODS2_PATH_MAX] = "";
    names as UTF-8 instead, for use on Linux. */
 static bool g_ods5 = false;
 static bool g_utf8_names = false;
+/* DIR/PATHS: one "dir/dir/NAME.TYP;ver" line per file, UTF-8, '/' between
+   the names, nothing else - for scripts and for comparing listings. */
+static bool g_paths_mode = false;
+/* DIR/FULL: a block of details per file (id, size, owner, dates, the
+   ODS-5 fields) instead of one line. */
+static bool g_full_mode = false;
 
 /* Set by report_error(): some command since the last reset failed.
    main() turns it into the exit status of a single-shot command or an
@@ -339,6 +347,137 @@ static void display_name(const char *literal, char *out, size_t cap)
     }
 }
 
+/* The names of a bracketed path (dot-separated spelling) joined with '/',
+   as UTF-8 literals: "Lots^.Of^.Periods.X" -> "Lots.Of.Periods/X". */
+static void spelling_to_slash_path(const char *spelling, char *out, size_t cap)
+{
+    const char *p = spelling;
+    size_t len = 0;
+
+    out[0] = '\0';
+    while (*p) {
+        const char *end = p;
+        char literal[ODS2_PATH_MAX];
+        size_t ul;
+        while (*end && *end != '.') {
+            if (*end == '^' && end[1] != '\0') end++;
+            end++;
+        }
+        ul = ods5_unescape(p, (size_t) (end - p), literal, sizeof(literal));
+        if (ul == (size_t) -1) snprintf(literal, sizeof(literal), "%.*s", (int) (end - p), p);
+        len += (size_t) snprintf(out + len, cap - len, "/%s", literal);
+        if (len >= cap) { out[cap - 1] = '\0'; return; }
+        p = end;
+        if (*p == '.') p++;
+    }
+}
+
+static const char *rfm_name(unsigned rtype)
+{
+    static const char *names[] = { "Undefined", "Fixed length", "Variable length",
+                                   "VFC", "Stream", "Stream_LF", "Stream_CR" };
+    return rtype < 7 ? names[rtype] : "(unknown)";
+}
+
+static const char *org_name(unsigned org)
+{
+    static const char *names[] = { "Sequential", "Relative", "Indexed", "Direct", "Special" };
+    return org < 5 ? names[org] : "(unknown)";
+}
+
+static void protection_text(unsigned nibble, char *out)
+{
+    /* a set bit DENIES: bit 0 read, 1 write, 2 execute, 3 delete */
+    size_t n = 0;
+    if (!(nibble & 1)) out[n++] = 'R';
+    if (!(nibble & 2)) out[n++] = 'W';
+    if (!(nibble & 4)) out[n++] = 'E';
+    if (!(nibble & 8)) out[n++] = 'D';
+    out[n] = '\0';
+}
+
+/* DIR/FULL for one entry: what the file header says. */
+static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
+{
+    uint8_t header[512];
+    const ods2_head_core_t *core = (const ods2_head_core_t *) header;
+    ods5_ident_t id;
+    const char *why = "";
+    char shown[ODS2_PATH_MAX], t[64], s_[8], o_[8], g_[8], w_[8];
+    uint32_t hiblk, efblk;
+    unsigned special;
+    ods2_result_t r = ods2_read_header(vol, e->fid.fid_num, header);
+
+    display_name(e->name, shown, sizeof(shown));
+    printf("\n%s;%u\n", shown, e->version);
+    if (!r.ok) {
+        printf("  (header not readable: %s)\n", r.problem);
+        return;
+    }
+    printf("  File ID:            (%u,%u,%u)\n", (unsigned) e->fid.fid_num,
+           (unsigned) e->fid.fid_seq, (unsigned) e->fid.fid_rvn);
+    if (!ods5_read_ident(header, &id, &why)) {
+        printf("  (ident area not readable: %s)\n", why);
+        return;
+    }
+    if (strcmp(id.name, e->name) != 0 && id.name[0] != '\0') {
+        /* an alias or hard link: the header names the primary link */
+        display_name(id.name, shown, sizeof(shown));
+        printf("  Primary link name:  %s;%u\n", shown, id.version);
+    }
+    hiblk = ods2_word_swap32(core->recattr.hiblk);
+    efblk = ods2_word_swap32(core->recattr.efblk);
+    (void) efblk;
+    printf("  Size:               %zu/%u blocks, %zu bytes\n",
+           (ods2_file_content_length(header) + 511) / 512, (unsigned) hiblk,
+           ods2_file_content_length(header));
+    printf("  Owner:              [%o,%o]\n", core->fileowner_uic[1], core->fileowner_uic[0]);
+    protection_text((core->fileprot >> 0) & 15, s_);
+    protection_text((core->fileprot >> 4) & 15, o_);
+    protection_text((core->fileprot >> 8) & 15, g_);
+    protection_text((core->fileprot >> 12) & 15, w_);
+    printf("  Protection:         (S:%s, O:%s, G:%s, W:%s)\n", s_, o_, g_, w_);
+    ods5_format_vms_time(id.credate, t, sizeof(t));
+    printf("  Created:            %s\n", t);
+    ods5_format_vms_time(id.revdate, t, sizeof(t));
+    printf("  Revised:            %s (%u)\n", t, (unsigned) id.revision);
+    ods5_format_vms_time(id.expdate, t, sizeof(t));
+    printf("  Expires:            %s\n", t);
+    ods5_format_vms_time(id.bakdate, t, sizeof(t));
+    printf("  Backup:             %s\n", id.bakdate ? t : "<no backup recorded>");
+    if (id.has_ods5_dates) {
+        ods5_format_vms_time(id.accdate, t, sizeof(t));
+        printf("  Accessed:           %s\n", t);
+        ods5_format_vms_time(id.attdate, t, sizeof(t));
+        printf("  Attributes changed: %s\n", t);
+        if (vol->home.volchar & ODS5_VC_HARDLINKS) {
+            printf("  Link count:         %u\n", ods5_link_count(header));
+        }
+    }
+    special = ods5_special_type(header);
+    printf("  File organization:  %s\n", org_name(core->recattr.rtype >> 4));
+    if (special == 0) {
+        printf("  Record format:      %s, maximum %u bytes\n",
+               rfm_name(core->recattr.rtype & 15u), (unsigned) core->recattr.maxrec);
+    } else {
+        static const char *kinds[] = { "?", "FIFO", "character special", "block special",
+                                       "symbolic link (before V8.2)", "symbolic link" };
+        printf("  Special file:       %s\n", special < 6 ? kinds[special] : "(unknown type)");
+        if (special == ODS5_FAT_SYMBOLIC_LINK || special == ODS5_FAT_SYMLINK) {
+            uint8_t target[1100];
+            size_t got = 0, len = ods2_file_content_length(header);
+            if (len > 0 && len < sizeof(target) - 1 &&
+                ods2_read_file(vol, header, target, sizeof(target) - 1, &got).ok) {
+                char lit[2400];
+                target[got] = '\0';
+                if (ods5_isl1_to_utf8(target, got, lit, sizeof(lit)) != (size_t) -1) {
+                    printf("  Link target:        %s\n", lit);
+                }
+            }
+        }
+    }
+}
+
 /* One DIR line: the name padded to 20 characters, then ";version". */
 static void print_listed_name(const char *literal, unsigned version)
 {
@@ -356,7 +495,7 @@ static void print_listed_name(const char *literal, unsigned version)
  * at all for a directory with no matching entries, so a listing across
  * many directories shows only the ones that have something to show.
  * `dir_path` is absolute (from root). Returns the number shown. */
-static int show_directory(const char *dir_path, const ods2_dir_entry_t *entries, int count,
+static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_dir_entry_t *entries, int count,
                           const char *pattern, const ods2_parsed_path_t *p)
 {
     int i, shown = 0, rank = 0;
@@ -367,15 +506,26 @@ static int show_directory(const char *dir_path, const ods2_dir_entry_t *entries,
         rank = (i > 0 && same_name(entries[i].name, entries[i - 1].name)) ? rank + 1 : 0;
         if (ods2_wildcard_match(pattern, entries[i].name) &&
             version_selected(p, &entries[i], rank)) {
+            if (g_paths_mode) {
+                char slash[ODS2_PATH_MAX];
+                spelling_to_slash_path(dir_path, slash, sizeof(slash));
+                printf("%s/%s;%u\n", slash, entries[i].name, entries[i].version);
+                shown++;
+                continue;
+            }
             if (shown == 0) {
                 printf("\nDirectory [%s%s]\n\n", (dir_path[0] == '\0') ? "000000" : "",
                        dir_path);
             }
-            print_listed_name(entries[i].name, entries[i].version);
+            if (g_full_mode) {
+                print_full_entry(vol, &entries[i]);
+            } else {
+                print_listed_name(entries[i].name, entries[i].version);
+            }
             shown++;
         }
     }
-    if (shown > 0) {
+    if (shown > 0 && !g_paths_mode) {
         printf("\nTotal of %d file%s.\n", shown, (shown == 1) ? "" : "s");
     }
     return shown;
@@ -515,7 +665,7 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
     }
 
     if (here) {
-        int shown = show_directory(abs_path, entries, count, w->pattern, w->p);
+        int shown = show_directory(w->vol, abs_path, entries, count, w->pattern, w->p);
         if (shown > 0) {
             w->dirs_shown++;
             w->files_shown += shown;
@@ -653,7 +803,9 @@ static void cmd_dir(ods2_volume_t *vol, const ods2_parsed_path_t *p)
     w.p = p;
     walk_directories(&w, start, "", 0);
 
-    if (w.dirs_shown > 1) {
+    if (g_paths_mode) {
+        if (w.dirs_shown == 0 && w.errors == 0) fprintf(stderr, "%%ODS2-W-NOFILES, no files found\n");
+    } else if (w.dirs_shown > 1) {
         printf("\nGrand total of %d director%s, %d file%s.\n",
                w.dirs_shown, (w.dirs_shown == 1) ? "y" : "ies",
                w.files_shown, (w.files_shown == 1) ? "" : "s");
@@ -1465,6 +1617,8 @@ static void print_help(void)
            "                             ([*], [*.SRC], [...SALES], [DECUS...SRC])\n"
            "  DIR/UTF8 ...               show names as UTF-8 (default: with ^-escapes as DCL\n"
            "                             shows them: ^_ space, ^. dot, ^xx and ^Uxxxx)\n"
+           "  DIR/FULL ...               per file: id, size, owner, protection, dates (also\n"
+           "                             access and attribute dates on ODS-5), record format\n"
            "  SET NAMES UTF8|ESCAPED     the same for every command that shows names\n"
            "  CREATE/DIRECTORY path      create a directory\n"
            "  COPY <local-file> <path>   write a local file onto the disk (Stream_LF)\n"
@@ -1607,7 +1761,8 @@ static bool execute_line(ods2_volume_t *vol, char *line)
     }
     if (matches(verb, "DIR") || matches(verb, "LS")) {
         ods2_parsed_path_t p;
-        bool saved_utf8 = g_utf8_names;
+        bool saved_utf8 = g_utf8_names, saved_paths = g_paths_mode,
+             saved_full = g_full_mode;
         const char *arg = (n > 1) ? tokens[1] : ""; /* "" resolves to the
                                                          current default
                                                          directory, via the
@@ -1639,14 +1794,21 @@ static bool execute_line(ods2_volume_t *vol, char *line)
                 if (ql >= sizeof(q)) ql = sizeof(q) - 1;
                 memcpy(q, s + 1, ql);
                 q[ql] = '\0';
-                if (matches(q, "UTF8")) {
+                if (matches(q, "FULL")) {
+                    g_full_mode = true;
+                } else if (matches(q, "PATHS")) {
+                    g_paths_mode = true;
+                    g_utf8_names = true;
+                } else if (matches(q, "UTF8")) {
                     g_utf8_names = true;
                 } else if (matches(q, "ESCAPED")) {
                     g_utf8_names = false;
                 } else {
                     report_error("%%ODS2-E-BADQUAL, unrecognized DIR qualifier /%s "
-                                 "(use /UTF8 or /ESCAPED)\n", q);
+                                 "(use /FULL, /UTF8, /ESCAPED or /PATHS)\n", q);
                     g_utf8_names = saved_utf8;
+                    g_paths_mode = saved_paths;
+                    g_full_mode = saved_full;
                     return true;
                 }
                 s += 1 + strcspn(s + 1, "/");
@@ -1654,6 +1816,8 @@ static bool execute_line(ods2_volume_t *vol, char *line)
         }
         cmd_dir(vol, &p);
         g_utf8_names = saved_utf8;
+        g_paths_mode = saved_paths;
+        g_full_mode = saved_full;
         return true;
     }
     if (matches(tokens[0], "CREATE/DIRECTORY") || matches(tokens[0], "CREATE/DIR") ||
@@ -1784,6 +1948,11 @@ int main(int argc, char **argv)
     } else if (r.ok && vol.version0) {
         fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version is 0; "
                         "mounted read-only\n", argv[1]);
+    } else if (r.ok && access(argv[1], W_OK) != 0) {
+        /* an image the user cannot write (chmod 444): read it, and
+           refuse every write, instead of failing to mount */
+        fprintf(stderr, "%%ODS2-W-READONLY, %s: image is not writable; mounted "
+                        "read-only\n", argv[1]);
     } else {
         if (r.ok) ods2_dismount(&vol);
         r = ods2_mount_write(argv[1], &vol);
