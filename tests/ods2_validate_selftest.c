@@ -75,6 +75,21 @@ int main(void)
     assert(r.ok);
     printf("PASS: recomputing both checksums (in the right order) makes it valid again\n");
 
+    /* 3b. Structure version 0 (level 2, as on the OpenVMS Alpha V8.4
+       CD) is accepted and reported; level 1 or 3 is still refused. */
+    build_valid_home(&home);
+    assert(!ods2_home_is_version0(&home));
+    home.struclev = 0x0200;
+    home.checksum1 = ods2_checksum((const uint8_t *) &home, 29);
+    home.checksum2 = ods2_checksum((const uint8_t *) &home, 255);
+    r = ods2_validate_home(&home);
+    assert(r.ok && ods2_home_is_version0(&home));
+    home.struclev = 0x0101;
+    home.checksum1 = ods2_checksum((const uint8_t *) &home, 29);
+    home.checksum2 = ods2_checksum((const uint8_t *) &home, 255);
+    assert(!ods2_validate_home(&home).ok);
+    printf("PASS: structure version 0 validates (and is flagged); level 1 still refused\n");
+
     /* 4. Wrong format string is caught. */
     build_valid_home(&home);
     memcpy(home.format, "SOMETHINGELSE", 12);

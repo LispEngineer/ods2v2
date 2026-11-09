@@ -211,6 +211,16 @@ VMS's `SET VOLUME/LABEL` would, while VMS doesn't have it mounted:
   agree should go through `ANALYZE/DISK` on VMS first.
 - A volume set member is refused: relabel a set on VMS.
 
+### Structure version 0 volumes
+
+The spec (5.1.9.4) has HM2$W_STRUCLEV as level 2, version 1, but the
+OpenVMS Alpha V8.4 CD is level 2, version 0, and VMS mounts it. Such a
+volume is accepted for reading only (`DIR`, `TYPE`, `COPY` out, `SHOW
+VOLUME`), with one warning on stderr (`%ODS2-W-STRUCLEV0`). Every
+command that would write to it, and `ods2_mount_write()`, is refused
+and the image is not touched. Any other structure level is still
+refused. The image may be read-only (`chmod 444`).
+
 ### File dates and time zones
 
 VMS keeps file dates in local time, so `ods2` stamps new files (and

@@ -42,6 +42,16 @@ static ods2_result_t fail(const char *why)
     ods2_result_t r; r.ok = false; r.problem = why; return r;
 }
 
+/* Why a write is refused: a version 0 volume is never writable, any
+   other volume only if mounted with ods2_mount_write(). */
+static ods2_result_t not_writable(const ods2_volume_t *vol)
+{
+    if (vol->version0) {
+        return fail("volume has HM2$W_STRUCLEV version 0 and is read-only");
+    }
+    return fail("volume was not mounted for write (use ods2_mount_write)");
+}
+
 /* Uppercases a string in place. Real VMS always stores filenames and
    directory names uppercase - "create/dir [decus]" on real VMS
    creates DECUS.DIR. Applied to every user-supplied name at the
@@ -120,6 +130,13 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
         return fail(vr.problem);
     }
 
+    vol->version0 = ods2_home_is_version0(&vol->home);
+    if (vol->version0 && writable) {
+        ods2_dismount(vol);
+        return fail("HM2$W_STRUCLEV version is 0: the volume can be read, "
+                    "not written");
+    }
+
     /* Bootstrap: INDEXF.SYS's own header (file 1) is always locatable
        directly from home block fields alone. Spec 5.1.7 guarantees
        for the first 16 files. */
@@ -156,7 +173,7 @@ ods2_result_t ods2_mount_write(const char *path, ods2_volume_t *vol)
 ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block)
 {
     if (!vol->writable) {
-        return fail("volume was not mounted for write (use ods2_mount_write)");
+        return not_writable(vol);
     }
     if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
         fwrite(block, 1, 512, vol->fp) != 512) {
@@ -268,7 +285,7 @@ static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_neede
     unsigned i;
 
     if (!vol->writable) {
-        return fail("volume was not mounted for write (use ods2_mount_write)");
+        return not_writable(vol);
     }
 
     /* BITMAP.SYS is always file number 2 - confirmed by real root
@@ -1272,7 +1289,7 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
     ods2_result_t r;
 
     if (!vol->writable) {
-        return fail("volume was not mounted for write (use ods2_mount_write)");
+        return not_writable(vol);
     }
     if (contains_wildcard(name)) {
         return fail("directory name cannot contain wildcard characters ('*' or '%')");
@@ -1384,7 +1401,7 @@ static ods2_result_t write_extents(ods2_volume_t *vol, const ods2_extent_t *exte
     int i;
 
     if (!vol->writable) {
-        return fail("volume was not mounted for write (use ods2_mount_write)");
+        return not_writable(vol);
     }
     if (chunk_cap > 0) {
         chunk = malloc(chunk_cap);
@@ -1607,7 +1624,7 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
                         spurious compiler truncation warning */
 
     if (!vol->writable) {
-        return fail("volume was not mounted for write (use ods2_mount_write)");
+        return not_writable(vol);
     }
     if (contains_wildcard(name)) {
         return fail("file name cannot contain wildcard characters ('*' or '%')");
@@ -1980,7 +1997,7 @@ ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_n
     ods2_result_t r;
 
     if (!vol->writable) {
-        return fail("volume was not mounted for write (use ods2_mount_write)");
+        return not_writable(vol);
     }
     r = ods2_read_header(vol, dir_file_number, dir_header);
     if (!r.ok) return r;
@@ -2034,7 +2051,7 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
     unsigned first_block, last_block;
 
     if (!vol->writable) {
-        return fail("volume was not mounted for write (use ods2_mount_write)");
+        return not_writable(vol);
     }
     if (block_count == 0) {
         return ok(); /* nothing to do */
@@ -2120,7 +2137,7 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
     bool removed = false;
 
     if (!vol->writable) {
-        return fail("volume was not mounted for write (use ods2_mount_write)");
+        return not_writable(vol);
     }
 
     r = ods2_read_header(vol, dir_file_number, dir_header);
@@ -2330,7 +2347,7 @@ ods2_result_t ods2_set_volume_label(ods2_volume_t *vol, const char *label,
 
     if (copies_out) *copies_out = 0;
     if (!vol->writable) {
-        return fail("volume was not mounted for write (use ods2_mount_write)");
+        return not_writable(vol);
     }
     why = ods2_make_volume_label(label, name);
     if (why != NULL) return fail(why);

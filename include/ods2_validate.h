@@ -57,6 +57,12 @@ typedef struct {
  * exists for. */
 ods2_validate_result_t ods2_validate_home(const ods2_home_t *home);
 
+/* True if the home block's structure version (low byte of
+ * HM2$W_STRUCLEV) is 0 rather than the 1 of spec 5.1.9.4.
+ * ods2_validate_home() accepts such a block (the OpenVMS Alpha V8.4 CD
+ * is one), but only for reading: nothing here writes to that volume. */
+bool ods2_home_is_version0(const ods2_home_t *home);
+
 /* Validates a file header's checksum (FH2$W_CHECKSUM, the last word of
  * the 512-byte header, covering everything before it) and, if
  * mapping data is available, that FAT$L_HIBLK is at least roughly

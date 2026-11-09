@@ -1549,7 +1549,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    r = ods2_mount_write(argv[1], &vol);
+    /* A structure version 0 volume (e.g. the OpenVMS Alpha V8.4 CD)
+       is mounted for reading only, so look before opening for write. */
+    r = ods2_mount(argv[1], &vol);
+    if (r.ok && vol.version0) {
+        fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version is 0; "
+                        "mounted read-only\n", argv[1]);
+    } else {
+        if (r.ok) ods2_dismount(&vol);
+        r = ods2_mount_write(argv[1], &vol);
+    }
     if (!r.ok) {
         fprintf(stderr, "%%ODS2-F-MOUNTERR, %s: %s\n", argv[1], r.problem);
         return 1;

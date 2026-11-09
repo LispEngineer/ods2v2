@@ -53,12 +53,12 @@ ods2_validate_result_t ods2_validate_home(const ods2_home_t *home)
     }
 
     /* struclev high byte = structure level, low byte = version.
-       ODS-2 is level 2; version 1 or higher. */
+       ODS-2 is level 2. Version 1 is what the spec (5.1.9.4) calls
+       for, but the OpenVMS Alpha V8.4 CD is level 2 version 0 and VMS
+       mounts it, so version 0 is accepted here; the caller must treat
+       such a volume as read-only (ods2_home_is_version0()). */
     if ((home->struclev >> 8) != 2) {
         return fail("HM2$W_STRUCLEV structure level is not 2 (not ODS-2)");
-    }
-    if ((home->struclev & 0xff) < 1) {
-        return fail("HM2$W_STRUCLEV version is 0 (expected >= 1)");
     }
 
     /* checksum1 covers the first 29 words (bytes 0-57) - the
@@ -82,6 +82,11 @@ ods2_validate_result_t ods2_validate_home(const ods2_home_t *home)
     }
 
     return ok();
+}
+
+bool ods2_home_is_version0(const ods2_home_t *home)
+{
+    return (home->struclev & 0xff) == 0;
 }
 
 ods2_validate_result_t ods2_validate_head(const uint8_t *raw_header)

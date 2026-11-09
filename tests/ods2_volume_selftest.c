@@ -32,6 +32,7 @@
 #include <time.h>
 #include "ods2_volume.h"
 #include "ods2_time.h"
+#include "ods2_checksum.h"
 
 /* Reads a little-endian FI2$Q_* date from 8 header bytes. */
 static uint64_t load_vms_time(const uint8_t *p)
@@ -50,6 +51,7 @@ static uint64_t load_vms_time(const uint8_t *p)
    isolated working file first, and operate on that instead. */
 #define SOURCE_DISK_PATH "samples/synthetic_disk.img"
 #define DISK_PATH "samples/synthetic_disk_working.img"
+#define V0_DISK_PATH "samples/synthetic_disk_v0.img"
 
 static void copy_file(const char *src, const char *dst)
 {
@@ -974,6 +976,77 @@ int main(void)
 
             ods2_dismount(&rvol);
         }
+    }
+
+    /* --- Structure version 0 (the OpenVMS Alpha V8.4 CD is level 2,
+       version 0): readable, never writable, image untouched. --- */
+    {
+        ods2_volume_t v0, v0w;
+        uint8_t *before, *after;
+        uint8_t blk[512], hdr[512], file_buf[512];
+        ods2_fid_t fid;
+        unsigned copies;
+        long size;
+        FILE *f;
+        uint16_t c;
+
+        copy_file(SOURCE_DISK_PATH, V0_DISK_PATH);
+        f = fopen(V0_DISK_PATH, "r+b");
+        assert(f != NULL);
+        assert(fseek(f, 512, SEEK_SET) == 0 && fread(blk, 1, 512, f) == 512);
+        assert(blk[12] == 0x01 && blk[13] == 0x02);  /* HM2$W_STRUCLEV 0x0201 */
+        blk[12] = 0x00;                                /* -> 0x0200 */
+        c = ods2_checksum(blk, 29);
+        blk[58] = (uint8_t) (c & 0xff); blk[59] = (uint8_t) (c >> 8);
+        c = ods2_checksum(blk, 255);
+        blk[510] = (uint8_t) (c & 0xff); blk[511] = (uint8_t) (c >> 8);
+        assert(fseek(f, 512, SEEK_SET) == 0 && fwrite(blk, 1, 512, f) == 512);
+        fclose(f);
+
+        f = fopen(V0_DISK_PATH, "rb");
+        assert(f != NULL);
+        assert(fseek(f, 0, SEEK_END) == 0);
+        size = ftell(f);
+        before = malloc((size_t) size); after = malloc((size_t) size);
+        assert(before != NULL && after != NULL);
+        rewind(f);
+        assert(fread(before, 1, (size_t) size, f) == (size_t) size);
+        fclose(f);
+
+        r = ods2_mount(V0_DISK_PATH, &v0);
+        assert(r.ok && v0.version0 && !v0.writable);
+        r = ods2_lookup_path(&v0, "", &fid);
+        assert(r.ok && fid.fid_num == 4);
+        r = ods2_read_header(&v0, fid.fid_num, hdr);
+        assert(r.ok);
+        printf("PASS: a structure version 0 volume mounts read-only and its "
+               "root directory header reads\n");
+
+        r = ods2_write_block(&v0, 500, blk);
+        assert(!r.ok);
+        r = ods2_create_directory(&v0, hdr, "NEWDIR", &fid);
+        assert(!r.ok);
+        r = ods2_set_volume_label(&v0, "NEWLABEL", &copies);
+        assert(!r.ok);
+        printf("PASS: writes to a version 0 volume are refused: %s\n", r.problem);
+        (void) file_buf;
+        ods2_dismount(&v0);
+
+        r = ods2_mount_write(V0_DISK_PATH, &v0w);
+        assert(!r.ok);
+        printf("PASS: a write mount of a version 0 volume is refused: %s\n",
+               r.problem);
+
+        f = fopen(V0_DISK_PATH, "rb");
+        assert(f != NULL);
+        assert(fread(after, 1, (size_t) size, f) == (size_t) size);
+        assert(fgetc(f) == EOF);
+        fclose(f);
+        assert(memcmp(before, after, (size_t) size) == 0);
+        printf("PASS: the version 0 image is byte-for-byte unchanged after "
+               "reads and refused writes\n");
+        free(before); free(after);
+        remove(V0_DISK_PATH);
     }
 
     ods2_dismount(&vol);
