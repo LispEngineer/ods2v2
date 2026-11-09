@@ -3318,8 +3318,8 @@ ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const ch
 
 /* The disk geometry (sectors x tracks) a device type reports for a volume of `blocks` blocks, which the storage
    control block must record for OpenVMS VAX V7.3's ANALYZE (cylinders = ceil(blocks / (sectors * tracks)) always).
-   Measured by ods5-vms2 (CORPUS section 16); `*measured` is false when this size was not one of the measured
-   points and the answer is a prediction (confirm with SHOW DEVICE/FULL on the target).
+   Measured by ods5-vms2 (CORPUS section 16) and in the corpus; `*measured` is false when this size was not one of
+   the sizes measured for the geometry returned, and the answer is a prediction (confirm with SHOW DEVICE/FULL).
      ld      the LD driver's containers: sectors and tracks grow with the size (LD is no fixed geometry): measured at
              2048, 20480, 204800, 1000001, 1024000, 2097152, 4000000 and 4190000 blocks; otherwise the largest
              sectors x tracks not above the square root of the size, grown from the fourth root (fits seven of the eight)
@@ -3334,10 +3334,18 @@ bool ods2_target_geometry(const char *target, uint64_t blocks, uint32_t *sectors
         { 2048, 7, 6 }, { 20480, 12, 11 }, { 204800, 21, 21 }, { 1000001, 32, 31 }, { 1024000, 32, 31 },
         { 2097152, 38, 38 }, { 4000000, 44, 45 }, { 4190000, 45, 45 },
     };
-    static const uint64_t ra_measured[] = { 131072, 1049298, 2097152, 4194304, 8388608, 33554432 };
-    size_t i;
+    /* the sizes each fixed geometry was measured at (the geometry of these types is believed to be the same at
+       other sizes, but that is a belief, and a size outside the list is called a prediction) */
+    static const uint64_t ra82_measured[] = { 131072, 1049298, 2097152, 4194304 };
+    static const uint64_t ra92_measured[] = { 8388608, 33554432 };
+    static const uint64_t scsi_measured[] = { 17773524 };                                    /* AXP1SYS */
+    static const uint64_t axpbox_measured[] = { 67108864, 134217728, 268435456 };           /* blank-volume library, 32-128 GiB */
+    static const uint64_t rz_measured[] = { 8192, 131072, 262144, 2097152, 8388608, 16777216 };
+    const uint64_t *list = NULL;
+    size_t i, n = 0;
     bool m = false;
 
+#define SET_LIST(a) do { list = (a); n = sizeof(a) / sizeof((a)[0]); } while (0)
     if (strcasecmp(target, "ld") == 0) {
         for (i = 0; i < sizeof(ld) / sizeof(ld[0]); i++) {
             if (ld[i].n == blocks) { *sectors = ld[i].s; *tracks = ld[i].t; if (measured) *measured = true; return true; }
@@ -3359,17 +3367,24 @@ bool ods2_target_geometry(const char *target, uint64_t blocks, uint32_t *sectors
         strcasecmp(target, "rq") == 0) {
         if (strcasecmp(target, "ra92") == 0 || (strcasecmp(target, "ra82") != 0 && blocks > 4194304)) {
             *sectors = 73; *tracks = 13;
+            SET_LIST(ra92_measured);
         } else {
             *sectors = 57; *tracks = 15;
+            SET_LIST(ra82_measured);
         }
-        for (i = 0; i < sizeof(ra_measured) / sizeof(ra_measured[0]); i++) if (ra_measured[i] == blocks) m = true;
-        if (measured) *measured = m;
-        return true;
+    } else if (strcasecmp(target, "scsi") == 0) {
+        *sectors = 63; *tracks = 255; SET_LIST(scsi_measured);
+    } else if (strcasecmp(target, "axpbox") == 0) {
+        *sectors = 96; *tracks = 96; SET_LIST(axpbox_measured);
+    } else if (strcasecmp(target, "rz") == 0) {
+        *sectors = 32; *tracks = 16; SET_LIST(rz_measured);
+    } else {
+        return false;
     }
-    if (strcasecmp(target, "scsi") == 0) { *sectors = 63; *tracks = 255; if (measured) *measured = true; return true; }
-    if (strcasecmp(target, "axpbox") == 0) { *sectors = 96; *tracks = 96; if (measured) *measured = true; return true; }
-    if (strcasecmp(target, "rz") == 0) { *sectors = 32; *tracks = 16; if (measured) *measured = true; return true; }
-    return false;
+#undef SET_LIST
+    for (i = 0; i < n; i++) if (list[i] == blocks) m = true;
+    if (measured) *measured = m;
+    return true;
 }
 
 /* The storage control block (BITMAP.SYS, VBN 1) as OpenVMS reads it. VAX V7.3's ANALYZE/DISK_STRUCTURE (VERIFY X-17)

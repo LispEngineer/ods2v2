@@ -139,6 +139,10 @@ int main(int argc, char **argv)
         cyl = (opt.blocks + per - 1) / per;
         printf("%%ODS2-I-GEOMETRY, the storage control block records %u sectors x %u tracks x %llu cylinders (%s)\n",
                sec, trk, cyl, geo_source != NULL ? geo_source : "the default");
+        if (cyl > 65535 && geo_source != NULL) {
+            fprintf(stderr, "ods2_init: %llu cylinders is more than 16 bits hold: a device with a 16-bit cylinder count (SIMH RQ) "
+                    "wraps it and then draws CHKSCB (or INTDIV) on VAX V7.3; measure the device's own geometry\n", cyl);
+        }
         if (geo_source == NULL) {
             printf("-ODS2-I-VAX, for an OpenVMS VAX V7.3 machine use --target=ld (LD driver), ra (SIMH RA82/RA92) or scsi: "
                    "its ANALYZE/DISK_STRUCTURE compares this with the device's own geometry; an existing image is fitted "

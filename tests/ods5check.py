@@ -453,7 +453,6 @@ def main():
         used_blocks = max(used_blocks, 0)
         where = 'dir %d (%s)' % (n, d['name'] if d else '?')
         lst = []
-        vl1 = []
         prevkey = None
         for bi in range(used_blocks):
             blk = data[bi * 512:(bi + 1) * 512]
@@ -496,10 +495,6 @@ def main():
                 if (size + 2 - (ent - pos)) % 8:
                     fnd.err('%s: record %r: odd tail length' % (where, nm))
                 vl = u16(blk, pos + 2)
-                # a directory's own entry is not judged: OpenVMS VAX V7.3 writes limit 1 for the directories it creates below
-                # [000000] (physical VAX96 run 1: VMSMADE.DIR, SUB.DIR), and a directory has no versions
-                if vl == 1 and not nm.upper().endswith('.DIR') and not (n == 4 and nm.upper().endswith('.SYS')):
-                    vl1.append(nm)
                 key = fold_name(nm if '.' in nm else nm + '.')
                 if v.level == 5 and not (flags & 0x40):
                     exp = stored_type_for(nm if '.' in nm else nm + '.')
@@ -527,12 +522,6 @@ def main():
                 nrec += 1
             if nrec == 0 and used_blocks > 1 and False:
                 fnd.err('%s block %d: empty block inside the EOF' % (where, bi + 1))
-        if vl1:
-            # every entry of a VMS-made volume has a version limit of 32767 or the directory's default (and explicit
-            # SET FILE/VERSION_LIMIT values, never 1: AXP1SYS has 40,000); ods2v2 wrote 1 on ODS-2 volumes until
-            # the fix, and VMS then purges version 1 of such a file as soon as it makes version 2
-            fnd.warn('%s: %d entries have version limit 1, e.g. %r: VMS purges version 1 when it makes version 2 '
-                     '(ods2v2 before the fix wrote this; SET FILE/VERSION_LIMIT=32767 puts it right)' % (where, len(vl1), vl1[0]))
         seen_nv = set()
         for ent in lst:
             key = (ent[0], ent[2])   # exact: the VMS-made asim8 ODS-5 disk has lp.COM and LP.COM in one directory
@@ -547,6 +536,20 @@ def main():
     referenced = set()
     dir_of_primary = {}
     for dn, lst in entries.items():
+        # An entry whose version limit is 1 makes VMS purge version 1 as soon as it makes version 2: every VMS-made user
+        # entry has 32767 or the directory's default (AXP1SYS: 40,000 of them, none with 1), and ods2v2 wrote 1 on ODS-2
+        # until the fix. Not judged: the reserved files' entries in the MFD, and a directory's own entry (judged by the
+        # header's directory bit, not the name): OpenVMS VAX V7.3 writes 1 for the directories it creates below [000000]
+        # (physical VAX96 run 1), and a directory has no versions.
+        vl1 = []
+        for nm, ntype, ver, fid, flags, vl in lst:
+            fn = fid[0] | (fid[3] << 16)
+            hd1 = headers.get(fn)
+            if vl == 1 and not (dn == 4 and fn <= 10) and not (hd1 is not None and u32(hd1, 52) & 0x2000):
+                vl1.append(nm)
+        if vl1:
+            fnd.warn('dir %d: %d entries have version limit 1, e.g. %r: VMS purges version 1 when it makes version 2 '
+                     '(ods2v2 before the fix wrote this; SET FILE/VERSION_LIMIT=32767 puts it right)' % (dn, len(vl1), vl1[0]))
         for nm, ntype, ver, fid, flags, vl in lst:
             fnum = fid[0] | (fid[3] << 16)
             hd = headers.get(fnum)
