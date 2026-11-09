@@ -359,13 +359,24 @@ def main():
         # FUTREVDAT, and every such file sorts and purges as if from the future): the writer's zone (TZ, or ODS2_TZ for
         # ods2v2) was not the VMS machine's. Compared with the host running this checker, so it is a warning.
         if d is not None and not FUTURE_SEEN.get('done'):
+            # the zone: ODS2_TZ (the VMS system's, as for ods2v2) when set, else this host's
+            _tzsave = os.environ.get('TZ')
+            if os.environ.get('ODS2_TZ'):
+                os.environ['TZ'] = os.environ['ODS2_TZ']
+                time.tzset()
             ahead = (time.time() + time.localtime().tm_gmtoff + 3506716800 + 3600) * 10000000
+            if os.environ.get('ODS2_TZ'):
+                if _tzsave is None: os.environ.pop('TZ', None)
+                else: os.environ['TZ'] = _tzsave
+                time.tzset()
             for key in ('credate', 'revdate', 'accdate', 'attdate'):
                 if d.get(key, 0) > ahead:
                     hrs = (d[key] - (ahead - 3600 * 10000000)) / 10000000 / 3600.0
                     fnd.warn('%s: %s is %.1f hours in the future of this host (file dates are local time of the VMS '
-                             'system: a writer that stamped UTC, or another zone, than the VMS machine runs in; see '
-                             'ODS2_TZ)' % (where, key, hrs))
+                             'system. Either the writer stamped another zone than the VMS machine runs in (a TZ=UTC script; '
+                             'run the checker with ODS2_TZ set to the VMS machine\'s zone to compare in that zone), or the '
+                             'VMS machine\'s clock is ahead of this host\'s, or the VMS system\'s zone is east of this host\'s)'
+                             % (where, key, hrs))
                     FUTURE_SEEN['count'] = FUTURE_SEEN.get('count', 0) + 1
                     break
             if FUTURE_SEEN.get('count', 0) >= 3:

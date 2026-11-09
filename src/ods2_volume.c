@@ -3126,7 +3126,7 @@ ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file
    volume, ALLOCCLR and the free count FREESPADRIFT). Only BADBLK.SYS's header (file 3) changes: one extent at
    floor(VOLSIZE / cluster) * cluster, a whole cluster, HIBLK = cluster, EFBLK = cluster + 1, HIGHWATER = cluster + 1. Done only
    when the size is not a multiple of the cluster, BADBLK.SYS is empty and the cluster's bit is not set (it is not free). */
-ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed)
+static ods2_result_t assign_partial_cluster_impl(ods2_volume_t *vol, bool *changed)
 {
     uint8_t h[512];
     ods2_head_core_t *core = (ods2_head_core_t *) h;
@@ -3136,8 +3136,29 @@ ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed)
     ods2_result_t r;
 
     *changed = false;
-    if (!vol->writable) return fail("volume was not mounted for write (use ods2_mount_write)");
+    if (!vol->writable) return not_writable(vol);
     if (vol->volsize == 0 || c == 0) return fail("the storage control block's volume size is unreadable");
+    {
+        /* VOLSIZE is trusted only from a storage control block that is one: the starter volume's placeholder (all ones,
+           0xAAAA) or a damaged block would put an extent far outside the volume into BADBLK.SYS */
+        uint8_t bh0[512], scb[512];
+        long here = ftell(vol->fp), size;
+        r = ods2_read_header(vol, 2, bh0);
+        if (!r.ok) return r;
+        r = ods2_read_file_block(vol, bh0, 1, scb);
+        if (!r.ok) return r;
+        if ((scb[0] | (scb[1] << 8)) != (vol->ods5 ? 0x0501 : 0x0201)) {
+            return fail("BITMAP.SYS's storage control block is not one (its structure level is not the volume's): the "
+                        "volume size it gives is not believed, nothing is changed");
+        }
+        /* and the partial cluster must start inside the image */
+        if (fseek(vol->fp, 0, SEEK_END) != 0) return fail("could not size the image");
+        size = ftell(vol->fp);
+        (void) fseek(vol->fp, here, SEEK_SET);
+        if (vol->volsize % c != 0 && (uint64_t) (vol->volsize / c * c) >= (uint64_t) size / 512) {
+            return fail("the blocks past the last whole cluster lie outside the image: nothing is changed");
+        }
+    }
     if (vol->volsize % c == 0) return ok();                          /* nothing past the last whole cluster */
     part = vol->volsize / c * c;
     r = ods2_read_header(vol, 3, h);
@@ -3151,7 +3172,13 @@ ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed)
         unsigned bit = part / c;
         r = ods2_read_header(vol, 2, bh);
         if (!r.ok) return r;
-        if (ods2_read_file_block(vol, bh, 2 + bit / 4096, bb).ok && ((bb[(bit % 4096) / 8] >> (bit % 8)) & 1)) {
+        r = ods2_read_file_block(vol, bh, 2 + bit / 4096, bb);
+        if (!r.ok) {
+            /* the bitmap does not reach the cluster's bit: the SCB and the bitmap disagree about the volume */
+            return fail("the bitmap does not cover the cluster past the last whole one (the storage control block and "
+                        "BITMAP.SYS disagree): not assigned to BADBLK.SYS");
+        }
+        if ((bb[(bit % 4096) / 8] >> (bit % 8)) & 1) {
             return fail("the cluster past the last whole one is marked free in the bitmap: not assigned to BADBLK.SYS");
         }
     }
@@ -3172,6 +3199,14 @@ ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed)
     if (!r.ok) return r;
     *changed = true;
     return ok();
+}
+
+ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed)
+{
+    ods2_result_t r;
+    TXN_BEGIN_OR_RETURN(vol);
+    r = assign_partial_cluster_impl(vol, changed);
+    return txn_end(vol, r);
 }
 
 /* SET VOLUME/GEOMETRY: the disk geometry the storage control block records (BITMAP.SYS VBN 1: sectors, tracks,

@@ -348,6 +348,46 @@ out=$($ODS2 "$TMP/pc.img" "SET VOLUME/PARTIAL_CLUSTER" 2>&1)
 check "... and a second run has nothing to do" yes "$(echo "$out" | grep -q 'nothing to do' && echo yes)"
 rm -f "$TMP/pc.img"
 
+# R17-1: SET VOLUME/PARTIAL_CLUSTER refuses an SCB that is not one (the starter volume's all-ones placeholder, a damaged
+# one) and a partial cluster outside the image: nothing is written
+$INIT "$TMP/pcs.img" 20000 --structure=2 --cluster=3 --label=PCSCB >/dev/null 2>&1
+python3 -I - "$TMP/pcs.img" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b'); f.seek(512); home = f.read(512)
+ibl = struct.unpack_from('<I', home, 24)[0]; ibs = struct.unpack_from('<H', home, 32)[0]
+# BADBLK.SYS emptied, as in an old volume
+f.seek((ibl + ibs + 2) * 512); h = bytearray(f.read(512))
+struct.pack_into('<HH', h, 24, 0, 0); struct.pack_into('<HH', h, 28, 0, 1); h[58] = 0; struct.pack_into('<I', h, 76, 1)
+for i in range(h[1] * 2, 510): h[i] = 0
+struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+f.seek((ibl + ibs + 2) * 512); f.write(h)
+# the SCB overwritten with the placeholder (all ones / 0xAAAA), as the starter volume has
+f.seek((ibl + ibs + 1) * 512); h2 = f.read(512)
+mp = h2[1] * 2; w0, w1 = struct.unpack_from('<HH', h2, mp); lbn = (((w0 >> 8) & 0x3f) << 16) | w1
+f.seek(lbn * 512); f.write(b'\xff' * 512)
+PY
+before=$(md5sum < "$TMP/pcs.img")
+out=$($ODS2 "$TMP/pcs.img" "SET VOLUME/PARTIAL_CLUSTER" 2>&1); rc=$?
+case "$out" in *"E-PARTIAL"*"storage control block"*) msg=refused ;; *) msg="$out" ;; esac
+check "SET VOLUME/PARTIAL_CLUSTER on a placeholder SCB: refused (exit 1), nothing written" "refused 1 $before" "$msg $rc $(md5sum < "$TMP/pcs.img")"
+rm -f "$TMP/pcs.img"
+if [ -f samples/empty_ods2_volume.dsk.gz ]; then
+    zcat samples/empty_ods2_volume.dsk.gz > "$TMP/starter.img" 2>/dev/null
+    before=$(md5sum < "$TMP/starter.img")
+    out=$($ODS2 "$TMP/starter.img" "SET VOLUME/PARTIAL_CLUSTER" 2>&1); rc=$?
+    case "$out" in *"nothing to do"*|*"E-PARTIAL"*) msg=ok ;; *) msg="$out" ;; esac
+    check "SET VOLUME/PARTIAL_CLUSTER on the starter volume (VMS-made, size a multiple of nothing or owned): no change" "ok $before" "$msg $(md5sum < "$TMP/starter.img")"
+    rm -f "$TMP/starter.img"
+fi
+
+# R17-4: the checker's future-date warning follows ODS2_TZ (the VMS system's zone) and names the clock as the other cause
+TZ=UTC $INIT "$TMP/tzf.img" 8192 --structure=2 --label=TZF >/dev/null 2>&1
+check "ods5check: dates written in UTC, host in Honolulu: warns; with ODS2_TZ=UTC (the VMS system's zone) it does not" "yes 0" \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzf.img" 2>&1 | grep -q 'hours in the future' && echo yes) $(ODS2_TZ=UTC TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzf.img" 2>&1 | grep -c 'hours in the future')"
+check "... the warning names both causes: the zone and the VMS machine's clock" yes \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzf.img" 2>&1 | grep 'hours in the future' | head -1 | grep -q "ODS2_TZ.*clock" && echo yes)"
+rm -f "$TMP/tzf.img"
+
 # the rule, pinned: with TZ set, a new file's Created date is that zone's wall-clock time, and it reads back as the same
 # time (DIR/FULL prints the stored local time unchanged)
 for zone in Pacific/Honolulu America/New_York Asia/Kolkata UTC; do

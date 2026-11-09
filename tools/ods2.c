@@ -2407,43 +2407,55 @@ static void import_decode_name(const char *linux_name, char *out, size_t cap)
     if (ods5_unescape_from_linux(linux_name, out, cap) == (size_t) -1) snprintf(out, cap, "%s", linux_name);
 }
 
-#define IMPORT_MAX_DEPTH 500
+#define IMPORT_MAX_DEPTH 2048   /* the creation cap; the host's 4,096-character path limit stops a tree sooner */
 
 static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_file_number, int depth)
 {
     struct dirent **list = NULL;
     int count, i;
+    struct import_bufs {
+        char path[ODS2_PATH_MAX * 2], literal[ODS2_PATH_MAX], shown[ODS2_PATH_MAX], dirname[ODS2_PATH_MAX + 8];
+        uint8_t dir_header[512], existing[512];
+        char target[ODS5_SYMLINK_MAX + 2];
+    } *b;
 
-    /* a bounded C stack: each level holds about 8 KB of path buffers (the Linux path limit is 4,096, the
-       tree would be cut by it long before this) */
+    /* a bounded C stack: the big buffers of a level are on the heap (one block per directory, freed when it is done), so
+       a frame is small and 2,048 levels fit the stack with room to spare */
     if (depth > IMPORT_MAX_DEPTH) {
         report_error("%%ODS2-E-DEEP, %s: directories nested more than %d levels: this directory and "
                      "everything below it are skipped\n", local_dir, IMPORT_MAX_DEPTH);
         st->errors++;
         return;
     }
+    b = malloc(sizeof(*b));
+    if (b == NULL) {
+        report_error("%%ODS2-E-NOMEM, out of memory importing %s\n", local_dir);
+        st->errors++;
+        return;
+    }
     count = scandir(local_dir, &list, NULL, import_name_cmp);
     if (count < 0) {
+        free(b);
         report_error("%%ODS2-E-OPENIN, could not read directory %s: %s\n", local_dir, strerror(errno));
         st->errors++;
         return;
     }
     for (i = 0; i < count; i++) {
         const char *entry = list[i]->d_name;
-        char path[ODS2_PATH_MAX * 2], literal[ODS2_PATH_MAX], shown[ODS2_PATH_MAX];
-        uint8_t dir_header[512];
+        char *path = b->path, *literal = b->literal, *shown = b->shown;
+        uint8_t *dir_header = b->dir_header;
         struct stat sb;
         ods2_result_t r;
         ods2_fid_t fid;
 
         if (strcmp(entry, ".") == 0 || strcmp(entry, "..") == 0) continue;
-        if (snprintf(path, sizeof(path), "%s/%s", local_dir, entry) >= (int) sizeof(path)) {
+        if (snprintf(path, sizeof(b->path), "%s/%s", local_dir, entry) >= (int) sizeof(b->path)) {
             report_error("%%ODS2-E-PATHTOOLONG, %s/%s: the path is too long: skipped\n", local_dir, entry);
             st->errors++;
             continue;
         }
-        import_decode_name(entry, literal, sizeof(literal));
-        display_name(literal, shown, sizeof(shown));
+        import_decode_name(entry, literal, sizeof(b->literal));
+        display_name(literal, shown, sizeof(b->shown));
         if (lstat(path, &sb) != 0) {
             report_error("%%ODS2-E-OPENIN, %s: %s\n", path, strerror(errno));
             st->errors++;
@@ -2456,11 +2468,11 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             continue;
         }
         if (S_ISDIR(sb.st_mode)) {
-            char dirname[ODS2_PATH_MAX + 8];
-            snprintf(dirname, sizeof(dirname), "%s.DIR", literal);
+            char *dirname = b->dirname;
+            snprintf(dirname, sizeof(b->dirname), "%s.DIR", literal);
             if (ods2_lookup_name(st->vol, dir_header, dirname, &fid).ok) {
                 /* already there: put the files into it, if it is a directory */
-                uint8_t existing[512];
+                uint8_t *existing = b->existing;
                 ods2_result_t fr = ods2_check_fid(fid);
                 if (!fr.ok) {
                     report_error("%%ODS2-E-DIRERR, %s: %s\n", shown, fr.problem);
@@ -2524,8 +2536,8 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             st->files++;
             st->bytes += in.length;
         } else if (S_ISLNK(sb.st_mode)) {
-            char target[ODS5_SYMLINK_MAX + 2];
-            ssize_t n = readlink(path, target, sizeof(target) - 1);
+            char *target = b->target;
+            ssize_t n = readlink(path, target, sizeof(b->target) - 1);
             if (n <= 0 || n > ODS5_SYMLINK_MAX) {
                 report_error("%%ODS2-E-SYMLINK, %s: cannot read the link or its target is too long\n", shown);
                 st->errors++;
@@ -2546,6 +2558,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
     }
     for (i = 0; i < count; i++) free(list[i]);
     free(list);
+    free(b);
 }
 
 static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods2_parsed_path_t *p,

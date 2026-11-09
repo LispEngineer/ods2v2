@@ -105,6 +105,16 @@ $INIT "$TMP/imp.img" 65536 --structure=5 --label=IMP >/dev/null 2>&1
 out=$($ODS2 "$TMP/imp.img" "IMPORT $TMP/imp [000000]" 2>&1); rc=$?
 check "IMPORT of a 260-level tree: all 260 directories and the file, exit 0, one warning naming the 4 deeper than 256" "yes 0 1" \
     "$(echo "$out" | grep -q 'IMPORTED, 1 file.*260 directories' && echo yes) $rc $(echo "$out" | grep -c '4 directories deeper than 256')"
+# a host tree 520 levels deep (past the old IMPORT cap of 500, whose path buffers were on the C stack): imported completely
+mkdir -p "$TMP/imp5"
+p="$TMP/imp5"; i=1
+while [ $i -le 520 ]; do p="$p/d"; i=$((i + 1)); done
+mkdir -p "$p"; echo deep > "$p/f.txt"
+$INIT "$TMP/imp5.img" 131072 --structure=5 --label=IMP5 >/dev/null 2>&1
+out=$($ODS2 "$TMP/imp5.img" "IMPORT $TMP/imp5 [000000]" 2>&1); rc=$?
+check "IMPORT of a 520-level host tree: all 520 directories and the file, exit 0 (no cap at 500)" "yes 0" \
+    "$(echo "$out" | grep -q 'IMPORTED, 1 file.*520 directories' && echo yes) $rc"
+check "... and ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/imp5.img" 2>&1 | tail -1)"
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_deep_check: $fails FAILED"
