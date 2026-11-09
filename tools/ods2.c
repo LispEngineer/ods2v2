@@ -1955,7 +1955,8 @@ static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods
         report_error("%%ODS2-E-LINK, %s\n", r.problem);
         return;
     }
-    printf("%%ODS2-I-LINKED, %s;1 is a link to file (%u,%u,%u)\n", np->filename,
+    printf("%%ODS2-I-LINKED, %s;1 is %s file (%u,%u,%u)\n", np->filename,
+           (vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS)) ? "a link to" : "an alias of",
            (unsigned) target_fid.fid_num, (unsigned) target_fid.fid_seq, (unsigned) target_fid.fid_rvn);
 }
 
@@ -2472,8 +2473,9 @@ static void print_help(void)
            "  IMPORT <linux-dir> <path>  copy a Linux directory tree onto the disk (UTF-8 names,\n"
            "                             directories made, symbolic links kept, ODS-5)\n"
            "  SYMLINK <link-path> <target>   make a symbolic link (ODS-5; as CREATE/SYMLINK=target)\n"
-           "  LINK <new-path> <existing-path> another directory entry for a file, with its link\n"
-           "                             count (HARDLINKS volume; as SET FILE/ENTER=new existing)\n"
+           "  LINK <new-path> <existing-path> another directory entry for a file (as SET\n"
+           "                             FILE/ENTER=new existing): a hard link with a link count on\n"
+           "                             a HARDLINKS volume, otherwise a plain alias (count unchanged)\n"
            "  TYPE[/RAW] path            print a file as text, one line per record (VAR, VFC, FIX,\n"
            "                             STM*) as VMS TYPE does; /RAW: the stored bytes\n"
            "  DELETE path                delete a file (one version) or empty directory\n"

@@ -95,5 +95,19 @@ $ODS2 "$TMP/fzbase.img" "IMPORT $TMP/fz [000000]" >/dev/null 2>&1
 check "60 iterations of writing to a damaged ODS-5 volume: no crash, hang or sanitizer report" 0 \
     "$(python3 -I tests/fuzz_ods5.py $ODS2 "$TMP/fzbase.img" 60 7 "$TMP/fzwork" --write "$TMP/fz" >/dev/null 2>&1; echo $?)"
 
+# LINK without HARDLINKS makes a plain alias (as VMS SET FILE/ENTER); deleting the alias keeps the file
+for st in 2 5; do
+    $INIT "$TMP/al.img" 8M --structure=$st --label=ALIAS >/dev/null 2>&1
+    printf 'alias test\n' > "$TMP/al.txt"
+    $ODS2 "$TMP/al.img" "COPY $TMP/al.txt [000000]A.TXT" >/dev/null 2>&1
+    check "structure $st, no HARDLINKS: LINK makes an alias" "yes" \
+        "$($ODS2 "$TMP/al.img" 'LINK [000000]B.TXT [000000]A.TXT' 2>&1 | grep -q 'alias of' && echo yes)"
+    check "structure $st: both names have one file ID" 1 \
+        "$($ODS2 "$TMP/al.img" 'DIR/FULL [000000]*.TXT' 2>&1 | sed -n 's/^  File ID: *//p' | sort -u | wc -l | tr -d ' ')"
+    $ODS2 "$TMP/al.img" 'DELETE [000000]B.TXT;1' >/dev/null 2>&1
+    check "structure $st: deleting the alias leaves the file" "alias test" "$($ODS2 "$TMP/al.img" 'TYPE [000000]A.TXT' 2>&1)"
+    check "structure $st: the checker is satisfied" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/al.img" 2>&1 | tail -1)"
+done
+
 rm -rf "$TMP"
 [ "$fails" -eq 0 ] || { echo "$fails INITIALIZE check(s) failed"; exit 1; }

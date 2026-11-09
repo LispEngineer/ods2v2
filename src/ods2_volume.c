@@ -1453,14 +1453,12 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
     spec.extent_count = 1;
     spec.hiblk = content_blocks;
     if (vol->ods5) spec.highwater = content_blocks + 1; /* the whole allocation is written, below */
-    spec.efblk = 1;   /* just the sentinel block so far */
-    spec.ffbyte = 2;  /* sentinel is 2 bytes */
-    if (vol->ods5) {
-        /* every directory VMS V8.4 made has FFBYTE 0 and EFBLK one past its
-           last block in use (ODS5_FORMAT_NOTES.md 11) */
-        spec.efblk = 2;
-        spec.ffbyte = 0;
-    }
+    /* every directory VMS made has FFBYTE 0 and EFBLK one past its last block in use: ODS-5 (V8.4,
+       ODS5_FORMAT_NOTES.md 11) and ODS-2 (the ODS2T corpus volumes on V8.4, V7.3-2 and VAX V7.3: EFBLK 2,
+       FFBYTE 0 for a one-block directory). ods2v2 used to write EFBLK 1 / FFBYTE 2 ("the sentinel only")
+       on ODS-2. */
+    spec.efblk = 2;
+    spec.ffbyte = 0;
 
     {
         char ident[ODS5_MAX_LITERAL_NAME + 16]; /* dirname is already bounded
@@ -1723,15 +1721,19 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
     const char *why;
     unsigned count;
     ods2_result_t r;
+    bool hardlinks = vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS) != 0;
 
     if (!vol->writable) return not_writable(vol);
-    if (!vol->ods5 || !(vol->home.volchar & ODS5_VC_HARDLINKS)) {
-        return fail("hard links need an ODS-5 volume with the HARDLINKS characteristic "
-                    "(INITIALIZE/VOLUME_CHARACTERISTICS=HARDLINKS)");
+    if (vol->ods5) {
+        why = ods5_check_new_name(name);
+        if (why != NULL) return fail(why);
+        if (!ods5_complete_name(name, link_name, sizeof(link_name))) return fail("file name too long");
+    } else {
+        /* ODS-2: upper case, name characters only, the dot completed, as for a new file */
+        if (contains_wildcard(name)) return fail("file name cannot contain wildcard characters ('*' or '%')");
+        if (strchr(name, ';') != NULL) return fail("file name cannot contain ';' - pass the name without its version");
+        if (!ods2_make_file_name(name, link_name, sizeof(link_name), &why)) return fail(why);
     }
-    why = ods5_check_new_name(name);
-    if (why != NULL) return fail(why);
-    if (!ods5_complete_name(name, link_name, sizeof(link_name))) return fail("file name too long");
 
     r = ods2_read_header(vol, target.fid_num, target_header);
     if (!r.ok) return r;
@@ -1739,21 +1741,29 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
         (core->filechar & 0x8000u)) {
         return fail("the file to link to does not exist");
     }
-    if ((core->struclev >> 8) != ODS5_LEVEL_5) {
-        return fail("the file to link to has a level 2 header (a reserved file): not linkable");
-    }
     if (core->filechar & 0x2000u) {
-        return fail("a hard link to a directory is not made here");
+        return fail("a link to a directory is not made here");
     }
     if (core->seg_num != 0) return fail("the file to link to is an extension header");
-    count = (unsigned) (target_header[ODS5_FH2_LINKCOUNT] | (target_header[ODS5_FH2_LINKCOUNT + 1] << 8));
-    if (count >= 32760u) return fail("the file already has the most links a file can (32760)");
+    if (hardlinks) {
+        if ((core->struclev >> 8) != ODS5_LEVEL_5) {
+            return fail("the file to link to has a level 2 header (a reserved file): not linkable");
+        }
+        count = (unsigned) (target_header[ODS5_FH2_LINKCOUNT] | (target_header[ODS5_FH2_LINKCOUNT + 1] << 8));
+        if (count >= 32760u) return fail("the file already has the most links a file can (32760)");
+    }
 
     r = ods2_read_header(vol, dir_file_number, dir_header);
     if (!r.ok) return r;
     r = ods2_lookup_name(vol, dir_header, link_name, &existing);
     if (r.ok) return fail("a file or directory with this name already exists in the directory");
 
+    if (!hardlinks) {
+        /* Without the HARDLINKS characteristic (any ODS-2 volume, an ODS-5 one without it) VMS SET
+           FILE/ENTER makes a plain alias: one more directory entry with the file's ID, nothing in
+           the file header changes (link count stays as it is; measured, ODS5_FORMAT_NOTES 12.12 and 15) */
+        return insert_into_directory(vol, dir_file_number, link_name, 1, target, 0);
+    }
     /* the count first, then the entry: interrupted in between, the count is one too high
        (a leaked header at worst), never one too low (a file freed while an entry names it) */
     count++;
@@ -2115,8 +2125,9 @@ undo:
  * twice its old size, is written there in full, its header is switched
  * to the single new extent, and only then is the old area freed.
  *
- * The end-of-file becomes EFBLK used+1 / FFBYTE 0, as VMS writes it,
- * and the directory's revision count and date go up. */
+ * The end-of-file becomes EFBLK used+1 / FFBYTE 0, as VMS writes it;
+ * when the directory gains blocks its revision count goes up by 2 per block and
+ * its revision date moves (as on VMS), otherwise they stay. */
 /* True when VMS will read back what is written at `vbn`: the file is
    not high-water marked, or `vbn` is below its high-water mark. */
 static bool below_highwater(const uint8_t *header, unsigned vbn)
@@ -2208,27 +2219,33 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
         if (core->highwater < written + 1) core->highwater = written + 1;
     }
     {
-        /* FI2$W_REVISION / FI2$Q_REVDATE; FI2$Q_CREDATE stays. The
-           header's own level says which ident area it has: the reserved
-           files, root directory included, keep level 2 on an ODS-5 volume. */
+        /* FI2$W_REVISION / FI2$Q_REVDATE; FI2$Q_CREDATE stays. Measured on VMS V8.4 and V7.3-2 (ODS-5
+           and ODS-2 corpus directories, ODS5_FORMAT_NOTES 15.4): an entry put into a directory block
+           that has room changes neither the revision count nor the revision date; each block the
+           directory gains adds 2 to the count (BIGDIR 60 blocks: 118; 29 blocks: 56) and moves the
+           revision date (and, at level 5, the attribute change date). The header's own level says
+           which ident area it has: the reserved files, root directory included, keep level 2 on an
+           ODS-5 volume. */
+        unsigned gained = used > old_used ? used - old_used : 0;
+        bool changed_size = used != old_used;
         uint8_t *ident = dir_header + (size_t) core->idoffset * 2;
-        if ((core->struclev >> 8) == ODS5_LEVEL_5) {
-            /* FI5$W_REVISION (2), FI5$Q_REVDATE (12), and the attribute
-               change date (44), as VMS moves both when it changes a directory */
-            uint16_t revision = (uint16_t) (ident[ODS5_FI5_REVISION] |
-                                            (ident[ODS5_FI5_REVISION + 1] << 8));
-            uint64_t now = ods2_vms_time_now();
-            revision++;
-            ident[ODS5_FI5_REVISION] = (uint8_t) (revision & 0xff);
-            ident[ODS5_FI5_REVISION + 1] = (uint8_t) (revision >> 8);
-            ods2_store_vms_time(ident + ODS5_FI5_REVDATE, now);
-            ods2_store_vms_time(ident + ODS5_FI5_ATTDATE, now);
-        } else {
-            uint16_t revision = (uint16_t) (ident[20] | (ident[21] << 8));
-            revision++;
-            ident[20] = (uint8_t) (revision & 0xff);
-            ident[21] = (uint8_t) (revision >> 8);
-            ods2_store_vms_time(ident + 30, ods2_vms_time_now()); /* local time */
+        if (changed_size) {
+            if ((core->struclev >> 8) == ODS5_LEVEL_5) {
+                uint16_t revision = (uint16_t) (ident[ODS5_FI5_REVISION] |
+                                                (ident[ODS5_FI5_REVISION + 1] << 8));
+                uint64_t now = ods2_vms_time_now();
+                revision = (uint16_t) (revision + 2u * gained);
+                ident[ODS5_FI5_REVISION] = (uint8_t) (revision & 0xff);
+                ident[ODS5_FI5_REVISION + 1] = (uint8_t) (revision >> 8);
+                ods2_store_vms_time(ident + ODS5_FI5_REVDATE, now);
+                ods2_store_vms_time(ident + ODS5_FI5_ATTDATE, now);
+            } else {
+                uint16_t revision = (uint16_t) (ident[20] | (ident[21] << 8));
+                revision = (uint16_t) (revision + 2u * gained);
+                ident[20] = (uint8_t) (revision & 0xff);
+                ident[21] = (uint8_t) (revision >> 8);
+                ods2_store_vms_time(ident + 30, ods2_vms_time_now()); /* local time */
+            }
         }
     }
     {
@@ -2548,6 +2565,29 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
             if (!r.ok) return r;
             if (version_out != NULL) *version_out = target_version;
             return ok();
+        }
+    }
+
+    if (!(vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS)) && !(target_core->filechar & 0x2000u) &&
+        target_core->seg_num == 0) {
+        /* No HARDLINKS characteristic: an extra directory entry for a file is an alias (SET FILE/ENTER,
+           LINK), with no link count. An entry that is not the file's primary one (the header names
+           another directory or another name) is just taken out; the file stays. PROVISIONAL: what VMS
+           does is measured in batch m1 (ODS5_FORMAT_NOTES 15). */
+        ods5_ident_t id;
+        const char *why;
+        char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
+        if (ods5_read_ident(target_header, &id, &why) &&
+            ods5_complete_name(id.name, a, sizeof(a)) && ods5_complete_name(name, b, sizeof(b))) {
+            /* the version is not compared: a header may carry another one than the entry's */
+            bool primary = target_core->backlink.fid_num == dir_file_number &&
+                           ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0;
+            if (!primary) {
+                r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+                if (!r.ok) return r;
+                if (version_out != NULL) *version_out = target_version;
+                return ok();
+            }
         }
     }
 

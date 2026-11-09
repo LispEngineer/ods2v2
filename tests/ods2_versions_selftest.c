@@ -134,6 +134,25 @@ static unsigned total_blocks(ods2_volume_t *vol, const uint8_t *header)
     return total;
 }
 
+/* The files are made under temporary names, but their directory entries are built by hand with the
+   final ones: give each header the final name too (level 2 ident area: the name field at byte 0), as
+   it would have had, so that DELETE sees the entry as the file's own and not as an alias. */
+static void give_header_name(ods2_volume_t *vol, ods2_fid_t fid, const char *name)
+{
+    uint8_t h[512];
+    ods2_head_core_t *core = (ods2_head_core_t *) h;
+    uint8_t *ident;
+    uint16_t sum;
+    assert(ods2_read_header(vol, fid.fid_num, h).ok);
+    ident = h + (size_t) core->idoffset * 2;
+    memset(ident, ' ', 20);
+    memcpy(ident, name, strlen(name));
+    sum = ods2_checksum(h, 255);
+    h[510] = (uint8_t) (sum & 0xff);
+    h[511] = (uint8_t) (sum >> 8);
+    assert(ods2_write_header(vol, fid.fid_num, h).ok);
+}
+
 static void create(ods2_volume_t *vol, unsigned dir_num, const char *name,
                    const char *content, size_t len, ods2_fid_t *fid_out)
 {
@@ -194,6 +213,13 @@ int main(void)
     }
     create(&vol, vers_fid.fid_num, "SAVAGE.TMP", "savage listing\n", 15, &savage_fid);
     create(&vol, vers_fid.fid_num, "YOW.TMP", "Yow! Are we having fun yet?\n", 28, &yow_fid);
+    for (i = 1; i <= 3; i++) {
+        char hn[16];
+        snprintf(hn, sizeof(hn), "NOTE.TXT;%d", i);
+        give_header_name(&vol, note_fid[i], hn);
+    }
+    give_header_name(&vol, savage_fid, "SAVAGE.LIS;1");
+    give_header_name(&vol, yow_fid, "YOW.ELC;1");
 
     /* Grow [VERS] to at least 3 blocks, the same way a directory
        grows in normal use. */

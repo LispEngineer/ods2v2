@@ -508,7 +508,20 @@ static void test_linkcount_and_failures(void)
             }
         }
         if (pass == 0) {
-            assert(!ods2_create_link(&vol, 4, "two.txt", fid).ok);      /* no links without the characteristic */
+            /* no HARDLINKS: LINK makes a plain alias (as VMS SET FILE/ENTER does), the file's header is
+               not touched, and deleting the alias leaves the file */
+            uint8_t before[512], after[512], dir[512];
+            ods2_fid_t found;
+            assert(ods2_read_header(&vol, fid.fid_num, before).ok);
+            assert(ods2_create_link(&vol, 4, "two.txt", fid).ok);
+            assert(ods2_read_header(&vol, fid.fid_num, after).ok && memcmp(before, after, 512) == 0);
+            assert(ods2_read_header(&vol, 4, dir).ok);
+            assert(ods2_lookup_name(&vol, dir, "TWO.TXT", &found).ok && found.fid_num == fid.fid_num);
+            assert(!ods2_create_link(&vol, 4, "two.txt", fid).ok);      /* the name exists */
+            assert(ods2_delete_version(&vol, 4, "two.txt", 0, NULL).ok);
+            assert(!ods2_lookup_name(&vol, dir, "TWO.TXT", &found).ok);
+            assert(ods2_lookup_name(&vol, dir, "ONE.TXT", &found).ok && found.fid_num == fid.fid_num);
+            assert(ods2_read_header(&vol, fid.fid_num, after).ok && memcmp(before, after, 512) == 0);
             ods2_dismount(&vol);
             continue;
         }
@@ -576,6 +589,49 @@ static void test_linkcount_and_failures(void)
     remove(DISK_PATH);
     printf("PASS: link count 0 on a volume without HARDLINKS, 1 with; a file, directory, symlink or link whose "
            "directory entry cannot be made leaves no allocation, file number or count behind\n");
+}
+
+/* VMS (measured on the corpus, V8.4 and V7.3-2): putting an entry into a directory block that has room changes
+   neither the directory's revision count nor its revision date; a block gained adds 2 to the count. */
+static void test_directory_revision(void)
+{
+    ods2_init_options_t opt;
+    ods2_volume_t vol;
+    uint8_t root[512], d[512];
+    ods2_fid_t sub;
+    unsigned i, num;
+    uint64_t rev;
+    unsigned revcount, level;
+    char name[80];
+
+    for (level = 2; level <= 5; level += 3) {
+        const size_t id = 80;       /* the ident area starts at byte 80 on both levels here */
+        memset(&opt, 0, sizeof(opt));
+        opt.blocks = 8192; opt.label = "DIRREV"; opt.level = level;
+        remove(DISK_PATH);
+        assert(ods2_initialize(DISK_PATH, &opt).ok);
+        assert(ods2_mount_write(DISK_PATH, &vol).ok);
+        root_header(&vol, root);
+        assert(ods2_create_directory(&vol, root, "sub", &sub).ok);
+        num = sub.fid_num;
+        assert(ods2_read_header(&vol, num, d).ok);
+        if (level == 5) { revcount = rd16(d + id + ODS5_FI5_REVISION); rev = rd64(d + id + ODS5_FI5_REVDATE); }
+        else { revcount = rd16(d + id + 20); rev = rd64(d + id + 30); }
+        for (i = 0; i < 3; i++) {
+            snprintf(name, sizeof(name), "file%u.txt", i);
+            make_file(&vol, num, name, "x", 1);
+        }
+        assert(ods2_read_header(&vol, num, d).ok);
+        assert(ods2_file_content_length(d) == 512);              /* still one block: inserted in place */
+        if (level == 5) {
+            assert(rd16(d + id + ODS5_FI5_REVISION) == revcount && rd64(d + id + ODS5_FI5_REVDATE) == rev);
+        } else {
+            assert(rd16(d + id + 20) == revcount && rd64(d + id + 30) == rev);
+        }
+        ods2_dismount(&vol);
+        remove(DISK_PATH);
+    }
+    printf("PASS: an entry inserted in place leaves a directory's revision count and date alone (as VMS)\n");
 }
 
 int main(void)
@@ -778,7 +834,8 @@ int main(void)
             assert(ods2_file_content_length(dh) >= 20u * 512u);    /* several blocks */
         }
         /* revision count and revision date of a directory that changed: FI5 offsets */
-        assert(rd16(dh + 80 + ODS5_FI5_REVISION) > 1);
+        /* VMS: 2 per block gained (BIGDIR of the corpus: 60 blocks, revision 118) */
+        assert(rd16(dh + 80 + ODS5_FI5_REVISION) == 2u * (unsigned) (ods2_file_content_length(dh) / 512u - 1));
         assert(rd64(dh + 80 + ODS5_FI5_REVDATE) >= rd64(dh + 80 + ODS5_FI5_CREDATE));
         free(listed);
         printf("PASS: a directory of %d long names grows over many blocks, every name found in order\n", M);
@@ -945,6 +1002,7 @@ int main(void)
     remove(DISK_PATH);
     test_fragmented();
     test_linkcount_and_failures();
+    test_directory_revision();
     printf("\nods5_write_selftest: all checks passed\n");
     return 0;
 }
