@@ -145,7 +145,7 @@ void ods5_format_vms_time(uint64_t t, char *out, size_t cap)
     long z, era, doe, yoe, y, doy, mp, d, m;
     unsigned long rem;
 
-    if (t == 0) { snprintf(out, cap, "<none specified>"); return; }
+    if (t == 0) { snprintf(out, cap, "<None specified>"); return; }
     secs = t / 10000000u;
     ticks = t % 10000000u;
     rem = (unsigned long) (secs % 86400u);

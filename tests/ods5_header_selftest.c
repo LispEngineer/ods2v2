@@ -153,7 +153,7 @@ int main(void)
     ods5_format_vms_time(0x00BC5280FA407E11ull, t, sizeof(t));
     assert(strcmp(t, "07-NOV-2026 20:42:32.94") == 0);
     ods5_format_vms_time(0, t, sizeof(t));
-    assert(strcmp(t, "<none specified>") == 0);
+    assert(strcmp(t, "<None specified>") == 0);
     ods5_format_vms_time(1, t, sizeof(t));
     assert(strcmp(t, "17-NOV-1858 00:00:00.00") == 0);
     ods5_format_vms_time(0x007C95674BEB4000ull, t, sizeof(t));

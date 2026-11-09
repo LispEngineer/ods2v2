@@ -78,6 +78,8 @@ void ods2_acl_format_id(uint32_t id, char *out, size_t cap)
         if (group == 0x3FFFu) snprintf(g, sizeof(g), "*"); else snprintf(g, sizeof(g), "%o", group);
         if (member == 0xFFFFu) snprintf(m, sizeof(m), "*"); else snprintf(m, sizeof(m), "%o", member);
         snprintf(out, cap, "[%s,%s]", g, m);
+    } else if (id == 0xFFFFFFFFu) {
+        snprintf(out, cap, "*");                         /* measured on AXP1SYS: 147 ACEs (IDENTIFIER=*,ACCESS=NONE) */
     } else {
         snprintf(out, cap, "%%X%08X", (unsigned) id);
     }

@@ -497,11 +497,19 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
     ods5_format_vms_time(id.expdate, t, sizeof(t));
     printf("  Expires:            %s\n", t);
     ods5_format_vms_time(id.bakdate, t, sizeof(t));
-    printf("  Backup:             %s\n", id.bakdate ? t : "<no backup recorded>");
+    printf("  Backup:             %s\n", id.bakdate ? t : "<No backup recorded>");
     if (id.has_ods5_dates) {
         ods5_format_vms_time(id.accdate, t, sizeof(t));
         printf("  Accessed:           %s\n", t);
         ods5_format_vms_time(id.attdate, t, sizeof(t));
+        printf("  Attributes changed: %s\n", t);
+        ods5_format_vms_time(id.revdate, t, sizeof(t));
+        printf("  Data modified:      %s\n", t);
+    } else if (vol->ods5) {
+        /* a level 2 header on an ODS-5 volume (the reserved files): VMS prints no access or attribute-change
+           date, and the revision date as the data modification date (AXP1SYS, 10 files) */
+        ods5_format_vms_time(0, t, sizeof(t));
+        printf("  Accessed:           %s\n", t);
         printf("  Attributes changed: %s\n", t);
         ods5_format_vms_time(id.revdate, t, sizeof(t));
         printf("  Data modified:      %s\n", t);
