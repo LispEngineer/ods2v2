@@ -8,7 +8,12 @@ sys.path.insert(0, HERE)
 import ods5read, stress   # noqa: E402
 
 out, rev = os.path.abspath(sys.argv[1]), sys.argv[2]
+src_text = sys.argv[3] if len(sys.argv) > 3 else 'origin/ods5 %s' % rev
 WHAT = {
+    'up2-starter': "upstream's own ods2 (branch fix-integrity 4aa2507) on its starter volume (VMS 7.1 INITIALIZE, RA92, label TRANSFER -> UP2START): 100 random COPY / DELETE / CREATE/DIRECTORY / SET FILE/VERSION_LIMIT operations, then a directory split phase (70 files with 39.39-character names in one directory, half deleted)",
+    'up2-asim6': "V7.3-2-made ODS2T6 corpus volume (asim6-ods2t6) + the same 100 operations and split phase with upstream's ods2 (label UP2A6)",
+    'up2-phvs2': "VAX V7.3-made ODS-2 volume (phvs2-ods2v) + the same 100 operations and split phase (label UP2PH)",
+    'up2-full': "the VAX V7.3-made volume filled to the brim with upstream's ods2 (the last COPY refused; label UP2FULL)",
     's4-f2-fresh': 'ods2_init volume, 150 random operations (directories up to 7 deep, files 0..6 MB, deletes, aliases, relabel)',
     's4-f5-hl': 'ods2_init volume, 150 random operations: spaces, dots, ISO Latin-1, UCS-2, 236-character names, hard links, symbolic links, IMPORT trees',
     's4-f5-nohl': 'the same without HARDLINKS (aliases, link count 0), odd size',
@@ -68,7 +73,7 @@ for f in sorted(glob.glob(os.path.join(out, '*.img'))):
     sums.append('%s  %s.img' % (h.hexdigest(), name))
 txt = """# S4: after-images of the ods5-stress harness, for VMS to confirm
 
-Made %s (-0500) by ods5-st (Claude Sonnet 5.5) with ods2v2 built from origin/ods5 %s (the stress branch ods5-stress is that plus tests only). Every image was built by the stress harness: after EVERY
+Made %s (-0500) by ods5-st (Claude Sonnet 5.5) with ods2v2 built from %s (the stress branch ods5-stress adds tests only). Every image was built by the stress harness: after EVERY
 operation tests/ods5check.py (0 errors, 0 warnings), an independent reader (names, sizes, MD5 of every file = the model) and ods2's EXPORT agreed; the final images were checked again (0/0, just before this file was written).
 All images are mode 444; SHA-256 in SHA256SUMS.TXT. Labels are unique, so any number can be mounted together.
 
@@ -82,13 +87,13 @@ Manifests (made from the harness's MODEL, not from ods2v2's output): `NAME.MANIF
 (count words included) as their data. The reserved files (INDEXF.SYS, BITMAP.SYS, ...) are not listed: they change by themselves.
 
 Suggested run on VMS (per image): MOUNT it (read-only is enough; V8.4: `MOUNT/NOWRITE`); `ANALYZE/DISK_STRUCTURE/READ_CHECK/NOREPAIR/LIST`; `DIRECTORY/FULL [000000...]*.*;*`; CHECKSUM of every file of the manifest and compare; TYPE a few; DISMOUNT.
-Expected from ods2v2's side: s4-full and s4-full2 have 0 free blocks, s4-exthdr and s4-exthdr2 1 free block; ANALYZE should report no errors on any image. Anything ANALYZE says is of interest, warnings too.
+%s ANALYZE should report no errors on any image. Anything ANALYZE says is of interest, warnings too.
 `NAME.VERLIMITS.TXT` lists the entries whose DIR$W_VERLIMIT is not 32767 (`limit spec`): ods2v2 writes 32767 (or the parent directory's default) for everything it creates; the few others were set on purpose by SET FILE/VERSION_LIMIT in the random operations (2, 3, 5, 32, 100, 32766) and must show up in VMS's DIRECTORY/FULL as that limit ("No version limit" for 32767).
 Version-limit check (added after the real VAX96 found ods2v2 writing version limit 1 instead of VMS's 32767, so that VMS purged ;1 when ;2 was made): on a WRITABLE mount of a COPY of the image, `COPY` (DCL) some small file onto the name of an
 ods2v2-made file of the manifest (so VMS creates the next version, e.g. `COPY SYS$LOGIN:LOGIN.COM DKA0:[D]F.TXT`), then `DIRECTORY DKA0:[D]F.TXT;*`: **both ;1 (the old one, unchanged) and the new ;2 must be listed**. Do the same for a directory-listed alias or symlink name and for
 one file in each of the three kinds of directory (the root [000000], a subdirectory, a big one). Also `DIRECTORY/FULL` on an ods2v2-made file and on a VMS-made one next to it: nothing may differ but dates, ids and sizes.
 The images are what ods2v2 leaves after normal, completed commands; interrupted-write and damaged-image behaviour is not in them.
-""" % (time.strftime('%Y-%m-%d %H:%M'), rev, '\n'.join(rows))
+""" % (time.strftime('%Y-%m-%d %H:%M'), src_text, '\n'.join(rows), ("Expected from the writer's side: up2-full has 0 free blocks." if any(r.startswith('| up2-') for r in rows) else "Expected from ods2v2's side: s4-full and s4-full2 have 0 free blocks, s4-exthdr and s4-exthdr2 1 free block;"))
 for name, body in (('README.md', txt), ('SHA256SUMS.TXT', '\n'.join(sums) + '\n')):
     p = os.path.join(out, name)
     if os.path.exists(p):

@@ -28,6 +28,7 @@ sys.path.insert(0, HERE)
 import ods5read   # noqa: E402
 
 ODS2 = os.environ.get('ODS2', os.path.join(ROOT, 'ods2'))
+ODS2_READ = os.environ.get('ODS2_READ')     # binary for read-only commands (EXPORT, SHOW VOLUME, TYPE) when ODS2 is upstream's, which has no EXPORT
 ODS2_INIT = os.environ.get('ODS2_INIT', os.path.join(ROOT, 'ods2_init'))
 CHECKER = os.path.join(ROOT, 'tests', 'ods5check.py')
 CORPUS = os.path.expanduser('~/tmp/ods5-cli')
@@ -94,6 +95,7 @@ class NameGen:
         self.rng = rng
         self.ods5 = ods5
         self.n = 0
+        self.no_dash = False      # upstream's ods2 has no ^ escapes: a name must not start with '-' ([-x] means "up one level")
 
     def _part(self, lo, hi, chars):
         n = self.rng.randint(lo, hi)
@@ -111,6 +113,8 @@ class NameGen:
                 ty = self._part(36, 39, ODS2_CHARS)
             if ty == 'DIR':
                 ty = 'DAT'
+            if self.no_dash and stem.startswith('-'):
+                stem = 'X' + stem[1:]
             return stem + '.' + ty, True
         kind = kind or r.choices(['plain', 'mixed', 'special', 'isl1', 'ucs2', 'dots', 'soft', 'long'],
                                  [30, 25, 10, 12, 8, 6, 3, 2])[0]
@@ -156,7 +160,8 @@ class NameGen:
 
     def dir_name(self):
         if not self.ods5:
-            return self._part(1, 12, ODS2_CHARS)
+            d = self._part(1, 12, ODS2_CHARS)
+            return 'X' + d[1:] if (self.no_dash and d.startswith('-')) else d
         r = self.rng
         kind = r.choices(['plain', 'mixed', 'special', 'isl1', 'ucs2', 'dots'], [35, 25, 8, 12, 8, 6])[0]
         alnum = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$_-'
@@ -455,7 +460,8 @@ class Res:
 
 
 def run_ods2(img, *cmd, timeout=600, stdin=None):
-    r = subprocess.run([ODS2, img] + list(cmd), capture_output=True, env=ENV, timeout=timeout, input=stdin)
+    binary = ODS2_READ if (ODS2_READ and cmd and cmd[0].startswith(('EXPORT', 'SHOW VOLUME', 'TYPE'))) else ODS2
+    r = subprocess.run([binary, img] + list(cmd), capture_output=True, env=ENV, timeout=timeout, input=stdin)
     return Res(r.returncode, r.stdout, r.stderr)
 
 
@@ -551,7 +557,12 @@ class Harness:
     def setup(self):
         r = self.rng
         cfg = self.config
-        if cfg.startswith('vms:'):
+        if cfg.startswith('starter:'):
+            subprocess.check_call(['cp', '--reflink=auto', cfg[8:], self.img])
+            os.chmod(self.img, 0o644)
+            self.ods5 = False
+            self.note('starter volume copy of %s' % cfg[8:])
+        elif cfg.startswith('vms:'):
             name = cfg[4:]
             src = os.path.join(CORPUS, name + '.img')
             subprocess.check_call(['cp', '--reflink=auto', src, self.img])
@@ -596,6 +607,7 @@ class Harness:
         self.baseline_keys = set(self.model.ents)
         self.baseline_dirs = set(self.model.dirs.values())
         self.names = NameGen(r, self.ods5)
+        self.names.no_dash = (self.profile == 'up2')
         self.note('volume: ODS-%d cluster %d blocks %d hardlinks %s files %d dirs %d'
                   % (5 if self.ods5 else 2, vol.cluster, vol.size_blocks, self.hardlinks, len(vol.files), len(vol.dirs)))
         self.verify('baseline')
@@ -819,8 +831,11 @@ class Harness:
         size = gen_size(r, self.big and self.profile != 'names')
         kind = r.choice(KINDS)
         data, src = self.src_for(size, kind)
-        fmt = fmt or r.choices([None, 'STMLF', 'STM', 'STMCR', 'FIX512', 'UDF', 'VAR', 'ATTR_FIX', 'ATTR_STM'],
-                               [60, 5, 5, 3, 6, 4, 6, 4, 4])[0]
+        if self.profile == 'up2':        # upstream's COPY: plain, /CONVERT, /ATTRIBUTES only; no /FORMAT, no Linux-name form
+            fmt = fmt or r.choices([None, 'VAR', 'ATTR_FIX', 'ATTR_STM'], [70, 10, 10, 10])[0]
+        else:
+            fmt = fmt or r.choices([None, 'STMLF', 'STM', 'STMCR', 'FIX512', 'UDF', 'VAR', 'ATTR_FIX', 'ATTR_STM'],
+                                   [60, 5, 5, 3, 6, 4, 6, 4, 4])[0]
         q = ''
         expect_data = data
         if fmt == 'VAR':
@@ -845,7 +860,7 @@ class Harness:
             longline = max_line(data, b'\n') > 32767
         elif fmt == 'STMCR':
             longline = max_line(data, b'\r') > 32767
-        via_linux_name = self.ods5 and r.random() < 0.15 and not display.endswith('.DIR')
+        via_linux_name = self.ods5 and self.profile != 'up2' and r.random() < 0.15 and not display.endswith('.DIR')
         if via_linux_name:
             lname = linux_name(display) if self.ods5 else display.lower()
             if '.' not in lname and False:
@@ -1225,6 +1240,7 @@ class Harness:
     OPS = {
         'names': [('copy', 45), ('mkdir', 12), ('delete', 10), ('rmdir', 3), ('bad_name', 10), ('case', 8), ('import', 10),
                   ('link', 4), ('symlink', 4), ('type', 2)],
+        'up2': [('copy', 45), ('mkdir', 10), ('delete', 15), ('rmdir', 4), ('label', 1), ('bad_name', 4), ('case', 3), ('set_default', 3), ('set_vlimit', 5), ('wild_delete', 2)],
         'links': [('copy', 15), ('link', 30), ('delete', 30), ('symlink', 10), ('mkdir', 8), ('rmdir', 6), ('type', 3)],
         'bigfile': [('copy', 50), ('delete', 20), ('type', 10), ('mkdir', 5), ('link', 5), ('import', 5)],
         'mix': [('copy', 40), ('mkdir', 8), ('delete', 14), ('rmdir', 4), ('link', 4), ('symlink', 3), ('label', 1),
@@ -1443,6 +1459,27 @@ class Harness:
         if res.ok:
             m.remove_dir(('FRAG',))
         self.verify('everything deleted')
+
+    def scenario_splitphase(self):
+        """directory splits: many long-named files into one directory, then half of them deleted (ODS-2 names of 39.39 characters)"""
+        r, m = self.rng, self.model
+        base = 'SPLIT%d' % self.seed
+        res = run_ods2(self.img, 'CREATE/DIRECTORY [%s]' % base)
+        if not res.ok:
+            self.fail('mkdir %s: %s' % (base, res.text[-200:]))
+        m.add_dir((), base)
+        dp = (base,)
+        items = []
+        for i in range(70):
+            nm = ('F%02d' % i + ''.join(r.choice(ODS2_CHARS) for _ in range(34))) + '.' + ''.join(r.choice(ODS2_CHARS) for _ in range(r.randint(3, 36)))
+            items.append((dp, nm, gen_content(r, r.choice([0, 1, 100, 511, 513, 3000]), 'tagged')))
+        oks, _ = self.batch_copy(items)
+        self.verify('split phase: %d files in one directory' % sum(oks), export=True)
+        gone = [(dp, it[1], 1) for it, ok in zip(items, oks) if ok][::2]
+        self.batch_delete(gone)
+        self.verify('split phase: half deleted', export=True)
+        vol = self.vol_stats()
+        self.note('split phase: directory %r has %d blocks' % (base, sum(c for _, c in vol.info[vol.dirs[dp]].extents)))
 
     def scenario_shatter(self):
         """every cluster of a small volume a file of its own, every other one deleted, then a file needing more pieces
@@ -1672,6 +1709,8 @@ class Harness:
                 break
             if self.opno % self.check_every == 0:
                 self.verify('after op %d' % self.opno, export=(self.opno % 3 == 0 or self.nops <= 40))
+        if self.profile == 'up2':
+            self.scenario_splitphase()
         self.verify('final')
         self.final_digest = None
         if os.environ.get('STRESS_DIGEST'):
