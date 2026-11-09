@@ -84,7 +84,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    r = ods2_read_header(&vol, dir_fid.fid_num, dir_header);
+    r = ods2_read_header(&vol, ods2_fid_number(dir_fid), dir_header);
     if (!r.ok) {
         fprintf(stderr, "could not read directory header: %s\n", r.problem);
         ods2_dismount(&vol);
@@ -98,7 +98,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    r = ods2_read_header(&vol, file_fid.fid_num, file_header);
+    r = ods2_read_header(&vol, ods2_fid_number(file_fid), file_header);
     if (!r.ok) {
         fprintf(stderr, "could not read file's own header: %s\n", r.problem);
         ods2_dismount(&vol);

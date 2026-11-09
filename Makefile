@@ -46,7 +46,7 @@ $(BUILD)/ods2_make_loop: tests/ods2_make_loop.c $(VOLUME_SRCS) include/ods2_volu
 
 TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest $(BUILD)/ods5_names_selftest $(BUILD)/ods5_directory_selftest $(BUILD)/ods5_header_selftest $(BUILD)/ods5_indexf_chain_selftest $(BUILD)/ods5_write_selftest $(BUILD)/ods5_review_selftest $(BUILD)/ods2_records_selftest $(BUILD)/ods2_acl_selftest
 
-.PHONY: all test tools dev-tools release clean starter-volume
+.PHONY: all test test-large tools dev-tools release clean starter-volume
 
 all: test tools dev-tools starter-volume
 
@@ -295,6 +295,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_ods5_write_check.sh
 	@echo "--- cli_ods5_init_check ---"
 	@sh tests/cli_ods5_init_check.sh
+	@echo "--- cli_nmx_check (file numbers above 65535) ---"
+	@sh tests/cli_nmx_check.sh
 	@echo "--- cli_ods5_integrity_check ---"
 	@sh tests/cli_ods5_integrity_check.sh
 	@echo "--- fault_inject (interrupted writes) ---"
@@ -333,6 +335,11 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@echo "Tools built: $(MAIN_TOOLS)"
 	@echo "(Additional single-purpose/diagnostic tools available via 'make dev-tools':"
 	@echo " $(DEV_TOOLS))"
+
+# 75,000 real files on ODS-2 and ODS-5 (file numbers past 65535); about 3 minutes
+test-large: tools ods2_dump_header
+	@echo "--- cli_nmx_big_check ---"
+	@sh tests/cli_nmx_big_check.sh
 
 release: CFLAGS += -O2
 release: SANFLAGS =

@@ -431,7 +431,8 @@ $ ods2 vms-made.img "DIR/FULL [CORPUS.RMS]SEQ_VFC.DAT"
 `TYPE/RAW` and `EXPORT` give the stored bytes, `EXPORT/RECORDS` the text, `TYPE/LINES` one line per record.
 
 **Limits.** No volume sets, no ODS levels 3, 4 or 6 (refused), no quota or journaling, no UCS-2 beyond the Basic
-Multilingual Plane in names, file numbers up to 65,535 (FID_NMX is not used). Rights identifiers are numbers (above);
+Multilingual Plane in names. File numbers are 24 bits (FID_NMX << 16 | FID_NUM), as on VMS volumes with more
+than 65,535 files; an entry naming another volume of a set (a nonzero RVN) is refused. Rights identifiers are numbers (above);
 HIDDEN and SUBSYSTEM ACEs, and the combinations of print or FORTRAN carriage control with the stream record formats,
 have not been compared with VMS (the stream formats are always shown as lines). A directory whose end-of-file is
 wrong (as old ods2v2 versions left them on ODS-2) is put right by the next write to it; other directory damage is not repaired.

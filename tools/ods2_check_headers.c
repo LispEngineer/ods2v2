@@ -84,7 +84,7 @@ int main(int argc, char **argv)
         core = (const ods2_head_core_t *) header;
         /* Skip unused header slots: fid_num==0 means this slot has
            never been allocated to a file. */
-        if (core->fid.fid_num == 0) {
+        if (ods2_fid_number(core->fid) == 0) {
             continue;
         }
         checked++;

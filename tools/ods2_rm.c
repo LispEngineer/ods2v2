@@ -81,7 +81,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    r = ods2_delete_version(&vol, dir_fid.fid_num, name, version, &deleted_version);
+    r = ods2_delete_version(&vol, ods2_fid_number(dir_fid), name, version, &deleted_version);
     if (!r.ok) {
         fprintf(stderr, "could not delete %s: %s\n", argv[3], r.problem);
         ods2_dismount(&vol);

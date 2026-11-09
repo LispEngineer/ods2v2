@@ -393,7 +393,9 @@ for level in 2 5; do
         python3 -I "$TMP/fidpatch.py" "$img" "$dnum" "$fnum" $which
         before=$(md5sum < "$img")
         out=$($ODS2 "$img" 'DELETE [D]ONE.TXT' 2>&1); rc=$?
-        case "$out" in *"does not follow"*) msg=refused ;; *) msg="$out" ;; esac
+        # an RVN: a volume set member, not supported; an NMX: the file is number NUM + 65536, which this volume
+        # (a few hundred files) does not have: not covered by INDEXF.SYS - either way not the file NUM
+        case "$out" in *"not supported"*|*"not covered by INDEXF"*) msg=refused ;; *) msg="$out" ;; esac
         check "ODS-$level: DELETE of an entry whose FID has an $which is refused (exit 1), nothing changes" "1 refused $before" "$rc $msg $(md5sum < "$img")"
     done
 done
