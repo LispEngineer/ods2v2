@@ -41,6 +41,34 @@ for n in range(11, upto + 1):
 f.seek(ibm * 512); f.write(bm)
 PY
 
+cat > "$TMP/bitat.py" <<'PY'
+import struct, sys
+img, n = sys.argv[1], int(sys.argv[2])
+f = open(img, 'rb'); f.seek(512); home = f.read(512)
+ibm = struct.unpack_from('<I', home, 24)[0]; size = struct.unpack_from('<H', home, 32)[0]
+cl = struct.unpack_from('<H', home, 14)[0]
+f.seek(ibm * 512); bm = f.read(size * 512)
+bit = (bm[(n - 1) // 8] >> ((n - 1) % 8)) & 1
+# the header slot: INDEXF.SYS VBN cl*4 + size + n; INDEXF's own header is file 1 at LBN ibm + size
+f.seek((ibm + size) * 512); h1 = f.read(512)
+mp = h1[1] * 2; inuse = h1[58]; p = mp; q = 0; ex = []
+while q < inuse:
+    w0 = struct.unpack_from('<H', h1, p)[0]; fmt = (w0 >> 14) & 3
+    if fmt == 1: cnt = (w0 & 0xff) + 1; lbn = (((w0 >> 8) & 0x3f) << 16) | struct.unpack_from('<H', h1, p + 2)[0]; p += 4; q += 2
+    elif fmt == 2: cnt = (w0 & 0x3fff) + 1; lbn = struct.unpack_from('<I', h1, p + 2)[0]; p += 6; q += 3
+    elif fmt == 3: cnt = (((w0 & 0x3fff) << 16) | struct.unpack_from('<H', h1, p + 2)[0]) + 1; lbn = struct.unpack_from('<I', h1, p + 4)[0]; p += 8; q += 4
+    else: break
+    ex.append((lbn, cnt))
+vbn = cl * 4 + size + n; lbn = None; cur = 1
+for l, c in ex:
+    if cur <= vbn < cur + c: lbn = l + vbn - cur
+    cur += c
+empty = 0
+if lbn is not None:
+    f.seek(lbn * 512); blk = f.read(512); empty = 1 if blk == bytes(512) else 0
+print(bit, empty)
+PY
+
 fid_of() { # fid_of <image> <path>: the file number DIR/FULL shows
     $ODS2 "$1" "DIR/FULL $2" 2>&1 | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p'
 }
@@ -61,6 +89,11 @@ for level in 2 5; do
         got="$got $(fid_of "$img" "[000000]S$i.TXT")"
     done
     check "ODS-$level: the allocator skips file number 65536 (FID_NUM 0): 65534 65535 65537 65538" "65534 65535 65537 65538" "$(echo $got)"
+    # what VMS does with the number (ods5-vms2's 70,000-file volume, V8.4: last file 70081): its index-bitmap bit is SET (in
+    # use) and its header slot is never written (zeros: checksum 0, level 0), so the checker's "bit set but no valid header"
+    # does not apply to it, and a file after it does not take its place
+    check "ODS-$level: the index bitmap bit of file 65536 is set, as on VMS (bit 65535), and the slot holds no header" "1 1" \
+        "$(python3 -I "$TMP/bitat.py" "$img" 65536)"
     rm -f "$img"
 done
 

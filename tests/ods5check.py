@@ -325,6 +325,10 @@ def main():
             deleted.add(n)
             if used:
                 fnd.err('header %d is deleted but its index bitmap bit is set' % n)
+        elif used and (n & 0xFFFF) == 0 and not any(b):
+            # file numbers whose low 16 bits are 0 (65536, 131072, ...) are never used (FID_NUM 0 means "no file"); VMS marks
+            # the number in use in the index bitmap and never writes its header slot (a volume of 70,000 files made on V8.4)
+            pass
         else:
             if used:
                 fnd.err('header %d: bitmap bit set but no valid header (checksum %04x/%04x, struclev %04x)'

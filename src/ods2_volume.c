@@ -1624,11 +1624,30 @@ static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_num
         if (!r.ok) return r;   /* the header may be on disk by now: the new extents are left as they are */
     }
 
+    /* The numbers the allocator skips (multiples of 65536: FID_NUM 0, "no file") are marked in use in the index bitmap
+       once the file numbers have passed them, as VMS does (a volume with 70,000 files made on V8.4: file 65536 has its bit
+       set and a header slot that was never written); the slot is left alone. */
+    {
+        unsigned m;
+        for (m = 65536u; m < n; m += 65536u) {
+            uint8_t bm[512];
+            unsigned bit = m - 1;
+            r = read_index_bitmap_block(vol, bit / 4096u, bm);
+            if (!r.ok) goto give_back_marked;
+            if (!(bm[(bit % 4096u) / 8u] & (1u << (bit % 8u)))) {
+                r = mark_index_bitmap(vol, m, true);
+                if (!r.ok) goto give_back_marked;
+            }
+        }
+    }
     r = mark_index_bitmap(vol, n, true);
     if (!r.ok) return r;
     *file_number_out = n;
     *seq_out = seq;
     return ok();
+
+give_back_marked:
+    return r;
 
 give_back:
     /* nothing of INDEXF.SYS's header was written: the extents taken for it are free again */
