@@ -71,8 +71,8 @@ def checker_errors(img, label=''):
     unreach = set(re.findall(r'directory (\d+) is not reachable from the root', r.stdout))
     bad = []
     for l in errs:
-        gd = re.search(r'dir (\d+) \(.*\) block \d+: .*(runs past the block|out of order|two entries)', l)
-        if gd and gd.group(1) in unreach and gd.group(1) in lost | unreach:
+        gd = re.match(r'ERROR  dir (\d+) \(', l)      # any structure error of a directory that is NOT reachable (an unlisted new directory whose first block was never initialised)
+        if gd and gd.group(1) in unreach:
             GARBAGE_DIRS.append(l[:100])      # an UNLISTED directory (header written, entry not yet) whose first block is not initialised: a leak ANALYZE/REPAIR would file in [SYSLOST]
             continue
         m = re.search(r'cluster \d+ \(LBN \d+\) is in use by file (\d+) but marked free', l)
@@ -262,8 +262,10 @@ def check_state(tag, img, before, targets, fails, label=''):
         fails.append('%s: reader failed: %r' % (tag, e))
         return 'unreadable'
     reach = set(str(f) for f in v.dirs.values())
+    listed_fids = set(fid for fid in v.files.values() if fid)
     probs = [p for p in v.problems if not (label in TRANSIENT_OPS and ('listed twice' in p or 'duplicate directory entry' in p))
-             and not (re.match(r'dir (\d+) block \d+: record past the block', p) and re.match(r'dir (\d+)', p).group(1) not in reach)]
+             and not (re.match(r'dir (\d+) block \d+: record past the block', p) and re.match(r'dir (\d+)', p).group(1) not in reach)
+             and not (re.match(r'file (\d+): extension chain broken', p) and int(re.match(r'file (\d+)', p).group(1)) not in listed_fids and int(re.match(r'file (\d+)', p).group(1)) not in set(v.dirs.values()))]   # an UNLISTED file (a half-done delete): a leak
     if probs:
         fails.append('%s: reader problems: %s' % (tag, probs[:3]))
     if len(probs) != len(v.problems):
