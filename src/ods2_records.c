@@ -52,7 +52,7 @@ struct ods2_rec_decoder {
     bool cr_pending;
     bool any_output;
     uint8_t last_out;
-    bool pending_nl;     /* the line terminator of the last record, not written yet (carriage control) */
+    int cc_state;        /* carriage control: CC_NONE, CC_EOL (the line ended with a carriage return, its newline not yet written), CC_MID */
 };
 
 bool ods2_rec_decodable(unsigned fat_rtype)
@@ -116,73 +116,85 @@ static bool put(ods2_rec_decoder_t *d, const uint8_t *p, size_t n)
     return true;
 }
 
-/* The line terminator after a record: written at once, or (carriage control) kept until the
- * next record says whether it is a line feed or a carriage return alone. */
-static bool end_line(ods2_rec_decoder_t *d)
+/*
+ * Carriage control, as VMS TYPE passes it on (measured on V8.4-2L2, batch m2: the records TYPE wrote with
+ * their prefix/postfix bytes, and a terminal capture). Each record leaves TYPE as prefix, data, postfix:
+ *   RAT CR (also every stream format): prefix 0x01 (one line feed), postfix 0x8D (a carriage return)
+ *   print file (RAT PRN, VFC): the first two bytes of the record's fixed control area, as they are
+ *   FORTRAN (RAT FTN): the first data byte is taken off and becomes the pair:
+ *       ' ' 01 8D   '0' 02 8D   '1' 8C 8D   '+' 00 8D   '$' 01 00   any other byte 01 8D
+ *   no carriage control (RAT none): 00 00, the records run together
+ * A prefix byte below 0x80 is that many line feeds, one with bit 7 set is the character in its low 7 bits
+ * (0x8C form feed, 0x8D carriage return); the same for a postfix byte.
+ * As Linux text: a carriage return after the data is "the line ends": a newline, but written only when the
+ * next record shows whether it was a newline or (prefix 0, overprint) a carriage return alone. A postfix of
+ * 0 leaves the cursor in the line; the next prefix of one or more line feeds then ends that line.
+ */
+enum { CC_NONE = 0, CC_EOL = 1, CC_MID = 2 };
+
+static bool lines_of(ods2_rec_decoder_t *d, unsigned n)
 {
     static const uint8_t lf = '\n';
-    if (d->options & ODS2_REC_CARRIAGE) {
-        d->pending_nl = true;
-        return true;
-    }
-    return put(d, &lf, 1);
+    while (n-- > 0) if (!put(d, &lf, 1)) return false;
+    return true;
 }
 
-static bool flush_nl(ods2_rec_decoder_t *d, uint8_t ch)
+static bool apply_prefix(ods2_rec_decoder_t *d, uint8_t p)
 {
-    bool ok = true;
-    if (d->pending_nl) {
-        d->pending_nl = false;
-        ok = put(d, &ch, 1);
+    static const uint8_t cr = '\r';
+    uint8_t ch;
+    if (p & 0x80) {
+        ch = p & 0x7f;
+        if (d->cc_state == CC_EOL && !lines_of(d, 1)) return false;
+        return put(d, &ch, 1);
     }
-    return ok;
+    if (p == 0) {                                   /* overprint: back to the start of the line */
+        if (d->cc_state == CC_EOL) return put(d, &cr, 1);
+        return true;
+    }
+    if (d->cc_state != CC_NONE) return lines_of(d, p);   /* the first line feed ends the line */
+    return lines_of(d, p - 1u);                           /* the first record: it starts on the next line */
+}
+
+static bool apply_postfix(ods2_rec_decoder_t *d, uint8_t q)
+{
+    if (q == 0x8D) { d->cc_state = CC_EOL; return true; }
+    d->cc_state = CC_MID;
+    if (q & 0x80) {
+        uint8_t ch = q & 0x7f;
+        return put(d, &ch, 1);
+    }
+    return lines_of(d, q);
 }
 
 /* One finished record: `hdr` is the fixed control area (VFC), `data` the record. */
 static bool emit_record(ods2_rec_decoder_t *d, const uint8_t *hdr, size_t hlen,
                         const uint8_t *data, size_t len)
 {
-    static const uint8_t lf = '\n', cr = '\r', ff = '\f';
-    unsigned n;
+    uint8_t p = 0x01, q = 0x8D;
+    uint8_t rat = d->a.rat;
 
-    if (d->options & ODS2_REC_CARRIAGE) {
-        if ((d->a.rat & ODS2_RAT_FTN) && len > 0) {
-            /* FORTRAN: the first byte of the record is the control character */
-            uint8_t c = data[0];
-            data++;
-            len--;
+    if (!(d->options & ODS2_REC_LINES)) {
+        if ((rat & ODS2_RAT_FTN) && d->a.rfm != ODS2_RFM_VFC) {
+            uint8_t c = len > 0 ? data[0] : ' ';
+            if (len > 0) { data++; len--; }
             switch (c) {
-            case '+': if (!flush_nl(d, '\r')) return false; break;
-            case '0': if (!flush_nl(d, '\n') || !put(d, &lf, 1)) return false; break;
-            case '-': if (!flush_nl(d, '\n') || !put(d, &lf, 1) || !put(d, &lf, 1)) return false; break;
-            case '1': if (!flush_nl(d, '\n') || !put(d, &ff, 1)) return false; break;
-            case '$': case 0: if (!flush_nl(d, '\n')) return false; break;
-            default:  if (!flush_nl(d, '\n')) return false; break;
+            case '0': p = 0x02; break;
+            case '1': p = 0x8C; break;
+            case '+': p = 0x00; break;
+            case '$': q = 0x00; break;
+            default: break;
             }
-        } else if ((d->a.rat & ODS2_RAT_PRN) && hlen >= 1) {
-            /* print file: header byte 0 is the prefix: 1..127 line feeds, 0 none (overprint),
-               bit 7 set: that character (low 7 bits) is sent instead */
-            uint8_t p = hdr[0];
-            if (p & 0x80) {
-                uint8_t ch = p & 0x7f;
-                if (!flush_nl(d, '\n') || !put(d, &ch, 1)) return false;
-            } else if (p == 0) {
-                if (!flush_nl(d, '\r')) return false;
-            } else {
-                if (!flush_nl(d, '\n')) return false;
-                for (n = 1; n < p; n++) if (!put(d, &lf, 1)) return false;
-            }
-        } else if (!flush_nl(d, '\n')) {
-            return false;
+        } else if ((rat & ODS2_RAT_PRN) && d->a.rfm == ODS2_RFM_VFC && hlen >= 2) {
+            p = hdr[0];
+            q = hdr[1];
+        } else if (!(rat & (ODS2_RAT_CR | ODS2_RAT_PRN | ODS2_RAT_FTN))) {
+            p = 0x00;
+            q = 0x00;
         }
-        (void) cr;
-        if (!put(d, data, len)) return false;
-        return end_line(d);
+        return apply_prefix(d, p) && put(d, data, len) && apply_postfix(d, q);
     }
-    (void) hdr;
-    (void) hlen;
-    if (!put(d, data, len)) return false;
-    return end_line(d);
+    return put(d, data, len) && lines_of(d, 1);
 }
 
 static bool feed_stream(ods2_rec_decoder_t *d, const uint8_t *data, size_t n)
@@ -214,6 +226,11 @@ static bool feed_stream(ods2_rec_decoder_t *d, const uint8_t *data, size_t n)
         if (data[i] == '\r') {
             if (!put(d, data + start, i - start)) return false;
             d->cr_pending = true;
+            start = i + 1;
+        } else if (data[i] == '\n') {
+            /* an LF without a CR also ends a record, and VMS TYPE keeps that LF in the record
+               (measured, m2: "four has a lone LF" gives the line, an empty line, then the rest) */
+            if (!put(d, data + start, i + 1 - start) || !put(d, &lf, 1)) return false;
             start = i + 1;
         }
     }
@@ -331,8 +348,11 @@ bool ods2_rec_finish(ods2_rec_decoder_t *d)
     switch (d->a.rfm) {
     case ODS2_RFM_FIX:
         if (d->rec_len > 0) {
-            d->problem = "the last fixed-length record is short";
-            ok = emit_record(d, NULL, 0, d->rec, d->rec_len);
+            /* VMS TYPE gives the whole record: what follows the end-of-file mark in the block
+               (zeros as ods2v2 and VMS write blocks) completes it (measured, m2) */
+            d->problem = "the last fixed-length record is short (padded with zeros, as VMS shows it)";
+            memset(d->rec + d->rec_len, 0, d->rec_cap - d->rec_len);
+            ok = emit_record(d, NULL, 0, d->rec, d->rec_cap);
         }
         break;
     case ODS2_RFM_VAR:
@@ -362,6 +382,6 @@ bool ods2_rec_finish(ods2_rec_decoder_t *d)
     default:
         break;
     }
-    if (ok && d->pending_nl) ok = flush_nl(d, '\n');
+    if (ok && d->cc_state == CC_EOL) ok = lines_of(d, 1);
     return ok;
 }

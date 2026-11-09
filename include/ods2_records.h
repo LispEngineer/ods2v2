@@ -54,7 +54,9 @@ typedef struct {
 } ods2_rec_attrs_t;
 
 /* Options */
-#define ODS2_REC_CARRIAGE 0x01u /* apply FORTRAN / print-file carriage control (see the .c) */
+/* Default: the carriage control of the file is applied as VMS TYPE passes it on (see the .c: print files,
+ * FORTRAN carriage control, none = records run together). ODS2_REC_LINES: ignore it, one line per record. */
+#define ODS2_REC_LINES 0x01u
 
 typedef struct ods2_rec_decoder ods2_rec_decoder_t;
 

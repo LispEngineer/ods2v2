@@ -924,6 +924,7 @@ typedef struct {
     bool overwrite;
     bool links;               /* repeat FIDs become hard links */
     bool records;             /* /RECORDS: sequential files as text, one line per record */
+    bool lines;               /* /LINES: ignore the files' carriage control, one line per record */
     const char *start;        /* the start directory's spelling (tree mode) */
     int files, symlinks, dirs_skipped, specials_skipped, errors;
     struct seen_fid { uint16_t num, seq; char *path; } *seen;
@@ -1220,7 +1221,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         sink.failed = false;
         {
             const char *note = NULL;
-            r = read_file_content(vol, header, x->records, 0, file_sink, &sink, &bytes, &sink_failed, &note);
+            r = read_file_content(vol, header, x->records, x->lines ? ODS2_REC_LINES : 0, file_sink, &sink, &bytes, &sink_failed, &note);
             if (note != NULL && r.ok) report_error("%%ODS2-W-RECORDS, %s: %s\n", shown, note);
         }
         if (fclose(f) != 0) sink.failed = true;
@@ -1280,10 +1281,11 @@ static void cmd_export(ods2_volume_t *vol, const ods2_parsed_path_t *p, const ch
         else if (matches(q, "OVERWRITE")) x.overwrite = true;
         else if (matches(q, "LINKS")) x.links = true;
         else if (matches(q, "RECORDS")) x.records = true;
+        else if (matches(q, "LINES")) { x.records = true; x.lines = true; }
         else if (matches(q, "RAW")) x.records = false;
         else {
             report_error("%%ODS2-E-BADQUAL, unrecognized EXPORT qualifier /%s "
-                         "(use /VERSIONS, /OVERWRITE, /LINKS, /RECORDS or /RAW)\n", q);
+                         "(use /VERSIONS, /OVERWRITE, /LINKS, /RECORDS, /LINES or /RAW)\n", q);
             return;
         }
         quals += 1 + strcspn(quals + 1, "/");
@@ -2320,7 +2322,7 @@ static bool stdout_sink(void *ctx, const uint8_t *data, size_t n)
     return fwrite(data, 1, n, stdout) == n;
 }
 
-static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw)
+static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw, bool lines)
 {
     uint8_t dir_header[512], file_header[512];
     ods2_fid_t dir_fid, file_fid;
@@ -2372,7 +2374,7 @@ static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw)
         bool sink_failed = false;
         size_t bytes = 0;
         const char *note = NULL;
-        r = read_file_content(vol, file_header, !raw, 0, stdout_sink, NULL, &bytes, &sink_failed, &note);
+        r = read_file_content(vol, file_header, !raw, lines ? ODS2_REC_LINES : 0, stdout_sink, NULL, &bytes, &sink_failed, &note);
         if (r.ok && fflush(stdout) != 0) sink_failed = true;
         if (note != NULL && r.ok && !sink_failed) fprintf(stderr, "%%ODS2-W-RECORDS, %s: %s\n", spec, note);
         if (sink_failed) {
@@ -2476,12 +2478,12 @@ static void print_help(void)
            "  DIR/FULL ...               per file: id, size, owner, protection, dates (also\n"
            "                             access and attribute dates on ODS-5), record format\n"
            "  SET NAMES UTF8|ESCAPED     the same for every command that shows names\n"
-           "  EXPORT[/VERSIONS][/OVERWRITE][/LINKS][/RECORDS] <path> <linux-path>\n"
+           "  EXPORT[/VERSIONS][/OVERWRITE][/LINKS][/RECORDS|/LINES] <path> <linux-path>\n"
            "                             copy files off the volume to Linux files (UTF-8 names;\n"
            "                             wildcards, [dir...] recreates the tree; symbolic links\n"
            "                             become Linux symbolic links); \"quotes\" keep a space;\n"
            "                             the bytes as stored, or with /RECORDS sequential files as\n"
-           "                             text, one line per record\n"
+           "                             text as TYPE shows them (/LINES: one line per record)\n"
            "  CREATE/DIRECTORY path      create a directory\n"
            "  COPY <local-file> <path>   write a local file onto the disk (Stream_LF)\n"
            "  COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) <local-file> <path>\n"
@@ -2498,8 +2500,10 @@ static void print_help(void)
            "  LINK <new-path> <existing-path> another directory entry for a file (as SET\n"
            "                             FILE/ENTER=new existing): a hard link with a link count on\n"
            "                             a HARDLINKS volume, otherwise a plain alias (count unchanged)\n"
-           "  TYPE[/RAW] path            print a file as text, one line per record (VAR, VFC, FIX,\n"
-           "                             STM*) as VMS TYPE does; /RAW: the stored bytes\n"
+           "  TYPE[/RAW|/LINES] path     print a sequential file as text the way VMS TYPE shows its\n"
+           "                             records (VAR, VFC, FIX, STM*; carriage control applied:\n"
+           "                             none = records run together); /LINES: always one line\n"
+           "                             per record; /RAW: the stored bytes\n"
            "  DELETE path                delete a file (one version) or empty directory\n"
            "  SET DEFAULT path           set the current default directory\n"
            "  SHOW DEFAULT               show the current default directory\n"
@@ -2843,7 +2847,7 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
         }
         if (refuse_wild_dir(&p, "TYPE", tokens[1])) return true;
         {
-            bool raw = false;
+            bool raw = false, lines = false;
             const char *s = quals;
             while (s != NULL && *s == '/') {
                 char q[32];
@@ -2852,13 +2856,14 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
                 memcpy(q, s + 1, ql);
                 q[ql] = '\0';
                 if (matches(q, "RAW")) raw = true;
+                else if (matches(q, "LINES")) lines = true;
                 else {
-                    report_error("%%ODS2-E-BADQUAL, unrecognized TYPE qualifier /%s (use /RAW)\n", q);
+                    report_error("%%ODS2-E-BADQUAL, unrecognized TYPE qualifier /%s (use /RAW or /LINES)\n", q);
                     return true;
                 }
                 s += 1 + strcspn(s + 1, "/");
             }
-            cmd_type(vol, &p, raw);
+            cmd_type(vol, &p, raw, lines);
         }
         return true;
     }

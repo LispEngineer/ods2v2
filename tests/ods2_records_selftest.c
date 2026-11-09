@@ -97,19 +97,28 @@ int main(void)
     a.rfm = ODS2_RFM_STMLF;
     same_for_all_pieces("STMLF", &a, 0, (const uint8_t *) "a\nb", 3, "a\nb\n", 4);
     a.rfm = ODS2_RFM_STM;
-    same_for_all_pieces("STM", &a, 0, (const uint8_t *) "a\r\nb\rc\nd\r", 9, "a\nb\rc\nd\r\n", 9);
+    same_for_all_pieces("STM", &a, 0, (const uint8_t *) "a\r\nb\rc\nd\r", 9, "a\nb\rc\n\nd\r\n", 10);
     a.rfm = ODS2_RFM_STMCR;
     same_for_all_pieces("STMCR", &a, 0, (const uint8_t *) "a\rb\r", 4, "a\nb\n", 4);
 
-    /* FIX of 4 bytes, the last record short */
-    a.rfm = ODS2_RFM_FIX; a.rsize = 4; a.maxrec = 4;
-    same_for_all_pieces("FIX", &a, 0, (const uint8_t *) "abcdefghij", 10, "abcd\nefgh\nij\n", 13);
+    /* FIX of 4 bytes with CR carriage control, the last record short (completed with zeros, as VMS shows it) */
+    a.rfm = ODS2_RFM_FIX; a.rsize = 4; a.maxrec = 4; a.rat = ODS2_RAT_CR;
+    same_for_all_pieces("FIX", &a, 0, (const uint8_t *) "abcdefghij", 10, "abcd\nefgh\nij\0\0\n", 15);
+    /* no carriage control: the records run together (VMS TYPE writes them with prefix and postfix 0) */
+    a.rat = 0;
+    same_for_all_pieces("FIX, no carriage control", &a, 0, (const uint8_t *) "abcdefgh", 8, "abcdefgh", 8);
+    /* ... unless the caller wants one line per record */
+    same_for_all_pieces("FIX, no carriage control, one line per record", &a, ODS2_REC_LINES, (const uint8_t *) "abcdefgh", 8, "abcd\nefgh\n", 10);
+    /* FORTRAN carriage control: the first byte of each record is the control (' ' 0 1 + $; measured) */
+    a.rfm = ODS2_RFM_FIX; a.rsize = 5; a.maxrec = 5; a.rat = ODS2_RAT_FTN;
+    same_for_all_pieces("FIX FORTRAN", &a, 0, (const uint8_t *) " aaaa0bbbb1cccc+dddd$eeee ffff", 30,
+                        "aaaa\n\nbbbb\n\x0c" "cccc\rdddd\neeee\nffff\n", 32);
 
     /* VFC with a 2-byte control area */
     a.rfm = ODS2_RFM_VFC; a.vfcsize = 2; a.rat = ODS2_RAT_PRN;
     {
         const uint8_t f[] = { 5, 0, 1, 0x8d, 'h', 'i', 'x', 0, 4, 0, 2, 0x8d, 'y', 'o' };
-        same_for_all_pieces("VFC", &a, 0, f, sizeof(f), "hix\nyo\n", 7);
+        same_for_all_pieces("VFC", &a, 0, f, sizeof(f), "hix\n\nyo\n", 8);
     }
     /* a record length that cannot be: reported */
     {

@@ -37,6 +37,9 @@ for f in "$TMP"/src/*; do
     $ODS2 "$TMP/rms.img" "TYPE/RAW [000000]$n" > "$TMP/out" 2>/dev/null
     cmp -s "$f" "$TMP/out" && echo "PASS: TYPE/RAW $n" || { echo "FAIL: TYPE/RAW $n"; fail=$((fail+1)); }
 done
+# /LINES: one line per record whatever the carriage control
+check "TYPE/LINES: FIX_NONE (records that otherwise run together) as 8 lines" 8 "$($ODS2 "$TMP/rms.img" 'TYPE/LINES [000000]FIX_NONE.TXT' 2>/dev/null | wc -l | tr -d ' ')"
+check "TYPE FIX_NONE: the records run together (no line ends), as VMS TYPE shows them" 0 "$($ODS2 "$TMP/rms.img" 'TYPE [000000]FIX_NONE.TXT' 2>/dev/null | wc -l | tr -d ' ')"
 # DIR/FULL words the record format and attributes as VMS does
 full=$($ODS2 "$TMP/rms.img" 'DIR/FULL [000000]VFC_PRN.TXT' 2>&1)
 check "DIR/FULL: VFC format line" "Record format:      VFC, 2 byte header, maximum 0 bytes, longest 20 bytes" "$(echo "$full" | sed -n 's/^  Record format: */Record format:      /p')"

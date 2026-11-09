@@ -49,20 +49,44 @@ add('BAD_VAR.TXT', 'VAR', CR, b'\x00\x80abc')
 add('EMPTY_VAR.TXT','VAR', CR, b'')
 add('BIG_VAR.TXT', 'VAR', CR,  var([b'record number %06d ' % i + b'z' * (i % 97) for i in range(1, 4000)]), rsize=200)
 
-# the text TYPE gives for each file (no carriage control applied): one line per record
-LINES = b''.join(l + b'\n' for l in lines)
-def fixlines(n, extra=b''): return b''.join(b'%-20s\n' % (b'rec %d' % i) for i in range(1, n + 1)) + extra
-EXPECT = {
-    'VAR_CR.TXT': LINES, 'VAR_NONE.TXT': LINES, 'VAR_BLK.TXT': LINES,
-    'VFC_PRN.TXT': b'alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\n',
-    'VFC_CR.TXT': b'one\ntwo\nthree\n', 'VFC_NONE.TXT': b'one\ntwo\nthree\n', 'VFC_4.TXT': b'one\ntwo\n',
-    'FIX_NONE.TXT': fixlines(8), 'FIX_CR.TXT': fixlines(8), 'FIX_SHORT.TXT': fixlines(3, b'tail\n'),
-    'STM_CR.TXT': b'one\ntwo\n\nfour has a lone LF \n inside\nlast no end\n',
-    'STMLF_CR.TXT': b'one\ntwo\n\nfour\nlast no end\n', 'STMLF_END.TXT': b'one\ntwo\n',
+# stream and carriage-control cases whose VMS TYPE output is not measured yet (batch m2b): no expected text
+add('STM_NONE.TXT',  'STM',   0, b'one\r\ntwo\r\nthree')
+add('STMLF_NONE.TXT','STMLF', 0, b'one\ntwo\nthree\n')
+add('STMCR_NONE.TXT','STMCR', 0, b'one\rtwo\rthree\r')
+add('STM_FF.TXT',    'STM',   CR, b'one\x0ctwo\x0bthree\r\nfour')
+add('STMLF_FF.TXT',  'STMLF', CR, b'one\x0ctwo\nthree')
+add('VAR_PRN.TXT',   'VAR',   PRN, var([b'alpha', b'beta']), rsize=20)
+add('VFC_FTN.TXT',   'VFC',   FTN, var([b' abc', b'0def', b'1ghi'], vfc=[bytes([1,0x8d])] * 3), vfcsize=2, rsize=20)
+add('FTN_ODD.TXT',   'VAR',   FTN, var([b'\0nul', b'xother', b'', b'2two', b' end', b'$', b'+']), rsize=20)
+add('VFC_PRN_ODD.TXT','VFC',  PRN, var([b'a', b'b', b'c', b'd', b'e', b'f'],
+    vfc=[bytes([4,0]), bytes([0,0]), bytes([5,0x8a]), bytes([1,1]), bytes([0x80,0x8d]), bytes([2,0x8c])]), vfcsize=2, rsize=20)
+add('FIX_PRN.TXT',   'FIX',   PRN, b''.join(b'%-10s' % (b'r%d' % i) for i in range(1, 5)), rsize=10, maxrec=10)
+add('FIX_CRFTN.TXT', 'FIX',   CR|FTN, b''.join(b'%-10s' % (b' r%d' % i) for i in range(1, 4)), rsize=10, maxrec=10)
+
+# the text VMS TYPE shows for each file, from the records VMS V8.4-2L2 wrote with TYPE/OUTPUT (batch m2),
+# as Linux text (a carriage return after the data = a newline, a bare CR = overprint): ods5-wr2 batch m2, 9-NOV-2026
+VMS_EXPECT = {
+    'EMPTY_VAR.TXT': b'',
+    'FIX_CR.TXT': b'rec 1               \nrec 2               \nrec 3               \nrec 4               \nrec 5               \nrec 6               \nrec 7               \nrec 8               \n',
+    'FIX_FTN.TXT': b'rec                \n\nrec                \n\x0crec                \rrec                \nrec                \n',
+    'FIX_NONE.TXT': b'rec 1               rec 2               rec 3               rec 4               rec 5               rec 6               rec 7               rec 8               ',
+    'FIX_SHORT.TXT': b'rec 1               rec 2               rec 3               tail\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
     'STMCR_CR.TXT': b'one\ntwo\n\nfour\nlast no end\n',
-    'UDF.BIN': bytes(range(256)) * 3, 'EMPTY_VAR.TXT': b'',
-    'BIG_VAR.TXT': b''.join(b'record number %06d ' % i + b'z' * (i % 97) + b'\n' for i in range(1, 4000)),
+    'STMLF_CR.TXT': b'one\ntwo\n\nfour\nlast no end\n',
+    'STMLF_END.TXT': b'one\ntwo\n',
+    'STM_CR.TXT': b'one\ntwo\n\nfour has a lone LF \n\n inside\nlast no end\n',
+    'VAR_BLK.TXT': b'line 001 of the test\nline 002 of the test\nline 003 of the test\nline 004 of the test\n\nline 006 of the test\nodd\nline 008 of the test\nline 009 of the test\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline 011 of the test\nline 012 of the test\nline 013 of the test\nline 014 of the test\nline 015 of the test\nline 016 of the test\nline 017 of the test\nline 018 of the test\nline 019 of the test\nline 020 of the test\nline 021 of the test\nline 022 of the test\nline 023 of the test\nline 024 of the test\nline 025 of the test\nline 026 of the test\nline 027 of the test\nline 028 of the test\nline 029 of the test\nline 030 of the test\nline 031 of the test\nline 032 of the test\nline 033 of the test\nline 034 of the test\nline 035 of the test\nline 036 of the test\nline 037 of the test\nline 038 of the test\nline 039 of the test\nline 040 of the test\n',
+    'VAR_CR.TXT': b'line 001 of the test\nline 002 of the test\nline 003 of the test\nline 004 of the test\n\nline 006 of the test\nodd\nline 008 of the test\nline 009 of the test\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nline 011 of the test\nline 012 of the test\nline 013 of the test\nline 014 of the test\nline 015 of the test\nline 016 of the test\nline 017 of the test\nline 018 of the test\nline 019 of the test\nline 020 of the test\nline 021 of the test\nline 022 of the test\nline 023 of the test\nline 024 of the test\nline 025 of the test\nline 026 of the test\nline 027 of the test\nline 028 of the test\nline 029 of the test\nline 030 of the test\nline 031 of the test\nline 032 of the test\nline 033 of the test\nline 034 of the test\nline 035 of the test\nline 036 of the test\nline 037 of the test\nline 038 of the test\nline 039 of the test\nline 040 of the test\n',
+    'VAR_FTN.TXT': b'first\n\ndouble\ntriple\n\x0cnew page\rover\nnext\nprompt\nlast\n',
+    'VAR_NONE.TXT': b'line 001 of the testline 002 of the testline 003 of the testline 004 of the testline 006 of the testoddline 008 of the testline 009 of the testxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxline 011 of the testline 012 of the testline 013 of the testline 014 of the testline 015 of the testline 016 of the testline 017 of the testline 018 of the testline 019 of the testline 020 of the testline 021 of the testline 022 of the testline 023 of the testline 024 of the testline 025 of the testline 026 of the testline 027 of the testline 028 of the testline 029 of the testline 030 of the testline 031 of the testline 032 of the testline 033 of the testline 034 of the testline 035 of the testline 036 of the testline 037 of the testline 038 of the testline 039 of the testline 040 of the test',
+    'VFC_4.TXT': b'one\ntwo\n',
+    'VFC_CR.TXT': b'one\ntwo\nthree\n',
+    'VFC_NONE.TXT': b'onetwothree',
+    'VFC_PRN.TXT': b'alpha\n\nbeta\rgamma\n\x0cdelta\n\n\nepsilon\nzeta\n\x01eta\n',
 }
+EXPECT = dict(VMS_EXPECT)
+EXPECT['UDF.BIN'] = bytes(range(256)) * 3
+EXPECT['BIG_VAR.TXT'] = b''.join(b'record number %06d ' % i + b'z' * (i % 97) + b'\n' for i in range(1, 4000))
 
 def u16(b, o): return struct.unpack_from('<H', b, o)[0]
 
