@@ -184,7 +184,7 @@ OPS = {
     'delete_mid': ('DELETE [000000]B.DAT', ['B.DAT;1'], False, False, None),
     'delete_fragmented': ('DELETE [000000]FRAG.DAT', ['FRAG.DAT;1'], False, False, None),
     'delete_all_versions': ('DELETE [SUB]D.TXT;*', ['SUB/D.TXT;1'], False, False, None),
-    'delete_empty_dir': ('DELETE [EMPTY]', ['EMPTY.DIR;1'], False, False, None),
+    'delete_empty_dir': ('DELETE [EMPTY]', ['EMPTY.DIR;1', 'dir:EMPTY'], False, False, None),
     'delete_alias': ('DELETE [SUB]LNKA.TXT', ['SUB/LNKA.TXT;1'], False, False, None),
     'delete_hardlink': ('DELETE [SUB]LNKA.TXT', ['SUB/LNKA.TXT;1'], True, True, None),
     'delete_primary_hardlink': ('DELETE [000000]L.TXT', ['L.TXT;1'], True, True, None),
