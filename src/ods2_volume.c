@@ -1759,11 +1759,8 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
     count++;
     target_header[ODS5_FH2_LINKCOUNT] = (uint8_t) (count & 0xff);
     target_header[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (count >> 8);
-    {
-        /* the attribute change date moves: FI5$Q_ATTDATE */
-        uint8_t *ident = target_header + (size_t) core->idoffset * 2;
-        ods2_store_vms_time(ident + ODS5_FI5_ATTDATE, ods2_vms_time_now());
-    }
+    /* SET FILE/ENTER on V8.4 changes the link count and nothing else in the target's header:
+       revision, revision date and attribute change date stay (measured) */
     {
         uint8_t counted[512];
         uint16_t checksum = ods2_checksum(target_header, 255);
@@ -2517,6 +2514,9 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
         unsigned links = (unsigned) (target_header[ODS5_FH2_LINKCOUNT] |
                                      (target_header[ODS5_FH2_LINKCOUNT + 1] << 8));
         if (links > 1) {
+            /* VMS V8.4 (measured): deleting a link of a file with others takes its entry and one off
+               the count; the header keeps its name even if it was the primary link's, and when it was,
+               the back link becomes (0xFFFFFF,0,0); dates and revision do not change; the data stays */
             ods5_ident_t id;
             const char *why;
             char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
@@ -2528,17 +2528,17 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
                 id.version == target_version) {
                 primary = true;
             }
-            if (primary) {
-                return fail("this is the file's primary link (its header names this directory and "
-                            "name) and the file has other links: delete the others first");
-            }
             r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
             if (!r.ok) return r;
             links--;
             target_header[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
             target_header[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (links >> 8);
-            ods2_store_vms_time(target_header + (size_t) target_core->idoffset * 2 + ODS5_FI5_ATTDATE,
-                                ods2_vms_time_now());
+            if (primary) {
+                target_core->backlink.fid_num = 0xFFFF;
+                target_core->backlink.fid_seq = 0;
+                target_core->backlink.fid_rvn = 0;
+                target_core->backlink.fid_nmx = 0xFF;
+            }
             {
                 uint16_t checksum = ods2_checksum(target_header, 255);
                 target_header[510] = (uint8_t) (checksum & 0xff);

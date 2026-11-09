@@ -524,6 +524,8 @@ def main():
             continue
         if n not in referenced:
             fnd.err('file %d (%s) is in no directory (lost file)' % (n, d['name'] if d else '?'))
+        elif bl == 0xFFFFFF and (v.volchar & 0x40):
+            pass   # V8.4: the primary link was deleted, other links remain; the back link is (0xFFFFFF,0,0)
         elif bl not in entries:
             fnd.err('file %d: back link %d is not a directory' % (n, bl))
         elif n not in dir_of_primary:

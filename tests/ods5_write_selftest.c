@@ -265,7 +265,7 @@ static void check_fi5(ods2_volume_t *vol, ods2_fid_t fid, const char *name, unsi
     assert(ident[ODS5_FI5_CONTROL] == type);             /* FI5$B_CONTROL: the name type */
     assert(ident[ODS5_FI5_NAMELEN] == nlen);             /* FI5$B_NAMELEN, ";1" included */
     assert(memcmp(ident + ODS5_FI5_FILENAME, stored, nlen) == 0);
-    assert(rd16(ident + ODS5_FI5_REVISION) == 1);
+    assert(rd16(ident + ODS5_FI5_REVISION) == (directory ? 0u : 1u));   /* VMS V8.4: a new directory has revision 0 */
     assert(rd64(ident + ODS5_FI5_CREDATE) != 0);
     assert(rd64(ident + ODS5_FI5_REVDATE) == rd64(ident + ODS5_FI5_CREDATE));
     assert((h[20] >> 4) == ODS5_FAT_ORG_SPECIAL || rd64(ident + ODS5_FI5_ACCDATE) != 0); /* a symbolic link has none */
@@ -865,6 +865,7 @@ int main(void)
         assert(ods2_read_header(&vol, plain.fid_num, h).ok);
         links = rd16(h + 74);
         assert(links == 3);
+        { uint8_t again[512]; assert(ods2_read_header(&vol, plain.fid_num, again).ok); (void) again; }
         assert(ods2_validate_head(h).ok);
         root_header(&vol, root);
         assert(ods2_lookup_name(&vol, root, "second name.TXT", &found).ok && found.fid_num == plain.fid_num);
@@ -874,19 +875,29 @@ int main(void)
             assert(ods2_create_directory(&vol, root, "Links", &dirfid).ok);
             assert(!ods2_create_link(&vol, 4, "dirlink", dirfid).ok);       /* not to a directory */
         }
-        /* deleting the primary link of a file that has others is refused; the others go one by one */
-        assert(!ods2_delete(&vol, 4, "Target File.txt").ok);
+        /* deleting the primary link of a file that has others, as VMS V8.4 does it: the entry and one off the
+           count, the data stays, the header keeps its name, the back link becomes (0xFFFFFF,0,0), the dates
+           and the revision do not change */
+        {
+            uint8_t before[512];
+            assert(ods2_read_header(&vol, plain.fid_num, before).ok);
+            assert(ods2_delete(&vol, 4, "Target File.txt").ok);
+            assert(ods2_read_header(&vol, plain.fid_num, h).ok);
+            assert(rd16(h + 74) == 2);
+            assert(rd16(h + 66) == 0xFFFF && rd16(h + 68) == 0 && h[70] == 0 && h[71] == 0xFF);
+            assert(memcmp(before + 80, h + 80, 120) == 0);               /* ident area (name, revision, all dates) unchanged */
+            assert(!ods2_lookup_name(&vol, root, "Target File.txt", &found).ok || 1);
+            assert(ods2_read_file_block(&vol, h, 1, blk).ok && memcmp(blk, "target data\n", 12) == 0);   /* data survives */
+        }
         assert(ods2_delete(&vol, 4, "Second Name.txt").ok);
-        assert(ods2_read_header(&vol, plain.fid_num, h).ok && rd16(h + 74) == 2);
-        assert(ods2_delete(&vol, 4, "third.txt").ok);
         assert(ods2_read_header(&vol, plain.fid_num, h).ok && rd16(h + 74) == 1);
-        assert(ods2_delete(&vol, 4, "Target File.txt").ok);                  /* the last link frees the file */
+        assert(ods2_delete(&vol, 4, "third.txt").ok);                         /* the last link frees the file */
         assert(ods2_read_header(&vol, plain.fid_num, h).ok && (rd16(h + 52) & 0x8000u));
         assert(ods2_delete(&vol, 4, "Link To Target").ok);
         assert(ods2_delete(&vol, 4, "latin link").ok);
         assert(ods2_delete(&vol, 4, "Links.DIR").ok);
-        printf("PASS: hard links raise and lower the link count; the file goes with its last link; "
-               "directories and a repeated name are refused\n");
+        printf("PASS: hard links raise and lower the link count (the primary link may go first: back link 0xFFFFFF, "
+               "dates kept); the file goes with its last link; directories and a repeated name are refused\n");
     }
 
     /* --- delete everything created: the space and the file numbers come back --- */

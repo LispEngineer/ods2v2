@@ -86,12 +86,6 @@ check "a directory made with ^_ and ^. in its name is listed with its literal na
 check "DIR/PATHS shows the UTF-8 names" 1 "$(grep -c '^/Imported/Sub Dir/Deeper/caf.*\.TXT;1' "$TMP/out.txt")"
 check "the link count of the linked file is 3" "3" \
     "$($ODS2 $DISK 'DIR/FULL [Imported]UPPER.TXT' 2>&1 | sed -n 's/^  Link count: *//p')"
-check "DELETE of the primary link of a linked file is refused" 1 \
-    "$($ODS2 $DISK 'DELETE [Imported]UPPER.TXT' 2>&1 | grep -c 'primary link')"
-check "DELETE of a link works" 1 \
-    "$($ODS2 $DISK 'DELETE [Made^_By^.Hand^.Dots]hard1.txt' 2>&1 | grep -c '%ODS2-I-DELETED')"
-check "the link count is 2" "2" \
-    "$($ODS2 $DISK 'DIR/FULL [Imported]UPPER.TXT' 2>&1 | sed -n 's/^  Link count: *//p')"
 check "SET VOLUME/LABEL on a level 5 volume" "ODS5W" \
     "$($ODS2 $DISK 'SHOW VOLUME' 2>&1 | sed -n 's/^  Volume label: *//p' | head -1)"
 
@@ -101,6 +95,13 @@ rm -f "$T/bad#name.txt"
 check "EXPORT gives back the imported tree byte for byte, links included" "" \
     "$(cd "$TMP" && diff -r tree back 2>&1 | head -3)"
 
+# links: the primary link first, then the others
+check "DELETE of the primary link of a linked file works (VMS V8.4 does)" 1 \
+    "$($ODS2 $DISK 'DELETE [Imported]UPPER.TXT' 2>&1 | grep -c '%ODS2-I-DELETED')"
+check "DELETE of a link works" 1 \
+    "$($ODS2 $DISK 'DELETE [Made^_By^.Hand^.Dots]hard1.txt' 2>&1 | grep -c '%ODS2-I-DELETED')"
+check "the link count is 1 (three links, two deleted)" "1" \
+    "$($ODS2 $DISK 'DIR/FULL [Made^_By^.Hand^.Dots]hard2.txt' 2>&1 | sed -n 's/^  Link count: *//p')"
 # delete everything created and check the structure
 $ODS2 $DISK 'DELETE [Made^_By^.Hand^.Dots]hard2.txt' >/dev/null 2>&1
 if command -v python3 >/dev/null 2>&1; then

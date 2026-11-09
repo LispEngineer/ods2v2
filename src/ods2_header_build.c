@@ -193,7 +193,9 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
         }
         ident[ODS5_FI5_CONTROL] = (uint8_t) name_type;
         ident[ODS5_FI5_NAMELEN] = (uint8_t) name_len;
-        ident[ODS5_FI5_REVISION] = (spec->seg_num == 0) ? 1 : 0;
+        /* revision 1 for a file, 0 for a directory (VMS V8.4: a directory made by CREATE/DIRECTORY has
+           revision 0, also after files were put into it), 0 in an extension header */
+        ident[ODS5_FI5_REVISION] = (spec->seg_num == 0 && !(spec->filechar & 0x2000u)) ? 1 : 0;
         ods2_store_vms_time(ident + ODS5_FI5_CREDATE, vms_now);
         ods2_store_vms_time(ident + ODS5_FI5_REVDATE, vms_now);
         if (spec->seg_num == 0) {
