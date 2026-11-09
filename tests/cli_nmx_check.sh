@@ -48,6 +48,22 @@ checker_rest() { # the checker's findings other than the marked bits
     python3 -I tests/ods5check.py "$1" | grep "^ERROR\|^WARN" | grep -v "bitmap bit set but no valid header" | head -5
 }
 
+# A file number whose low 16 bits are 0 (65536, 131072, ...) is never used: FID_NUM 0 means "no file", and on VMS (the 70,000-file
+# run of ods5-vms2) DUMP/HEADER of file 65536 gives %DUMP-E-BADHEADER while 65535 and 65537 are normal. The allocator skips such
+# numbers (the first VMS run is to show what VMS does with the bit and the slot).
+for level in 2 5; do
+    img="$TMP/skip.img"; rm -f "$img"
+    $INIT "$img" 200000 --structure=$level --cluster=1 --maxfiles=70000 --label=SKIP64K >/dev/null 2>&1
+    python3 -I "$TMP/bits.py" "$img" 65533
+    got=""
+    for i in 1 2 3 4; do
+        $ODS2 "$img" "COPY $TMP/a.txt [000000]S$i.TXT" >/dev/null 2>&1
+        got="$got $(fid_of "$img" "[000000]S$i.TXT")"
+    done
+    check "ODS-$level: the allocator skips file number 65536 (FID_NUM 0): 65534 65535 65537 65538" "65534 65535 65537 65538" "$(echo $got)"
+    rm -f "$img"
+done
+
 for spec in "2 plain" "5 plain" "5 hardlinks"; do
     set -- $spec
     level=$1; kind=$2

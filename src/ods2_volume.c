@@ -614,6 +614,9 @@ ods2_result_t ods2_check_fid(ods2_fid_t fid)
         return fail("volume sets are not supported (a directory entry names a file on another volume "
                     "of a set)");
     }
+    if (ods2_fid_number(fid) == 0) {
+        return fail("a directory entry names file number 0, which is no file");
+    }
     return ok();
 }
 
@@ -1384,6 +1387,10 @@ ods2_result_t ods2_find_free_file_number(ods2_volume_t *vol, unsigned start_from
         if (block[(bit % 4096u) / 8u] & (1u << (bit % 8u))) {
             continue; /* in use */
         }
+        /* A number whose low 16 bits are 0 (65536, 131072, ...) is never handed out: its FID_NUM would be 0, which means
+           "no file". VMS made 70,000 files on a volume and DUMP/HEADER of file 65536 gave %DUMP-E-BADHEADER while 65535
+           and 65537 were normal (ods5-vms2); the slot stays as it is. */
+        if ((n & 0xFFFFu) == 0) continue;
 
         if (header_vbn(vol, n) >= efblk) {
             *file_number_out = n; /* beyond the end-of-file: garbage */

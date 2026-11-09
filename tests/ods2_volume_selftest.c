@@ -1134,6 +1134,20 @@ int main(void)
         }
     }
 
+    /* a directory entry whose FID number (NMX << 16 | NUM) is 0 names no file ("no file" is FID_NUM 0), and file numbers that
+       are multiples of 65536 (NUM 0, NMX >= 1) are numbers VMS does not use (file 65536: %DUMP-E-BADHEADER): the entry
+       with number 0 is refused, the others are looked up like any (and found unusable by the header they name) */
+    {
+        ods2_fid_t z, hi;
+        uint8_t zh[512];
+        z.fid_num = 0; z.fid_seq = 1; z.fid_rvn = 0; z.fid_nmx = 0;
+        hi.fid_num = 0; hi.fid_seq = 1; hi.fid_rvn = 0; hi.fid_nmx = 1;
+        assert(!ods2_check_fid(z).ok);
+        assert(!ods2_read_header_fid(&vol, z, zh).ok);
+        assert(ods2_check_fid(hi).ok);
+        printf("PASS: a FID with file number 0 is refused\n");
+    }
+
     ods2_dismount(&vol);
     printf("\nods2_volume_selftest: all checks passed - full mount/lookup/list "
            "pipeline verified end-to-end through real file I/O\n");
