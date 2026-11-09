@@ -224,6 +224,17 @@ command that would write to it, and `ods2_mount_write()`, is refused
 and the image is not touched. Any other structure level is still
 refused. The image may be read-only (`chmod 444`).
 
+### ODS-5 volumes (structure level 5), read-only
+
+A structure level 5 volume mounts for reading (one `%ODS2-W-ODS5RO`
+warning on stderr); `SHOW VOLUME` reports `ODS-5, version 1` and the
+volume characteristics (`NOHIGHWATER`, `ACCESS_DATES`, `HARDLINKS`,
+...). Every command that would write to it, and `ods2_mount_write()`,
+is refused ("volume is ODS-5 ... read-only for now") and the image is
+not touched. Other levels (3, 4, 6) are refused. The on-disk
+differences are written up, with sources, in `ODS5_FORMAT_NOTES.md` of
+the ods5-cli project.
+
 ### File dates and time zones
 
 VMS keeps file dates in local time, so `ods2` stamps new files (and

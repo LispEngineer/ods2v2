@@ -57,6 +57,11 @@ typedef struct {
  * exists for. */
 ods2_validate_result_t ods2_validate_home(const ods2_home_t *home);
 
+/* True if the home block's structure level (high byte of
+ * HM2$W_STRUCLEV) is 5, i.e. the volume is ODS-5. ods2_validate_home()
+ * accepts levels 2 and 5 and refuses every other one. */
+bool ods2_home_is_ods5(const ods2_home_t *home);
+
 /* True if the home block's structure version (low byte of
  * HM2$W_STRUCLEV) is 0 rather than the 1 of spec 5.1.9.4.
  * ods2_validate_home() accepts such a block (the OpenVMS Alpha V8.4 CD

@@ -1049,6 +1049,91 @@ int main(void)
         remove(V0_DISK_PATH);
     }
 
+    /* --- Structure level 5 (ODS-5): the home block of a copy of the
+       synthetic ODS-2 disk is patched to 0x0501. It mounts read-only,
+       its volume characteristics are readable, and every write is
+       refused with the image left byte for byte as it was. Level 6 and
+       level 3 are refused at mount. --- */
+    {
+        ods2_volume_t v5, v5w;
+        uint8_t *before, *after;
+        uint8_t blk[512], hdr[512];
+        ods2_fid_t fid;
+        unsigned copies;
+        long size;
+        FILE *f;
+        uint16_t c;
+        unsigned level;
+
+        for (level = 5; level <= 6; level++) {
+            copy_file(SOURCE_DISK_PATH, V0_DISK_PATH);
+            f = fopen(V0_DISK_PATH, "r+b");
+            assert(f != NULL);
+            assert(fseek(f, 512, SEEK_SET) == 0 && fread(blk, 1, 512, f) == 512);
+            blk[12] = 0x01; blk[13] = (uint8_t) level;   /* HM2$W_STRUCLEV */
+            blk[42] = 0x68; blk[43] = 0x00;              /* VOLCHAR: NOHIGHWATER, ACCESSTIMES, HARDLINKS */
+            c = ods2_checksum(blk, 29);
+            blk[58] = (uint8_t) (c & 0xff); blk[59] = (uint8_t) (c >> 8);
+            c = ods2_checksum(blk, 255);
+            blk[510] = (uint8_t) (c & 0xff); blk[511] = (uint8_t) (c >> 8);
+            assert(fseek(f, 512, SEEK_SET) == 0 && fwrite(blk, 1, 512, f) == 512);
+            fclose(f);
+
+            if (level == 6) {
+                r = ods2_mount(V0_DISK_PATH, &v5);
+                assert(!r.ok);
+                printf("PASS: a structure level 6 volume is refused: %s\n", r.problem);
+                remove(V0_DISK_PATH);
+                continue;
+            }
+
+            f = fopen(V0_DISK_PATH, "rb");
+            assert(f != NULL);
+            assert(fseek(f, 0, SEEK_END) == 0);
+            size = ftell(f);
+            before = malloc((size_t) size); after = malloc((size_t) size);
+            assert(before != NULL && after != NULL);
+            rewind(f);
+            assert(fread(before, 1, (size_t) size, f) == (size_t) size);
+            fclose(f);
+
+            r = ods2_mount(V0_DISK_PATH, &v5);
+            assert(r.ok && v5.ods5 && !v5.version0 && !v5.writable);
+            assert(v5.home.volchar == 0x68);
+            r = ods2_lookup_path(&v5, "", &fid);
+            assert(r.ok && fid.fid_num == 4);
+            r = ods2_read_header(&v5, fid.fid_num, hdr);
+            assert(r.ok);
+            printf("PASS: a structure level 5 volume mounts read-only and its "
+                   "root directory header reads\n");
+
+            r = ods2_write_block(&v5, 500, blk);
+            assert(!r.ok && strstr(r.problem, "ODS-5") != NULL);
+            r = ods2_create_directory(&v5, hdr, "NEWDIR", &fid);
+            assert(!r.ok);
+            r = ods2_set_volume_label(&v5, "NEWLABEL", &copies);
+            assert(!r.ok);
+            printf("PASS: writes to an ODS-5 volume are refused: %s\n", r.problem);
+            ods2_dismount(&v5);
+
+            r = ods2_mount_write(V0_DISK_PATH, &v5w);
+            assert(!r.ok && strstr(r.problem, "ODS-5") != NULL);
+            printf("PASS: a write mount of an ODS-5 volume is refused: %s\n",
+                   r.problem);
+
+            f = fopen(V0_DISK_PATH, "rb");
+            assert(f != NULL);
+            assert(fread(after, 1, (size_t) size, f) == (size_t) size);
+            assert(fgetc(f) == EOF);
+            fclose(f);
+            assert(memcmp(before, after, (size_t) size) == 0);
+            printf("PASS: the ODS-5 image is byte-for-byte unchanged after "
+                   "reads and refused writes\n");
+            free(before); free(after);
+            remove(V0_DISK_PATH);
+        }
+    }
+
     ods2_dismount(&vol);
     printf("\nods2_volume_selftest: all checks passed - full mount/lookup/list "
            "pipeline verified end-to-end through real file I/O\n");

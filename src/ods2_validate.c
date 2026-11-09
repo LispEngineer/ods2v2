@@ -25,6 +25,7 @@
 #include "ods2_validate.h"
 #include "ods2_checksum.h"
 #include "ods2_retrieval.h"
+#include "ods5_ondisk.h"
 #include <string.h>
 
 static ods2_validate_result_t ok(void)
@@ -57,8 +58,10 @@ ods2_validate_result_t ods2_validate_home(const ods2_home_t *home)
        for, but the OpenVMS Alpha V8.4 CD is level 2 version 0 and VMS
        mounts it, so version 0 is accepted here; the caller must treat
        such a volume as read-only (ods2_home_is_version0()). */
-    if ((home->struclev >> 8) != 2) {
-        return fail("HM2$W_STRUCLEV structure level is not 2 (not ODS-2)");
+    if ((home->struclev >> 8) != ODS5_LEVEL_2 &&
+        (home->struclev >> 8) != ODS5_LEVEL_5) {
+        return fail("HM2$W_STRUCLEV structure level is not 2 or 5 "
+                    "(not ODS-2 or ODS-5)");
     }
 
     /* checksum1 covers the first 29 words (bytes 0-57) - the
@@ -82,6 +85,11 @@ ods2_validate_result_t ods2_validate_home(const ods2_home_t *home)
     }
 
     return ok();
+}
+
+bool ods2_home_is_ods5(const ods2_home_t *home)
+{
+    return (home->struclev >> 8) == ODS5_LEVEL_5;
 }
 
 bool ods2_home_is_version0(const ods2_home_t *home)

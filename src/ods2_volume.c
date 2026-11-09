@@ -42,10 +42,14 @@ static ods2_result_t fail(const char *why)
     ods2_result_t r; r.ok = false; r.problem = why; return r;
 }
 
-/* Why a write is refused: a version 0 volume is never writable, any
-   other volume only if mounted with ods2_mount_write(). */
+/* Why a write is refused: an ODS-5 or version 0 volume is never
+   writable, any other volume only if mounted with ods2_mount_write(). */
 static ods2_result_t not_writable(const ods2_volume_t *vol)
 {
+    if (vol->ods5) {
+        return fail("volume is ODS-5 (HM2$W_STRUCLEV level 5), which is "
+                    "read-only for now");
+    }
     if (vol->version0) {
         return fail("volume has HM2$W_STRUCLEV version 0 and is read-only");
     }
@@ -130,6 +134,12 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
         return fail(vr.problem);
     }
 
+    vol->ods5 = ods2_home_is_ods5(&vol->home);
+    if (vol->ods5 && writable) {
+        ods2_dismount(vol);
+        return fail("HM2$W_STRUCLEV level is 5 (ODS-5): the volume can be "
+                    "read, not written, by this version");
+    }
     vol->version0 = ods2_home_is_version0(&vol->home);
     if (vol->version0 && writable) {
         ods2_dismount(vol);

@@ -90,6 +90,32 @@ int main(void)
     assert(!ods2_validate_home(&home).ok);
     printf("PASS: structure version 0 validates (and is flagged); level 1 still refused\n");
 
+    /* 3c. Structure level 5 (ODS-5) validates and is flagged as such;
+       level 3, 4 and 6 are refused. */
+    build_valid_home(&home);
+    assert(!ods2_home_is_ods5(&home));
+    home.struclev = 0x0501;
+    home.checksum1 = ods2_checksum((const uint8_t *) &home, 29);
+    home.checksum2 = ods2_checksum((const uint8_t *) &home, 255);
+    r = ods2_validate_home(&home);
+    assert(r.ok && ods2_home_is_ods5(&home) && !ods2_home_is_version0(&home));
+    home.struclev = 0x0500;
+    home.checksum1 = ods2_checksum((const uint8_t *) &home, 29);
+    home.checksum2 = ods2_checksum((const uint8_t *) &home, 255);
+    r = ods2_validate_home(&home);
+    assert(r.ok && ods2_home_is_ods5(&home) && ods2_home_is_version0(&home));
+    {
+        unsigned lev;
+        for (lev = 3; lev <= 6; lev++) {
+            if (lev == 5) continue;
+            home.struclev = (uint16_t) ((lev << 8) | 1);
+            home.checksum1 = ods2_checksum((const uint8_t *) &home, 29);
+            home.checksum2 = ods2_checksum((const uint8_t *) &home, 255);
+            assert(!ods2_validate_home(&home).ok);
+        }
+    }
+    printf("PASS: structure level 5 validates (and is flagged ODS-5); levels 3, 4 and 6 refused\n");
+
     /* 4. Wrong format string is caught. */
     build_valid_home(&home);
     memcpy(home.format, "SOMETHINGELSE", 12);

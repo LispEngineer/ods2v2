@@ -118,6 +118,8 @@
 #include "ods2_wildcard.h"
 #include "ods2_directory_write.h"
 #include "ods2_text_var.h"
+#include "ods2_validate.h"
+#include "ods5_ondisk.h"
 
 #define MAX_LINE 1024
 #define MAX_TOKENS 8
@@ -1142,6 +1144,41 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
     }
 }
 
+/* HM2$W_VOLCHAR as a list of keywords like DCL's /VOLUME_CHARACTERISTICS
+   and SHOW DEVICE/FULL use them. Bits 5-7 mean something only on an
+   ODS-5 volume. */
+static void format_volchar(const ods2_home_t *h, char *out, size_t cap)
+{
+    static const struct { uint16_t bit; const char *name; bool ods5_only; } bits[] = {
+        { ODS5_VC_READCHECK,        "READCHECK",        false },
+        { ODS5_VC_WRITCHECK,        "WRITECHECK",       false },
+        { ODS5_VC_ERASE,            "ERASE",            false },
+        { ODS5_VC_NOHIGHWATER,      "NOHIGHWATER",      false },
+        { ODS5_VC_CLASS_PROT,       "CLASS_PROTECTION", false },
+        { ODS5_VC_ACCESSTIMES,      "ACCESS_DATES",     true  },
+        { ODS5_VC_HARDLINKS,        "HARDLINKS",        true  },
+        { ODS5_VC_NO_SPECIAL_FILES, "NO_SPECIAL_FILES", true  },
+    };
+    uint16_t known = 0;
+    size_t i, len = 0;
+
+    out[0] = '\0';
+    for (i = 0; i < sizeof(bits) / sizeof(bits[0]); i++) {
+        if (bits[i].ods5_only && !ods2_home_is_ods5(h)) continue;
+        known |= bits[i].bit;
+        if (h->volchar & bits[i].bit) {
+            len += (size_t) snprintf(out + len, cap - len, "%s%s",
+                                     len ? ", " : "", bits[i].name);
+            if (len >= cap) { out[cap - 1] = '\0'; return; }
+        }
+    }
+    if (h->volchar & ~known) {
+        snprintf(out + len, cap - len, "%s0x%04X (unknown)",
+                 len ? ", " : "", (unsigned) (h->volchar & ~known));
+    }
+    if (out[0] == '\0') snprintf(out, cap, "none");
+}
+
 /* SHOW VOLUME (issue #13): the home block's identification, and space. */
 static void cmd_show_volume(ods2_volume_t *vol)
 {
@@ -1159,6 +1196,11 @@ static void cmd_show_volume(ods2_volume_t *vol)
     print_name("Format:", h->format);
     printf("  %-20sODS-%u, version %u\n", "Structure level:", h->struclev >> 8,
            h->struclev & 0xffu);
+    {
+        char vc[160];
+        format_volchar(h, vc, sizeof(vc));
+        printf("  %-20s%s\n", "Characteristics:", vc);
+    }
     printf("  %-20s%u\n", "Cluster size:", h->cluster);
     printf("  %-20s%u\n", "Maximum files:", (unsigned) h->maxfiles);
     printf("  %-20s[%o,%o]\n", "Volume owner UIC:", h->volowner_uic[1], h->volowner_uic[0]);
@@ -1579,7 +1621,15 @@ int main(int argc, char **argv)
     /* A structure version 0 volume (e.g. the OpenVMS Alpha V8.4 CD)
        is mounted for reading only, so look before opening for write. */
     r = ods2_mount(argv[1], &vol);
-    if (r.ok && vol.version0) {
+    if (r.ok && vol.ods5) {
+        fprintf(stderr, "%%ODS2-W-ODS5RO, %s: ODS-5 volume (structure level 5); "
+                        "mounted read-only, writing is not supported yet\n",
+                argv[1]);
+        if (vol.version0) {
+            fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version "
+                            "is 0\n", argv[1]);
+        }
+    } else if (r.ok && vol.version0) {
         fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version is 0; "
                         "mounted read-only\n", argv[1]);
     } else {

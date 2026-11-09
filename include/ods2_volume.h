@@ -46,6 +46,8 @@ typedef struct {
     FILE          *fp;
     bool           writable;
     bool           version0;  /* HM2$W_STRUCLEV version 0: read-only only */
+    bool           ods5;      /* HM2$W_STRUCLEV level 5 (ODS-5): read-only
+                                 for now, every write path refuses it */
     ods2_home_t    home;
     /* INDEXF.SYS's own extents, decoded once at mount time - needed
        to locate every other file's header, including files beyond
@@ -66,7 +68,8 @@ typedef struct {
    its extents. `vol` is caller-allocated; on failure vol->fp is
    closed automatically if it was opened. Opens read-only. A volume
    whose home block has structure version 0 mounts (vol->version0 is
-   set); every write to it is refused. */
+   set), and so does an ODS-5 volume (structure level 5, vol->ods5 is
+   set); every write to either is refused. */
 ods2_result_t ods2_mount(const char *path, ods2_volume_t *vol);
 
 /* Same as ods2_mount(), but opens the underlying file for read-write

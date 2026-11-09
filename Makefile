@@ -237,6 +237,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@sh tests/cli_record_attrs_check.sh
 	@echo "--- CLI volume label check ---"
 	@sh tests/cli_volume_label_check.sh
+	@echo "--- CLI ODS-5 volume check ---"
+	@sh tests/cli_ods5_volume_check.sh
 	@echo "--- CLI recursive DIR regression check ---"
 	@if command -v timeout >/dev/null 2>&1; then \
 		rm -f samples/cli_regression_disk.img; \
