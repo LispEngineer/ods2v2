@@ -133,7 +133,12 @@ def main():
             else:
                 if r.returncode == 1:
                     refused += 1
-                    if (after['ents'] != before['ents'] or after['dirs'] != before['dirs']
+                    if label == 'IMPORT':
+                        # a partial import is allowed to leave what it already imported, but nothing that existed may change
+                        changed = [k for k, v in before['ents'].items() if after['ents'].get(k) != v]
+                        if changed or not before['dirs'] <= after['dirs']:
+                            why = 'REFUSED IMPORT changed or removed existing entries: %r' % (changed[:3],)
+                    elif (after['ents'] != before['ents'] or after['dirs'] != before['dirs']
                             or after['free'] != before['free']):
                         why = 'REFUSED but changed the volume'
                 else:
@@ -154,6 +159,8 @@ def main():
             with open(os.path.join(work, 'fail-%d.txt' % fails), 'w') as f:
                 f.write('%s\nmutations: %s\ncommand: %s\nrc %s\n%s\n' % (why, kinds, cmd, r.returncode, err[-3000:]))
             print('FAIL %d: %s  [%s] %s' % (fails, why, ','.join(kinds), cmd[:120]), flush=True)
+    import resource
+    print('peak RSS of one ods2 child: %d MB' % (resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss // 1024))
     print('%d runs in %.0fs: %d failed, %d refused, %d done, %d unreadable by the reader, %d bitmap-damage infos'
           % (iters, time.time() - t0, fails, refused, done, skipped, info))
     return 1 if fails else 0
