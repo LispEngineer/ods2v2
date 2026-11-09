@@ -81,7 +81,7 @@ implements basic command recall to ease repetitive command sequences.
 | `COPY <local-file> <path>` | `COPY readme.txt [DECUS]README.TXT` |
 | `COPY/ATTRIBUTES=(...) <local-file> <path>` | `COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) kit.pcsi [KITS]KIT.PCSI` |
 | `COPY/CONVERT <local-file> <path>` | `COPY/CONVERT notes.txt [DOC]NOTES.TXT` — text as VAR records |
-| `TYPE[/RAW] path` | `TYPE [DECUS]README.TXT;2` — sequential files as text, one line per record; `/RAW` the stored bytes |
+| `TYPE[/RAW\|/LINES] path` | `TYPE [DECUS]README.TXT;2` — sequential files as text the way VMS `TYPE` shows them (carriage control applied: a file with none shows its records run together); `/LINES` one line per record always; `/RAW` the stored bytes |
 | `DELETE path` | `DELETE [DECUS]OLDFILE.TXT;1` |
 | `SET DEFAULT path` | `SET DEFAULT [DECUS.NETLIB020]` |
 | `SHOW DEFAULT` | |
@@ -183,8 +183,8 @@ COPY/ATTRIBUTES=(RFM:VAR,RAT:CR)/CONVERT notes.txt [DOC]NOTES.TXT   ! the same
 - `RAT:` defaults to `CR`; `RAT:NONE`, `FTN` or `PRN` can be given
   instead. `RAT:BLK` isn't supported (the records run on across
   blocks, as VMS FTP writes them).
-- `TYPE` of such a file shows its records as text, one line each, as VMS
-  `TYPE` does; `TYPE/RAW` shows the bytes as they are on disk, byte counts
+- `TYPE` of such a file shows its records as text as VMS `TYPE` does (one
+  line each for `RAT:CR`; `/LINES` forces that for any file); `TYPE/RAW` shows the bytes as they are on disk, byte counts
   included.
 
 The qualifier goes on `COPY` itself, not after the file names (a host
@@ -289,8 +289,8 @@ per file, UTF-8, for scripts.
 files off the volume to Linux files: the bytes of the file up to its
 end-of-file mark, exactly what `TYPE/RAW` prints (RMS record structure
 is not interpreted), under the file's UTF-8 name. `/RECORDS` writes
-sequential files as text instead, one line per record, as `TYPE` does
-(VAR, VFC, FIX, STM, STMLF, STMCR; relative and indexed files are copied
+sequential files as text instead, as `TYPE` does (`/LINES`: one line per
+record; VAR, VFC, FIX, STM, STMLF, STMCR; relative and indexed files are copied
 as stored, with a warning). The destination is a
 directory (made if it does not exist) when the specification has
 wildcards, `;*` or an ellipsis; a specification naming one file may
