@@ -378,7 +378,7 @@ space in a name is written `^_`. Lookups and wildcards (`*`, `%`, `?`)
 are case blind and work on whole characters, not bytes (the letters of
 ISO Latin-1 and UCS-2 fold like VMS folds them, e.g. `É` finds `é`, `^U03B1`
 finds Greek capital Alpha); directory names
-are shown in their stored case. Directories nest to 255 levels.
+are shown in their stored case. Directories nest to 2,048 levels.
 `DIR/FULL` shows, per file, what the file header says: id, size, owner,
 protection, the dates (also the access and attribute-change dates of
 ODS-5), the link count where the volume has hard links, the record
@@ -608,14 +608,19 @@ in every structural test.
 - File numbers are 24 bits (up to 16,777,215, FID_NMX << 16 | FID_NUM), bounded by the volume's MAXIMUM_FILES
   and its index bitmap; an entry naming a file by a relative volume number (a volume set) is refused.
 - A directory is limited to 65,536 blocks (32 MiB of records), the most one
-  contiguous extent is allowed here (it is held in memory while it changes), and directories nest at most 255
-  levels (a VMS volume can hold more: V7.3-2 made 400). Reading has no such limit: `DIR [...]`, `EXPORT` and the
-  other readers follow a tree down to 2,048 levels (five times what VMS lists) (a bound on the C stack; a deeper tree is reported with the
-  directory's name and entry count, never cut silently). `EXPORT` copies what the host's 4,096-character path limit
-  allows and names every file or directory it could not copy (and counts the rest); the exit status is 1. On an
-  ODS-2 volume `CREATE/DIRECTORY` and `IMPORT` warn from the 8th level below [000000], which OpenVMS VAX V7.3
-  cannot reach (`%RMS-F-DIR`; Alpha V7.3-2 and later can). A file with more than 1,024 extents, or a header chain
-  with more than 64 segments, is refused (read and delete) rather than handled partly.
+  contiguous extent is allowed here (it is held in memory while it changes). Directories nest at most 2,048 levels
+  (VMS V7.3-2, V8.4 and V8.4-2L2 created 10,000, but VMS's own wildcard walk `[...]` stops at 256 directories on V7.3-2 and
+  512 on V8.4, with `%RMS-F-DIR`, and BACKUP cannot save files that deep: ods2v2 makes no tree its own `DIR [...]` and
+  `EXPORT` could not read back, and `CREATE/DIRECTORY` and `IMPORT` warn past 256 levels). The readers follow a tree down
+  to 2,048 levels (a bound on the C stack; a deeper tree, which only VMS can have made, is reported with the directory's
+  name and entry count, never cut silently). `EXPORT` copies what the host's 4,096-character path limit allows and names
+  every file or directory it could not copy (and counts the rest); the exit status is 1. On an ODS-2 volume
+  `CREATE/DIRECTORY` and `IMPORT` also warn from the 8th level below [000000], which OpenVMS VAX V7.3 cannot reach
+  (`%RMS-F-DIR`; Alpha V7.3-2 and later can). A file with more than 1,024 extents, or a header chain with more than 64
+  segments, is refused (read and delete) rather than handled partly.
+- `ods2_init` gives BADBLK.SYS the blocks past the last whole cluster when the size is not a multiple of the cluster, as VMS
+  INITIALIZE does (V8.4 ANALYZE reports `ALLOCCLR` and `FREESPADRIFT` for a volume that leaves them to nobody);
+  `SET VOLUME/PARTIAL_CLUSTER` does the same for a volume made by an older `ods2_init`, and `ods5check.py` warns of one.
 - Mounting warns (`%ODS2-W-CHKSCB`, read only; the volume is used as before) when the storage control block is one
   OpenVMS ANALYZE/DISK_STRUCTURE would call invalid: another structure level or cluster factor than the volume's,
   a blocking factor of 0 (OpenVMS VAX V7.3 then fails with INTDIV; a SIMH RQ disk above about 26 GiB makes this),

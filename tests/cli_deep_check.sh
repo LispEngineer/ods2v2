@@ -1,7 +1,7 @@
 #!/bin/sh
 # MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
 #
-# cli_deep_check.sh - trees deeper than the 255 levels ods2v2 creates. A VMS volume can hold more (OpenVMS V7.3-2
+# cli_deep_check.sh - trees deeper than the 2,048 levels ods2v2 creates (made here with ODS2_TEST_MAX_DIR_DEPTH). A VMS volume can hold more (OpenVMS V7.3-2
 # made 400 levels; its own wildcard walk stops at 256), so DIR [...], EXPORT and IMPORT must not lose the part of a
 # tree below some fixed depth, and must say so when something is not copied (host path limit).
 # The trees are made by ods2_deep_make (the library, with ODS2_TEST_MAX_DIR_DEPTH raising the creation limit in that
@@ -27,11 +27,15 @@ check() { # check <description> <expected> <actual>
 rm -rf "$TMP"
 mkdir -p "$TMP"
 
-# ---- creation stays capped at 255 levels (the tool without the knob) ----
+# ---- creation is capped at 2,048 levels, the depth our own walk reads back (VMS V7.3-2 and V8.x made 10,000, but its own
+# wildcard walk stops at 256 / 512): a tree is never made that DIR [...] and EXPORT could not list ----
 $INIT "$TMP/cap.img" 65536 --structure=5 --label=CAP >/dev/null 2>&1
-out=$($MAKE "$TMP/cap.img" 256 2>&1); rc=$?
-case "$out" in *"level 256"*"at most 255 levels"*) msg=refused ;; *) msg="$out" ;; esac
-check "creating level 256 is refused (the cap is 255 by default)" "refused 1" "$msg $rc"
+out=$($MAKE "$TMP/cap.img" 2049 2>&1); rc=$?
+case "$out" in *"level 2049"*"at most 2048 levels"*) msg=refused ;; *) msg="$out" ;; esac
+check "creating level 2049 is refused (the cap is 2,048 by default)" "refused 1" "$msg $rc"
+out=$($ODS2 "$TMP/cap.img" 'DIR [000000...]F*.TXT' 2>&1); rc=$?
+check "the 2,048 levels that were made are all walked: no TOODEEP, exit 0 (nothing to list: no files)" "0 0" "$(echo "$out" | grep -c TOODEEP) $rc"
+check "ods5check: a 2,048-level tree is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/cap.img" 2>&1 | tail -1)"
 
 # ---- 300 levels, files at 50, 100, ... 300 ----
 $INIT "$TMP/d300.img" 65536 --structure=5 --label=D300 >/dev/null 2>&1
@@ -85,22 +89,22 @@ out=$(ODS2_TEST_MAX_DIR_DEPTH=3000 $MAKE "$TMP/d2100.img" 2100 2000 2100 2>&1); 
 check "2,100 levels made" "made 2100 levels 0" "$out $rc"
 for bin in ./ods2 ./ods2_fault; do
     out=$($bin "$TMP/d2100.img" 'DIR [000000...]F*.TXT' 2>&1); rc=$?
-    case "$out" in *"E-TOODEEP, [L1.L2."*"L2048] is more than 2048 levels deep: this directory ("*" entries) and everything below it are skipped"*) msg=named ;; *) msg="$(echo "$out" | tail -3)" ;; esac
+    case "$out" in *"E-TOODEEP, [L1.L2."*"L2049] is more than 2048 levels deep: this directory ("*" entries) and everything below it are skipped"*) msg=named ;; *) msg="$(echo "$out" | tail -3)" ;; esac
     check "$bin: DIR [000000...] on a 2,100-level tree: one TOODEEP naming the directory and its entry count, exit 1, no crash" "named 1 1" \
         "$msg $rc $(echo "$out" | grep -c TOODEEP)"
     check "$bin: ... the file at level 2000, above the bound, is listed" 1 "$(echo "$out" | grep -c '^F2000\.TXT')"
 done
 
 # ---- IMPORT into a deep tree and of a deep tree ----
-# a Linux tree 300 levels deep is imported up to the creation cap (255): the directories below it are reported
+# a Linux tree 260 levels deep is imported completely (the cap is 2,048); past 256 levels the import warns, once, with the count
 mkdir -p "$TMP/imp"
 p="$TMP/imp"; i=1
 while [ $i -le 260 ]; do p="$p/d$i"; i=$((i + 1)); done
 mkdir -p "$p"; echo deep > "$p/f.txt"
 $INIT "$TMP/imp.img" 65536 --structure=5 --label=IMP >/dev/null 2>&1
 out=$($ODS2 "$TMP/imp.img" "IMPORT $TMP/imp [000000]" 2>&1); rc=$?
-case "$out" in *"CREATEERR"*"at most 255 levels"*) msg=reported ;; *) msg="$out" ;; esac
-check "IMPORT of a 260-level tree: stops at the 255-level cap, says so, exit 1" "reported 1" "$msg $rc"
+check "IMPORT of a 260-level tree: all 260 directories and the file, exit 0, one warning naming the 4 deeper than 256" "yes 0 1" \
+    "$(echo "$out" | grep -q 'IMPORTED, 1 file.*260 directories' && echo yes) $rc $(echo "$out" | grep -c '4 directories deeper than 256')"
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_deep_check: $fails FAILED"

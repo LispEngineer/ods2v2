@@ -460,6 +460,17 @@ def main():
             if not isfree and cl not in owner and cl not in pend_owned:
                 if starter_quirk and cl < 1100: continue
                 fnd.warn('cluster %d (LBN %d) is allocated but owned by no file (lost)' % (cl, cl * v.cluster))
+        if volsize % v.cluster != 0 and not starter_quirk:
+            # The blocks past the last whole cluster: VMS gives that partial cluster to BADBLK.SYS (one extent, a whole
+            # cluster starting at floor(VOLSIZE/cluster)*cluster, of which only the blocks inside the volume exist), so
+            # that no cluster is allocated to nobody. Measured on every VMS-made volume of such a size (V7.3, V8.4, V8.4-2L2).
+            # A volume that stops its bitmap at the last whole cluster and gives BADBLK.SYS nothing is the older ods2_init's:
+            # V8.4 ANALYZE calls the partial cluster incorrectly allocated (ALLOCCLR) and the free count drifted.
+            part = volsize // v.cluster * v.cluster
+            if not any(l <= part < l + c for l, c in file_extents.get(3, [])):
+                fnd.warn('the partial cluster at LBN %d (the %d blocks past the last whole cluster of %d) is not owned by '
+                         'BADBLK.SYS, as VMS INITIALIZE does: V8.4 ANALYZE reports ALLOCCLR and FREESPADRIFT' %
+                         (part, volsize - part, v.cluster))
         print('storage: %d clusters, %d free' % (nclusters, free))
 
     # --- directories ---

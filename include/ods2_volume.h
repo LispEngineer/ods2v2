@@ -480,6 +480,10 @@ ods2_result_t ods2_read_file_stream(ods2_volume_t *vol, const uint8_t *header,
  * volume of `blocks` blocks; *measured is false for a size that was not measured (a prediction). False: unknown target. */
 bool ods2_target_geometry(const char *target, uint64_t blocks, uint32_t *sectors, uint32_t *tracks, bool *measured);
 
+/* SET VOLUME/PARTIAL_CLUSTER: gives the blocks past the last whole cluster to BADBLK.SYS as VMS INITIALIZE does (for
+ * volumes made by an older ods2_init); *changed says whether anything was written. */
+ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed);
+
 /* SET VOLUME/GEOMETRY: records the disk geometry `sectors` x `tracks` (cylinders = ceil(VOLSIZE / (sectors * tracks)),
  * BLKSIZE 1) in the storage control block, the geometry of the device the volume is to be used on. */
 ods2_result_t ods2_set_volume_geometry(ods2_volume_t *vol, uint32_t sectors, uint32_t tracks);

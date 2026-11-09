@@ -135,9 +135,9 @@ static bool vbn_to_lbn(const ods2_extent_t *extents, int extent_count,
 
 /* Most extension headers the index file may chain (a loop stops here). */
 /* How deep directories may be nested (VMS: 255; DIR [...] and EXPORT stop there). */
-#define ODS2_MAX_DIR_DEPTH_DEFAULT 255u
+#define ODS2_MAX_DIR_DEPTH_DEFAULT 2048u
 /* The creation limit. The test binary (ods2_fault) can raise it with ODS2_TEST_MAX_DIR_DEPTH, to make the trees
-   deeper than 255 levels a VMS volume can hold (V7.3-2 made 400) that the readers must handle. */
+   deeper than 2,048 levels a VMS volume can hold (V7.3-2, V8.4 made 10,000) that the readers must handle. */
 static unsigned max_dir_depth(void)
 {
 #ifdef ODS2_FAULT_INJECTION
@@ -1967,7 +1967,7 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
         r = ods2_directory_depth(vol, parent_header, &depth);
         if (!r.ok) return r;
         if (depth + 1 > ODS2_MAX_DIR_DEPTH) {
-            return fail("directories can be nested at most 255 levels deep");
+            return fail("directories can be nested at most 2048 levels deep (the depth DIR [...] and EXPORT read back)");
         }
     }
     if (!r.ok) return r;
@@ -3119,6 +3119,59 @@ ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file
     TXN_BEGIN_OR_RETURN(vol);
     r = set_entry_version_limit_impl(vol, dir_file_number, name, limit, changed);
     return txn_end(vol, r);
+}
+
+/* SET VOLUME/PARTIAL_CLUSTER: gives the blocks past the volume's last whole cluster to BADBLK.SYS, as VMS INITIALIZE
+   does (ods2_init does since this was found: V8.4 ANALYZE called that cluster, allocated to nobody in an older ods2_init
+   volume, ALLOCCLR and the free count FREESPADRIFT). Only BADBLK.SYS's header (file 3) changes: one extent at
+   floor(VOLSIZE / cluster) * cluster, a whole cluster, HIBLK = cluster, EFBLK = cluster + 1, HIGHWATER = cluster + 1. Done only
+   when the size is not a multiple of the cluster, BADBLK.SYS is empty and the cluster's bit is not set (it is not free). */
+ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed)
+{
+    uint8_t h[512];
+    ods2_head_core_t *core = (ods2_head_core_t *) h;
+    uint32_t c = vol->home.cluster, part;
+    size_t ptr;
+    uint16_t sum;
+    ods2_result_t r;
+
+    *changed = false;
+    if (!vol->writable) return fail("volume was not mounted for write (use ods2_mount_write)");
+    if (vol->volsize == 0 || c == 0) return fail("the storage control block's volume size is unreadable");
+    if (vol->volsize % c == 0) return ok();                          /* nothing past the last whole cluster */
+    part = vol->volsize / c * c;
+    r = ods2_read_header(vol, 3, h);
+    if (!r.ok) return r;
+    r = header_ok_for_write(h, 3);
+    if (!r.ok) return r;
+    if (core->map_inuse != 0 || ods2_word_swap32(core->recattr.hiblk) != 0) return ok();   /* BADBLK.SYS already owns blocks */
+    /* the cluster must not be free (its bit is clear, or lies beyond the bitmap) */
+    {
+        uint8_t bh[512], bb[512];
+        unsigned bit = part / c;
+        r = ods2_read_header(vol, 2, bh);
+        if (!r.ok) return r;
+        if (ods2_read_file_block(vol, bh, 2 + bit / 4096, bb).ok && ((bb[(bit % 4096) / 8] >> (bit % 8)) & 1)) {
+            return fail("the cluster past the last whole one is marked free in the bitmap: not assigned to BADBLK.SYS");
+        }
+    }
+    ptr = ods2_retrieval_pointer_size(part, c);
+    if (ptr == 0 || (size_t) core->mpoffset * 2 + ptr > (size_t) core->acoffset * 2) {
+        return fail("BADBLK.SYS's header has no room for the retrieval pointer");
+    }
+    ods2_encode_retrieval_pointer(h + (size_t) core->mpoffset * 2, part, c);
+    core->map_inuse = (uint8_t) (ptr / 2);
+    core->recattr.hiblk = ods2_word_swap32(c);
+    core->recattr.efblk = ods2_word_swap32(c + 1);
+    core->recattr.ffbyte = 0;
+    core->highwater = c + 1;
+    sum = ods2_checksum(h, 255);
+    h[510] = (uint8_t) (sum & 0xff);
+    h[511] = (uint8_t) (sum >> 8);
+    r = ods2_write_header(vol, 3, h);
+    if (!r.ok) return r;
+    *changed = true;
+    return ok();
 }
 
 /* SET VOLUME/GEOMETRY: the disk geometry the storage control block records (BITMAP.SYS VBN 1: sectors, tracks,

@@ -227,6 +227,22 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
                 spec.efblk = 1 + 1 + bm_blocks;            /* the SCB and the bitmap */
                 spec.highwater = bm_alloc + 1;
                 break;
+            case 3:
+                /* The blocks past the last whole cluster: VMS gives that trailing partial cluster to BADBLK.SYS (one
+                   extent, a whole cluster, of which only the blocks inside the volume exist; its bit in the bitmap
+                   is clear). Measured on every VMS-made volume of a size that is not a multiple of its cluster:
+                   V7.3 INITIALIZE (VAX), the Alpha blank-volume library, an Alpha V8.4 system disk, V8.4-2L2 20,000
+                   blocks /CLUSTER_SIZE=3 (BADBLK.SYS = (19998, 3)). Left unowned, ANALYZE on V8.4 says ALLOCCLR
+                   (blocks incorrectly marked allocated) and FREESPADRIFT. A size that is a multiple of the cluster
+                   leaves BADBLK.SYS empty. */
+                if (N % c != 0) {
+                    ext[0].lbn = (uint32_t) (N / c * c); ext[0].block_count = c;
+                    spec.extents = ext; spec.extent_count = 1;
+                    spec.hiblk = c;
+                    spec.efblk = c + 1;
+                    spec.highwater = c + 1;
+                }
+                break;
             case 4:
                 ext[0].lbn = root_lbn; ext[0].block_count = c;
                 spec.extents = ext; spec.extent_count = 1;

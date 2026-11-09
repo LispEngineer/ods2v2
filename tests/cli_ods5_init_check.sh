@@ -290,6 +290,64 @@ check "ods5check on a volume written with TZ=UTC (10 hours ahead of Honolulu): w
     "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzu.img" 2>&1 | grep -q 'hours in the future.*ODS2_TZ' && echo yes)"
 check "ODS2_TZ=Pacific/Honolulu over TZ=UTC writes Honolulu dates: no future date" "0 error(s), 0 warning(s)" \
     "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzo.img" 2>&1 | tail -1)"
+# ---- the trailing partial cluster (physical/package B on V8.4: ALLOCCLR "blocks incorrectly marked allocated" for the
+# blocks past the last whole cluster). VMS gives it to BADBLK.SYS: one extent at floor(VOLSIZE/cluster) * cluster, a whole
+# cluster (what lies past the volume's end is unreadable), HIBLK = cluster, EFBLK = cluster + 1, fixed 512-byte records,
+# HIGHWATER = cluster + 1; its bit in the bitmap is clear (V7.3 INITIALIZE, VAX and Alpha blank-volume library, an Alpha
+# V8.4 system disk, and V8.4-2L2 INITIALIZE of 20,000 blocks /CLUSTER_SIZE=3: BADBLK.SYS = (19998, 3)). When the size is a
+# multiple of the cluster BADBLK.SYS is empty.
+cat > "$TMP/badblk.py" <<'PY'
+import struct, subprocess, sys, os
+ods2, img = sys.argv[1], sys.argv[2]
+f = open(img, 'rb'); f.seek(512); home = f.read(512)
+cl = struct.unpack_from('<H', home, 14)[0]; ibl = struct.unpack_from('<I', home, 24)[0]; ibs = struct.unpack_from('<H', home, 32)[0]
+f.seek((ibl + ibs + 2) * 512); h = f.read(512)
+def sw(o): a, b = struct.unpack_from('<HH', h, o); return (a << 16) | b
+mp = h[1] * 2; inuse = h[58]; p = mp; q = 0; ex = []
+while q < inuse:
+    w0 = struct.unpack_from('<H', h, p)[0]; fmt = (w0 >> 14) & 3
+    if fmt == 1: cnt = (w0 & 0xff) + 1; lbn = (((w0 >> 8) & 0x3f) << 16) | struct.unpack_from('<H', h, p + 2)[0]; p += 4; q += 2
+    elif fmt == 2: cnt = (w0 & 0x3fff) + 1; lbn = struct.unpack_from('<I', h, p + 2)[0]; p += 6; q += 3
+    else: break
+    ex.append((lbn, cnt))
+print(cl, ex, sw(24), sw(28), struct.unpack_from('<I', h, 76)[0], h[20], struct.unpack_from('<H', h, 22)[0])
+PY
+for spec in "2 20000 3" "5 20000 3" "2 20000 4" "5 100000 3"; do
+    set -- $spec
+    $INIT "$TMP/pc.img" $2 --structure=$1 --cluster=$3 --label=PARTC >/dev/null 2>&1
+    rem=$(( $2 % $3 )); whole=$(( $2 / $3 * $3 ))
+    if [ $rem -ne 0 ]; then want="$3 [($whole, $3)] $3 $(( $3 + 1 )) $(( $3 + 1 )) 1 512"; else want="$3 [] 0 1 1 1 512"; fi
+    check "ODS-$1, $2 blocks, cluster $3 (remainder $rem): BADBLK.SYS maps the partial cluster as VMS does" "$want" \
+        "$(python3 -I "$TMP/badblk.py" $ODS2 "$TMP/pc.img" | sed 's/(\([0-9]*\), \([0-9]*\))/(\1, \2)/')"
+    check "... ods5check: clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/pc.img" 2>&1 | tail -1)"
+    rm -f "$TMP/pc.img"
+done
+# an old volume (BADBLK.SYS empty, the partial cluster allocated to nobody): ods5check warns, the rest is as before
+$INIT "$TMP/pc.img" 20000 --structure=2 --cluster=3 --label=PARTC >/dev/null 2>&1
+python3 -I - "$TMP/pc.img" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b'); f.seek(512); home = f.read(512)
+ibl = struct.unpack_from('<I', home, 24)[0]; ibs = struct.unpack_from('<H', home, 32)[0]
+f.seek((ibl + ibs + 2) * 512); h = bytearray(f.read(512))
+struct.pack_into('<HH', h, 24, 0, 0); struct.pack_into('<HH', h, 28, 0, 1)   # HIBLK 0, EFBLK 1
+h[58] = 0                                                                     # no retrieval pointers
+struct.pack_into('<I', h, 76, 1)                                              # HIGHWATER 1
+for i in range(h[1] * 2, 510): h[i] = 0
+struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+f.seek((ibl + ibs + 2) * 512); f.write(h)
+PY
+out=$(python3 -I tests/ods5check.py "$TMP/pc.img" 2>&1)
+check "an old volume (BADBLK.SYS empty): ods5check warns that the partial cluster is owned by nobody" "0 error(s), 1 warning(s) yes" \
+    "$(echo "$out" | tail -1) $(echo "$out" | grep -q 'partial cluster.*BADBLK.SYS' && echo yes)"
+out=$($ODS2 "$TMP/pc.img" "SET VOLUME/PARTIAL_CLUSTER" 2>&1); rc=$?
+case "$out" in *"now belong to BADBLK.SYS"*) msg=assigned ;; *) msg="$out" ;; esac
+check "SET VOLUME/PARTIAL_CLUSTER on the old volume: BADBLK.SYS gets the partial cluster" "assigned 0" "$msg $rc"
+check "... the same header as ods2_init makes now, and ods5check is clean" "3 [(19998, 3)] 3 4 4 1 512 0 error(s), 0 warning(s)" \
+    "$(python3 -I "$TMP/badblk.py" $ODS2 "$TMP/pc.img") $(python3 -I tests/ods5check.py "$TMP/pc.img" 2>&1 | tail -1)"
+out=$($ODS2 "$TMP/pc.img" "SET VOLUME/PARTIAL_CLUSTER" 2>&1)
+check "... and a second run has nothing to do" yes "$(echo "$out" | grep -q 'nothing to do' && echo yes)"
+rm -f "$TMP/pc.img"
+
 # the rule, pinned: with TZ set, a new file's Created date is that zone's wall-clock time, and it reads back as the same
 # time (DIR/FULL prints the stored local time unchanged)
 for zone in Pacific/Honolulu America/New_York Asia/Kolkata UTC; do

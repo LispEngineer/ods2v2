@@ -703,7 +703,7 @@ static void canonical_dir_path(ods2_volume_t *vol, char *path, size_t cap)
    at 256, so a VMS-made volume can hold more than ods2v2 creates (255) and more than VMS lists. The walk keeps
    the path in one growing string and a small frame per level, so that the depth is limited by memory and by
    this bound on the C stack only; a tree deeper than the bound is reported, never cut off silently. */
-#define WALK_MAX_DEPTH 2048
+#define WALK_MAX_LEVELS 2048     /* levels below the directory the walk starts at (the creation cap is the same) */
 #define MAX_DIR_VISITS 1000000
 
 /* A growing string. */
@@ -796,9 +796,9 @@ static void walk_directories(dir_walk_t *w, ods2_fid_t dir_fid, int depth)
         w->errors++;
         return;
     }
-    if (depth >= WALK_MAX_DEPTH) {
+    if (depth > WALK_MAX_LEVELS) {
         report_error("%%ODS2-E-TOODEEP, [%s] is more than %d levels deep: this directory (%d entries) and "
-                     "everything below it are skipped\n", w->abs.s, WALK_MAX_DEPTH, count);
+                     "everything below it are skipped\n", w->abs.s, WALK_MAX_LEVELS, count);
         w->errors++;
         free(entries);
         return;
@@ -1562,20 +1562,37 @@ static void cmd_set_version_limit(ods2_volume_t *vol, const ods2_parsed_path_t *
     }
 }
 
-/* The deepest directory OpenVMS VAX V7.3 reaches on an ODS-2 volume is 7 levels below [000000] (measured: deeper
-   ones give %RMS-F-DIR and DIRECTORY [...] silently stops at 7); Alpha V7.3-2 and later reach far more. ods2v2
-   creates them (up to 255 levels) but says so. Returns true when it warned. */
+/* Warnings for a directory made deep. The deepest directory OpenVMS VAX V7.3 reaches on an ODS-2 volume is 7 levels below
+   [000000] (measured: deeper ones give %RMS-F-DIR and DIRECTORY [...] silently stops at 7); Alpha V7.3-2 and later create
+   10,000 levels without refusal. But VMS's own wildcard descent [...] stops at 256 directories on V7.3-2 and 512 on V8.4 and
+   V8.4-2L2 (%RMS-F-DIR), and BACKUP cannot save files that deep (FTLNTSAVED). ods2v2 creates up to 2,048 levels (the depth
+   its own DIR [...] and EXPORT read back) and says so past 256, and past 7 on an ODS-2 volume. Counts what it warned
+   about in *vax_warned and *deep_warned; prints when `print`. */
 #define ODS2_VAX_V73_MAX_LEVELS 7u
-static bool warn_if_too_deep_for_vax(ods2_volume_t *vol, const uint8_t *parent_header, const char *shown)
+#define ODS2_VMS_WILDCARD_LEVELS 256u
+static void warn_deep(ods2_volume_t *vol, const uint8_t *parent_header, const char *shown, bool print, int *vax_warned,
+                      int *deep_warned)
 {
     unsigned depth = 0;
 
-    if (vol->ods5 || !ods2_directory_depth(vol, parent_header, &depth).ok) return false;
-    if (depth + 1 <= ODS2_VAX_V73_MAX_LEVELS) return false;
-    fprintf(stderr, "%%ODS2-W-DEEPDIR, [%s] is %u levels below [000000]: OpenVMS VAX V7.3 cannot reach a "
-                    "directory deeper than %u levels on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
-                    "later can\n", shown, depth + 1, ODS2_VAX_V73_MAX_LEVELS);
-    return true;
+    if (!ods2_directory_depth(vol, parent_header, &depth).ok) return;
+    depth += 1;     /* the level of the directory being made */
+    if (!vol->ods5 && depth > ODS2_VAX_V73_MAX_LEVELS) {
+        if (vax_warned != NULL) (*vax_warned)++;
+        if (print) {
+            fprintf(stderr, "%%ODS2-W-DEEPDIR, [%s] is %u levels below [000000]: OpenVMS VAX V7.3 cannot reach a "
+                            "directory deeper than %u levels on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
+                            "later can\n", shown, depth, ODS2_VAX_V73_MAX_LEVELS);
+        }
+    }
+    if (depth > ODS2_VMS_WILDCARD_LEVELS) {
+        if (deep_warned != NULL) (*deep_warned)++;
+        if (print) {
+            fprintf(stderr, "%%ODS2-W-DEEPDIR256, [%s] is %u levels below [000000]: VMS's own wildcard [...] stops at 256 "
+                            "directories (V7.3-2) or 512 (V8.4) with %%RMS-F-DIR, and BACKUP cannot save files in it "
+                            "(FTLNTSAVED)\n", shown, depth);
+        }
+    }
 }
 
 static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p)
@@ -1619,7 +1636,7 @@ static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p
         return;
     }
     printf("%%ODS2-I-CREATED, created [%s]\n", effective_path);
-    warn_if_too_deep_for_vax(vol, parent_header, effective_path);
+    warn_deep(vol, parent_header, effective_path, true, NULL, NULL);
 }
 
 /* A host file opened for COPY, read in order a chunk at a time
@@ -2373,7 +2390,7 @@ static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods
 typedef struct {
     ods2_volume_t *vol;
     int files, dirs, links, errors, skipped;
-    int deep;                            /* directories deeper than OpenVMS VAX V7.3 reaches (ODS-2) */
+    int deep, deep256;                   /* directories deeper than OpenVMS VAX V7.3 reaches (ODS-2) / than VMS's [...] walks */
     unsigned long long bytes;
     const copy_options_t *opts;          /* /FORMAT, /ATTRIBUTES */
     const ods2_record_attrs_t *attrs_in; /* the /ATTRIBUTES given */
@@ -2464,13 +2481,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
                     continue;
                 }
                 st->dirs++;
-                {
-                    unsigned d = 0;
-                    if (!st->vol->ods5 && ods2_directory_depth(st->vol, dir_header, &d).ok &&
-                        d + 1 > ODS2_VAX_V73_MAX_LEVELS) {
-                        st->deep++;
-                    }
-                }
+                warn_deep(st->vol, dir_header, shown, false, &st->deep, &st->deep256);
             }
             import_tree(st, path, ods2_fid_number(fid), depth + 1);
         } else if (S_ISREG(sb.st_mode)) {
@@ -2562,6 +2573,11 @@ static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods
                         "VAX V7.3 cannot reach them on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
                         "later can\n", st.deep, st.deep == 1 ? "y" : "ies", ODS2_VAX_V73_MAX_LEVELS);
     }
+    if (st.deep256 > 0) {
+        fprintf(stderr, "%%ODS2-W-DEEPDIR256, %d director%s deeper than %u levels below [000000] created: VMS's own wildcard "
+                        "[...] stops at 256 directories (V7.3-2) or 512 (V8.4) with %%RMS-F-DIR, and BACKUP cannot save "
+                        "files in them\n", st.deep256, st.deep256 == 1 ? "y" : "ies", ODS2_VMS_WILDCARD_LEVELS);
+    }
     printf("%%ODS2-I-IMPORTED, %d file%s (%llu bytes), %d director%s, %d symbolic link%s imported "
            "from %s; %d skipped, %d error%s\n", st.files, st.files == 1 ? "" : "s", st.bytes,
            st.dirs, st.dirs == 1 ? "y" : "ies", st.links, st.links == 1 ? "" : "s", local_dir,
@@ -2591,6 +2607,7 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
 {
     const char *label = NULL;
     unsigned geo_s = 0, geo_t = 0;
+    bool partial = false;
     int i;
 
     for (i = 1; i < n; i++) {
@@ -2603,6 +2620,11 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
             if (*q == '=') {
                 value = ++q;
                 while (*q && *q != '/') q++;
+            }
+            if (keyword(name, name_len, "PARTIAL_CLUSTER", 3)) {
+                /* /PARTIAL_CLUSTER: give the blocks past the last whole cluster to BADBLK.SYS, as VMS INITIALIZE does */
+                partial = true;
+                continue;
             }
             if (keyword(name, name_len, "GEOMETRY", 3)) {
                 /* /GEOMETRY=sectors,tracks: the geometry the SCB records (the device's own: VAX V7.3 compares) */
@@ -2641,7 +2663,7 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
             }
             if (!keyword(name, name_len, "LABEL", 3)) {
                 report_error("%%ODS2-E-IVQUAL, unrecognized qualifier /%.*s - SET VOLUME "
-                             "takes /LABEL=name or /GEOMETRY=sectors,tracks\n", (int) name_len, name);
+                             "takes /LABEL=name, /GEOMETRY=sectors,tracks or /PARTIAL_CLUSTER\n", (int) name_len, name);
                 return;
             }
             if (value == NULL || value == q) {
@@ -2664,6 +2686,17 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
             return;
         }
     }
+    if (partial) {
+        bool changed = false;
+        ods2_result_t pr = ods2_assign_partial_cluster(vol, &changed);
+        if (!pr.ok) {
+            report_error("%%ODS2-E-PARTIAL, %s\n", pr.problem);
+            return;
+        }
+        printf(changed ? "%%ODS2-I-PARTIAL, the blocks past the last whole cluster now belong to BADBLK.SYS\n"
+                       : "%%ODS2-I-PARTIAL, nothing to do (the size is a whole number of clusters, or BADBLK.SYS owns them)\n");
+        if (geo_s == 0 && label == NULL) return;
+    }
     if (geo_s != 0) {
         ods2_result_t gr = ods2_set_volume_geometry(vol, geo_s, geo_t);
         if (!gr.ok) {
@@ -2678,7 +2711,7 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
         if (label == NULL) return;
     }
     if (label == NULL) {
-        report_error("%%ODS2-E-NOPARM, usage: SET VOLUME/LABEL=name or /GEOMETRY=sectors,tracks\n");
+        report_error("%%ODS2-E-NOPARM, usage: SET VOLUME/LABEL=name, /GEOMETRY=sectors,tracks or /PARTIAL_CLUSTER\n");
         return;
     }
     {
@@ -2999,6 +3032,8 @@ static void print_help(void)
            "  SET DEFAULT path           set the current default directory\n"
            "  SHOW DEFAULT               show the current default directory\n"
            "  SET VOLUME/LABEL=name      relabel the volume (all home block copies)\n"
+           "  SET VOLUME/PARTIAL_CLUSTER   give the blocks past the last whole cluster to BADBLK.SYS, as VMS INITIALIZE\n"
+           "                             does (volumes made by an older ods2_init: V8.4 ANALYZE says ALLOCCLR)\n"
            "  SET VOLUME/GEOMETRY=sectors,tracks   record the disk geometry of the device the volume will be used on\n"
            "                             (OpenVMS VAX V7.3 ANALYZE compares it with the device: CHKSCB)\n"
            "  SET FILE/VERSION_LIMIT=n spec   the version limit of the entries a spec names (wildcards, [dir...]);\n"
