@@ -44,6 +44,14 @@ VMS_BASELINES = ['asim12-ods5t-20261108', 'asim12-ods2t-20261108', 'asim6-ods5t6
                  'm2b-after-asim12', 'phvs2-ods2v-20261108', 'w1c-f5-after-asim6', 'w1-ods5t6-after-asim6']
 
 
+class EscRng:
+    def choice(self, seq):
+        return seq[0]
+
+    def random(self):
+        return 1.0
+
+
 class Failure(Exception):
     pass
 
@@ -676,7 +684,7 @@ class Harness:
         """MANIFEST_LINUX (md5 size kind path, as the earlier batches) and MANIFEST_VMS (md5 size DCL spec) from the MODEL"""
         m = self.model
         lines, vms = [], []
-        r0 = random.Random(0)
+        r0 = EscRng()    # ASCII only on the VMS side: every non-ASCII character as ^xx / ^Uxxxx
         for (dpath, display, ver), obj in sorted(m.expected_entries().items(), key=lambda kv: repr(kv[0])):
             if obj.volatile:
                 continue
