@@ -498,6 +498,8 @@ class Harness:
         self.free_blocks = None
         self.cluster = None
         self.last_ok = True
+        self.stop = None
+        self.opts = {}
 
     # ---- logging
     def note(self, s):
@@ -526,13 +528,18 @@ class Harness:
                      'deep': [16384, 32768], 'indexf': [32768, 65536], 'bigfile': [131072, 262144, 400000],
                      }.get(self.profile, [8192, 8200, 9973, 16384, 20000, 32768, 65536, 131072, 262144])
             size = r.choice(sizes)
+            size = self.opts.get('size', size)
             args = [ODS2_INIT, self.img, str(size), '--structure=%d' % (5 if self.ods5 else 2),
                     '--label=STRESS%d' % (self.seed % 1000)]
-            if self.profile == 'frag':
-                args.append('--cluster=%d' % r.choice([1, 1, 1, 2, 3]))
-            elif r.random() < 0.6:
-                args.append('--cluster=%d' % r.choice([1, 2, 3, 4, 8, 16]))
-            if self.ods5 and r.random() < 0.5:
+            cl = r.choice([1, 2, 3, 4, 8, 16]) if self.profile != 'frag' else r.choice([1, 1, 1, 2, 3])
+            use_cl = (r.random() < 0.6) or self.profile == 'frag'
+            if 'cluster' in self.opts:
+                cl, use_cl = self.opts['cluster'], True
+            if use_cl:
+                args.append('--cluster=%d' % cl)
+            hl = r.random() < 0.5
+            hl = self.opts.get('hl', hl)
+            if self.ods5 and hl:
                 args.append('--hardlinks')
             if r.random() < 0.2:
                 args.append('--nohighwater')
@@ -664,6 +671,28 @@ class Harness:
             elif g[0] != 'f' or g[1] != obj.md5:
                 self.fail('%s: EXPORT %r: %s, model md5 %s' % (tag, k, g[:2], obj.md5))
         shutil.rmtree(out, ignore_errors=True)
+
+    def write_manifests(self, base):
+        """MANIFEST_LINUX (md5 size kind path, as the earlier batches) and MANIFEST_VMS (md5 size DCL spec) from the MODEL"""
+        m = self.model
+        lines, vms = [], []
+        r0 = random.Random(0)
+        for (dpath, display, ver), obj in sorted(m.expected_entries().items(), key=lambda kv: repr(kv[0])):
+            if obj.volatile:
+                continue
+            lp = '/'.join([linux_escape(x) for x in dpath] + ['%s;%d' % (linux_escape(linux_name(display)), ver)])
+            spec = spec_dir(dpath, r0, self.ods5) + spec_file_name(display, r0, self.ods5) + ';%d' % ver
+            if obj.kind == 'symlink':
+                lines.append('%s %d %s %s\t%s' % ('-' * 32, len(obj.target), 'symlink', lp, obj.target.decode('latin-1')))
+                vms.append('symlink %s' % spec)
+            else:
+                lines.append('%s %d %s %s' % (obj.md5, obj.size, 'file', lp))
+                vms.append('%s %d %s' % (obj.md5, obj.size, spec))
+        for dp in sorted(m.dirs.values()):
+            if dp:
+                lines.append('%s %d %s %s' % ('-' * 32, 0, 'dir', '/'.join(linux_escape(x) for x in dp)))
+        open(base + '.MANIFEST_LINUX.TXT', 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+        open(base + '.MANIFEST_VMS.TXT', 'w', encoding='utf-8').write('\n'.join(vms) + '\n')
 
     # ---- operations (each applies itself to the volume and the model)
     def pick_dir(self, writable=True):
@@ -1165,6 +1194,8 @@ class Harness:
             if not ok:
                 break
         self.verify('volume full', export=True)
+        if self.stop == 'full':
+            return
         # other commands on a full volume must fail cleanly (or succeed) and leave it consistent
         sfx = self.names.dir_name()
         for what in range(3):
@@ -1279,6 +1310,8 @@ class Harness:
             self.verify('big file %d (%s)' % (j, 'ok' if ok else 'refused'))
             total_free = self.free_blocks
         self.coverage = {'ext_headers': vol.nheaders_ext, 'max_extents': vol.max_extents}
+        if self.stop == 'frag':
+            return
         # delete the big ones, then the rest
         rest = [(dp, k, 1) for k in keep if k not in gone]
         self.batch_delete([((), 'BIG%d.DAT' % j, 1) for j in range(3) if m.ents.get((m.fkpath(()), key_of('BIG%d.DAT' % j), 1))])
@@ -1310,6 +1343,8 @@ class Harness:
             self.batch_copy(items[i:i + 500])
             self.verify('bigdir fill %d' % min(i + 500, n), export=False)
         self.verify('bigdir full', export=True)
+        if self.stop == 'bigdir':
+            return
         vol = self.vol_stats()
         self.coverage = {'dir_blocks': sum(c for _, c in vol.info[vol.dirs[dp]].extents), 'entries': n}
         # delete most, in random order, then add again
@@ -1394,6 +1429,8 @@ class Harness:
             else:
                 self.fail('deep copy at depth %d refused: %s' % (len(dp), o[2][-300:]))
         self.verify('deep files', export=True)
+        if self.stop == 'deep':
+            return
         # remove from the bottom
         for k in range(depth, 0, -1):
             dp = tuple(names[:k])
