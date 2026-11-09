@@ -651,6 +651,69 @@ for level in 2 5; do
     check "ODS-$level: $listed entries for reserved files in [D]: removing each (the REMOVE case) is refused" "0 $before" "$bad $(md5sum < "$img")"
 done
 
+# ---- F8 (ods5-st): on a volume without HARDLINKS, deleting the primary name of a file that has an alias leaves
+# the alias behind, as VMS does. When the file number is then reused (a new sequence number) the stale alias must
+# never open the new file: it is "not found" for TYPE and DIR/FULL; ods5check reports it as a WARNING (VMS makes
+# this state), not an error; ods2v2's own DELETE of the alias removes the entry and nothing else.
+cat > "$TMP/novc.py" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b'); f.seek(512); h = bytearray(f.read(512))
+v = struct.unpack_from('<H', h, 42)[0]; struct.pack_into('<H', h, 42, v & ~0x40)
+struct.pack_into('<H', h, 58, sum(struct.unpack_from('<29H', h, 0)) & 0xFFFF)
+struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+f.seek(512); f.write(h)
+PY
+img="$TMP/f8.img"
+$INIT "$img" 8192 --structure=5 --label=F8 --hardlinks >/dev/null 2>&1
+echo "primary content" > "$TMP/f8p.txt"; echo "new file content" > "$TMP/f8q.txt"
+printf 'COPY %s [000000]P.TXT\nLINK [000000]ALIAS.TXT [000000]P.TXT\n' "$TMP/f8p.txt" > "$TMP/f8s1"
+$ODS2 "$img" "@$TMP/f8s1" >/dev/null 2>&1
+python3 -I "$TMP/novc.py" "$img"
+printf 'DELETE [000000]P.TXT\n' > "$TMP/f8s2"; $ODS2 "$img" "@$TMP/f8s2" >/dev/null 2>&1
+out=$($ODS2 "$img" "TYPE [000000]ALIAS.TXT" 2>&1); rc=$?
+case "$out" in *"stale"*) msg=stale ;; *) msg="$out" ;; esac
+check "F8: the alias of a deleted file (header free) is not found" "stale 1" "$msg $rc"
+$ODS2 "$img" "COPY $TMP/f8q.txt [000000]Q.TXT" >/dev/null 2>&1
+out=$($ODS2 "$img" "TYPE [000000]ALIAS.TXT" 2>&1); rc=$?
+case "$out" in *"new file content"*) msg="OPENED THE NEW FILE" ;; *"stale"*) msg=stale ;; *) msg="$out" ;; esac
+check "F8: the number reused (new sequence number): the stale alias is still not found, never the new file" "stale 1" "$msg $rc"
+out=$($ODS2 "$img" "DIR/FULL [000000]ALIAS.TXT" 2>&1)
+case "$out" in *"File ID"*) msg="SHOWED A FILE" ;; *) msg=none ;; esac
+check "F8: DIR/FULL of the stale alias shows no file" none "$msg"
+chk=$(python3 -I tests/ods5check.py "$img" 2>&1)
+check "F8: ods5check: a stale alias is one WARNING and no error" "0 error(s), 1 warning(s) stale" \
+    "$(echo "$chk" | tail -1) $(echo "$chk" | grep -c 'WARN.*stale alias' | sed 's/1/stale/')"
+out=$($ODS2 "$img" "DELETE [000000]ALIAS.TXT" 2>&1); rc=$?
+case "$out" in *"removed ALIAS.TXT"*) msg=removed ;; *) msg="$out" ;; esac
+check "F8: DELETE of the stale alias removes the entry" "removed 0" "$msg $rc"
+check "F8: the new file is untouched" "new file content" "$($ODS2 "$img" "TYPE [000000]Q.TXT" 2>&1)"
+check "F8: after removing the alias ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
+
+# ---- depth (operator's choice, via ods5-orch): OpenVMS VAX V7.3 reaches 7 levels below [000000] on an ODS-2 volume;
+# CREATE/DIRECTORY (and IMPORT) deeper than that works but warns; ODS-5 volumes never warn.
+for level in 2 5; do
+    img="$TMP/dp$level.img"
+    $INIT "$img" 8192 --structure=$level --label=DEPTH >/dev/null 2>&1
+    path=""; warned=""; made=0
+    for n in 1 2 3 4 5 6 7 8 9; do
+        path="${path:+$path.}L$n"
+        out=$($ODS2 "$img" "CREATE/DIRECTORY [$path]" 2>&1); rc=$?
+        [ $rc -eq 0 ] && made=$((made + 1))
+        case "$out" in *DEEPDIR*) warned="$warned $n" ;; esac
+    done
+    if [ $level = 2 ]; then exp="9| 8 9"; else exp="9|"; fi
+    check "ODS-$level: CREATE/DIRECTORY to 9 levels: all made (exit 0); the warning (ODS-2 only) from level 8 up" \
+        "$exp" "$made|$warned"
+done
+out=$($ODS2 "$TMP/dp2.img" "CREATE/DIRECTORY [L1.L2.L3.L4.L5.L6.L7.L8.L9.L10]" 2>&1)
+case "$out" in *"10 levels below [000000]"*"RMS-F-DIR"*"Alpha V7.3-2"*) msg=text ;; *) msg="$out" ;; esac
+check "ODS-2: the warning names the level, the VAX error and Alpha V7.3-2" text "$msg"
+mkdir -p "$TMP/impdeep/a/b/c/d/e/f/g/h/i"; echo x > "$TMP/impdeep/a/b/c/d/e/f/g/h/i/f.txt"
+$INIT "$TMP/dpi.img" 8192 --structure=2 --label=IMPDEEP >/dev/null 2>&1
+out=$($ODS2 "$TMP/dpi.img" "IMPORT $TMP/impdeep [000000]" 2>&1); rc=$?
+case "$out" in *"2 directories deeper than 7 levels"*) msg=warned ;; *) msg="$out" ;; esac
+check "ODS-2: IMPORT of a tree 10 levels deep warns once, with the count" "warned 0" "$msg $rc"
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"

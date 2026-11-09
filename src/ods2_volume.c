@@ -134,7 +134,18 @@ static bool vbn_to_lbn(const ods2_extent_t *extents, int extent_count,
 
 /* Most extension headers the index file may chain (a loop stops here). */
 /* How deep directories may be nested (VMS: 255; DIR [...] and EXPORT stop there). */
-#define ODS2_MAX_DIR_DEPTH 255u
+#define ODS2_MAX_DIR_DEPTH_DEFAULT 255u
+/* The creation limit. The test binary (ods2_fault) can raise it with ODS2_TEST_MAX_DIR_DEPTH, to make the trees
+   deeper than 255 levels a VMS volume can hold (V7.3-2 made 400) that the readers must handle. */
+static unsigned max_dir_depth(void)
+{
+#ifdef ODS2_FAULT_INJECTION
+    const char *e = getenv("ODS2_TEST_MAX_DIR_DEPTH");
+    if (e != NULL && atoi(e) > 0) return (unsigned) atoi(e);
+#endif
+    return ODS2_MAX_DIR_DEPTH_DEFAULT;
+}
+#define ODS2_MAX_DIR_DEPTH max_dir_depth()
 #define ODS2_MAX_HEADER_SEGMENTS_MOUNT 64
 
 static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
@@ -505,7 +516,18 @@ ods2_result_t ods2_read_header_fid(ods2_volume_t *vol, ods2_fid_t fid, uint8_t *
 {
     ods2_result_t r = ods2_check_fid(fid);
     if (!r.ok) return r;
-    return ods2_read_header(vol, ods2_fid_number(fid), header_out);
+    r = ods2_read_header(vol, ods2_fid_number(fid), header_out);
+    if (!r.ok) return r;
+    /* A directory entry names a file by number AND sequence number. VMS gives a file number a new sequence
+       number each time it reuses it, so an entry whose sequence differs names a file that is gone: a stale
+       alias (on a volume without HARDLINKS deleting the primary name leaves the other names behind, as on
+       VMS). It must never resolve to the file that now has the number (F8). A header marked for delete is
+       not a file either. */
+    if (!ods2_header_is_file(header_out, fid)) {
+        return fail("no such file: a dangling directory entry, a stale alias (the file it names was deleted; "
+                    "its file number may have been reused)");
+    }
+    return ok();
 }
 
 ods2_result_t ods2_read_header(ods2_volume_t *vol, unsigned file_number, uint8_t *header_out)
@@ -1742,6 +1764,27 @@ static ods2_result_t directory_ready(ods2_volume_t *vol, const uint8_t *dir_head
     return ok();
 }
 
+/* The number of directories between [000000] and the directory with this header: 0 for the master file
+   directory itself, 1 for [A], 2 for [A.B]. Counted up the back links; a loop or a chain longer than the
+   limit is refused. */
+ods2_result_t ods2_directory_depth(ods2_volume_t *vol, const uint8_t *dir_header, unsigned *depth_out)
+{
+    unsigned depth = 0;
+    uint8_t up[512];
+    ods2_result_t r;
+
+    memcpy(up, dir_header, sizeof(up));
+    while (ods2_fid_number(((const ods2_head_core_t *) up)->fid) != 4) {
+        const ods2_head_core_t *uc = (const ods2_head_core_t *) up;
+        ods2_fid_t parent = uc->backlink;
+        if (++depth > ODS2_MAX_DIR_DEPTH + 1u) break;
+        r = ods2_read_header_fid(vol, parent, up);
+        if (!r.ok) return r;
+    }
+    *depth_out = depth;
+    return ok();
+}
+
 static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *parent_header,
                                            const char *name, ods2_fid_t *new_fid_out);
 
@@ -1805,15 +1848,8 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
         /* VMS nests directories at most 255 deep, and DIR [...] and EXPORT stop there: a tree made deeper
            could not be walked again (F5). The depth of the parent is counted up the back links. */
         unsigned depth = 0;
-        uint8_t up[512];
-        memcpy(up, parent_header, sizeof(up));
-        while (ods2_fid_number(((const ods2_head_core_t *) up)->fid) != 4) {
-            const ods2_head_core_t *uc = (const ods2_head_core_t *) up;
-            ods2_fid_t parent = uc->backlink;
-            if (++depth > ODS2_MAX_DIR_DEPTH + 1u) break;
-            r = ods2_read_header_fid(vol, parent, up);
-            if (!r.ok) return r;
-        }
+        r = ods2_directory_depth(vol, parent_header, &depth);
+        if (!r.ok) return r;
         if (depth + 1 > ODS2_MAX_DIR_DEPTH) {
             return fail("directories can be nested at most 255 levels deep");
         }

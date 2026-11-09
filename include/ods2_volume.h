@@ -288,6 +288,9 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
  */
 ods2_result_t ods2_indexf_map_extent(uint8_t *indexf_header, uint32_t lbn, unsigned block_count);
 
+/* Directories between [000000] and the directory with this header (0 for [000000] itself). */
+ods2_result_t ods2_directory_depth(ods2_volume_t *vol, const uint8_t *dir_header, unsigned *depth_out);
+
 /* Creates a new, empty subdirectory named `name` (e.g. "NETLIB020",
  * without ".DIR" - that's appended internally, matching VMS
  * convention) within the directory described by `parent_header`.

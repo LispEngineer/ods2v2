@@ -132,7 +132,7 @@
 #include "ods5_names.h"
 #include "ods5_header.h"
 
-#define MAX_LINE 1024
+#define MAX_LINE 8192   /* a command line; a longer one is refused, never cut (a cut path names another file) */
 #define MAX_TOKENS 8
 
 /* Current default directory for this session (SET DEFAULT), dot-
@@ -1377,6 +1377,22 @@ static void cmd_export(ods2_volume_t *vol, const ods2_parsed_path_t *p, const ch
     }
 }
 
+/* The deepest directory OpenVMS VAX V7.3 reaches on an ODS-2 volume is 7 levels below [000000] (measured: deeper
+   ones give %RMS-F-DIR and DIRECTORY [...] silently stops at 7); Alpha V7.3-2 and later reach far more. ods2v2
+   creates them (up to 255 levels) but says so. Returns true when it warned. */
+#define ODS2_VAX_V73_MAX_LEVELS 7u
+static bool warn_if_too_deep_for_vax(ods2_volume_t *vol, const uint8_t *parent_header, const char *shown)
+{
+    unsigned depth = 0;
+
+    if (vol->ods5 || !ods2_directory_depth(vol, parent_header, &depth).ok) return false;
+    if (depth + 1 <= ODS2_VAX_V73_MAX_LEVELS) return false;
+    fprintf(stderr, "%%ODS2-W-DEEPDIR, [%s] is %u levels below [000000]: OpenVMS VAX V7.3 cannot reach a "
+                    "directory deeper than %u levels on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
+                    "later can\n", shown, depth + 1, ODS2_VAX_V73_MAX_LEVELS);
+    return true;
+}
+
 static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p)
 {
     /* CREATE/DIRECTORY [PARENT.NEWNAME] - the new directory's own
@@ -1418,6 +1434,7 @@ static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p
         return;
     }
     printf("%%ODS2-I-CREATED, created [%s]\n", effective_path);
+    warn_if_too_deep_for_vax(vol, parent_header, effective_path);
 }
 
 /* A host file opened for COPY, read in order a chunk at a time
@@ -2171,6 +2188,7 @@ static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods
 typedef struct {
     ods2_volume_t *vol;
     int files, dirs, links, errors, skipped;
+    int deep;                            /* directories deeper than OpenVMS VAX V7.3 reaches (ODS-2) */
     unsigned long long bytes;
     const copy_options_t *opts;          /* /FORMAT, /ATTRIBUTES */
     const ods2_record_attrs_t *attrs_in; /* the /ATTRIBUTES given */
@@ -2252,6 +2270,13 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
                     continue;
                 }
                 st->dirs++;
+                {
+                    unsigned d = 0;
+                    if (!st->vol->ods5 && ods2_directory_depth(st->vol, dir_header, &d).ok &&
+                        d + 1 > ODS2_VAX_V73_MAX_LEVELS) {
+                        st->deep++;
+                    }
+                }
             }
             import_tree(st, path, ods2_fid_number(fid), depth + 1);
         } else if (S_ISREG(sb.st_mode)) {
@@ -2338,6 +2363,11 @@ static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods
         return;
     }
     import_tree(&st, local_dir, ods2_fid_number(dir_fid), 0);
+    if (st.deep > 0) {
+        fprintf(stderr, "%%ODS2-W-DEEPDIR, %d director%s deeper than %u levels below [000000] created: OpenVMS "
+                        "VAX V7.3 cannot reach them on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
+                        "later can\n", st.deep, st.deep == 1 ? "y" : "ies", ODS2_VAX_V73_MAX_LEVELS);
+    }
     printf("%%ODS2-I-IMPORTED, %d file%s (%llu bytes), %d director%s, %d symbolic link%s imported "
            "from %s; %d skipped, %d error%s\n", st.files, st.files == 1 ? "" : "s", st.bytes,
            st.dirs, st.dirs == 1 ? "y" : "ies", st.links, st.links == 1 ? "" : "s", local_dir,
@@ -3132,6 +3162,11 @@ static int run_script(ods2_volume_t *vol, const char *script_path)
         char *p = line;
         while (*p && isspace((unsigned char) *p)) p++;
         if (*p == '\0' || *p == '!') continue;
+        if (strlen(line) == sizeof(line) - 1 && line[sizeof(line) - 2] != '\n') {
+            report_error("%%ODS2-E-LINETOOLONG, a script line is longer than %d characters: not run, and the "
+                         "rest of the script is not run\n", MAX_LINE - 1);
+            break;
+        }
         printf("ODS2> %s", line);
         if (line[strlen(line) - 1] != '\n') printf("\n");
         if (!execute_line(vol, line)) break;
@@ -3220,12 +3255,18 @@ int main(int argc, char **argv)
         /* Single-shot: join all remaining argv into one command line. */
         char line[MAX_LINE];
         int i;
+        size_t total = 0;
         line[0] = '\0';
-        for (i = 2; i < argc; i++) {
-            if (i > 2) strncat(line, " ", sizeof(line) - strlen(line) - 1);
-            strncat(line, argv[i], sizeof(line) - strlen(line) - 1);
+        for (i = 2; i < argc; i++) total += strlen(argv[i]) + 1;
+        if (total >= sizeof(line)) {
+            report_error("%%ODS2-E-LINETOOLONG, the command is longer than %d characters: not run\n", MAX_LINE - 1);
+        } else {
+            for (i = 2; i < argc; i++) {
+                if (i > 2) strcat(line, " ");
+                strcat(line, argv[i]);
+            }
+            execute_line(&vol, line);
         }
-        execute_line(&vol, line);
         exit_code = g_command_failed ? 1 : 0;
     }
 

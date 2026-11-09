@@ -534,8 +534,9 @@ def main():
     for dn, lst in entries.items():
         for nm, ntype, ver, fid, flags, vl in lst:
             fnum = fid[0] | (fid[3] << 16)
-            referenced.add(fnum)
             hd = headers.get(fnum)
+            if hd is None or u16(hd, 10) == fid[1]:
+                referenced.add(fnum)
             if hd is None:
                 if fnum in pending:
                     # VMS removes the entry before it frees anything; on the VMS-made AXP1 system disk none of
@@ -547,7 +548,15 @@ def main():
                     fnd.err('dir %d: %r;%d -> file %d has no valid header' % (dn, nm, ver, fnum))
                 continue
             if u16(hd, 10) != fid[1]:
-                fnd.err('dir %d: %r;%d -> file %d: sequence %d, header has %d' % (dn, nm, ver, fnum, fid[1], u16(hd, 10)))
+                if u16(hd, 10) > fid[1]:
+                    # VMS gives a reused file number a new sequence number. On a volume without HARDLINKS,
+                    # deleting the primary name of a file leaves its other names in place (measured, notes
+                    # 15), so an entry with an older sequence number is a stale alias VMS itself makes.
+                    fnd.warn('dir %d: %r;%d -> file %d: a stale alias (entry sequence %d, the file now using the number has %d)'
+                             % (dn, nm, ver, fnum, fid[1], u16(hd, 10)))
+                else:
+                    fnd.err('dir %d: %r;%d -> file %d: sequence %d, header has %d' % (dn, nm, ver, fnum, fid[1], u16(hd, 10)))
+                continue
             bl = u16(hd, 66) | (hd[71] << 16)
             if bl == dn:
                 dir_of_primary.setdefault(fnum, []).append((nm, ver))
