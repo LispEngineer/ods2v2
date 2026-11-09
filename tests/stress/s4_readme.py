@@ -46,6 +46,21 @@ for f in sorted(glob.glob(os.path.join(out, '*.img'))):
     kind = 'ODS-%d%s' % (v.level, (' HARDLINKS' if v.level == 5 and v.volchar & 0x40 else ' no HARDLINKS') if v.level == 5 else '')
     rows.append('| %s | %s | %d | %d | %s | %d / %d / %d | free %d blocks; extension headers %d; most extents of a file %d; biggest directory %d blocks; deepest path %d levels; %d files with 2+ names |' % (
         name, kind, v.size_blocks, v.cluster, WHAT.get(name, ''), nfile, nsym, len(v.dirs) - 1, v.free_clusters * v.cluster, v.nheaders_ext, v.max_extents, bigdir, deepest, multi))
+    # entries whose version limit is not 32767: set on purpose by SET FILE/VERSION_LIMIT in the random operations; VMS shows them in DIRECTORY/FULL
+    RES = {'INDEXF.SYS', 'BITMAP.SYS', 'BADBLK.SYS', 'CORIMG.SYS', 'VOLSET.SYS', 'CONTIN.SYS', 'BACKUP.SYS', 'BADLOG.SYS', 'SECURITY.SYS'}
+    r0 = stress.EscRng()
+    vl_lines = []
+    for (dpath, nm, ver), vl in sorted(v.verlimit.items(), key=lambda kv: repr(kv[0])):
+        if vl == 32767 or (dpath == () and nm in RES) or (dpath, nm, ver) == ((), '000000.DIR', 1):
+            continue
+        base_nm = nm[:-4] if nm.upper().endswith('.DIR') and v.files.get((dpath, nm, ver)) is None else None
+        spec = stress.spec_dir(dpath, r0, v.level == 5) + (stress.spec_dir_name(base_nm, r0, v.level == 5) + '.DIR' if base_nm is not None else stress.spec_file_name(nm, r0, v.level == 5)) + ';%d' % ver
+        vl_lines.append('%d %s' % (vl, spec))
+    vp = os.path.join(out, name + '.VERLIMITS.TXT')
+    if os.path.exists(vp):
+        os.chmod(vp, 0o644)
+    open(vp, 'w').write('\n'.join(vl_lines) + ('\n' if vl_lines else ''))
+    os.chmod(vp, 0o444)
     h = hashlib.sha256()
     with open(f, 'rb') as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b''):
@@ -68,6 +83,7 @@ Manifests (made from the harness's MODEL, not from ods2v2's output): `NAME.MANIF
 
 Suggested run on VMS (per image): MOUNT it (read-only is enough; V8.4: `MOUNT/NOWRITE`); `ANALYZE/DISK_STRUCTURE/READ_CHECK/NOREPAIR/LIST`; `DIRECTORY/FULL [000000...]*.*;*`; CHECKSUM of every file of the manifest and compare; TYPE a few; DISMOUNT.
 Expected from ods2v2's side: s4-full and s4-full2 have 0 free blocks, s4-exthdr and s4-exthdr2 1 free block; ANALYZE should report no errors on any image. Anything ANALYZE says is of interest, warnings too.
+`NAME.VERLIMITS.TXT` lists the entries whose DIR$W_VERLIMIT is not 32767 (`limit spec`): ods2v2 writes 32767 (or the parent directory's default) for everything it creates; the few others were set on purpose by SET FILE/VERSION_LIMIT in the random operations (2, 3, 5, 32, 100, 32766) and must show up in VMS's DIRECTORY/FULL as that limit ("No version limit" for 32767).
 Version-limit check (added after the real VAX96 found ods2v2 writing version limit 1 instead of VMS's 32767, so that VMS purged ;1 when ;2 was made): on a WRITABLE mount of a COPY of the image, `COPY` (DCL) some small file onto the name of an
 ods2v2-made file of the manifest (so VMS creates the next version, e.g. `COPY SYS$LOGIN:LOGIN.COM DKA0:[D]F.TXT`), then `DIRECTORY DKA0:[D]F.TXT;*`: **both ;1 (the old one, unchanged) and the new ;2 must be listed**. Do the same for a directory-listed alias or symlink name and for
 one file in each of the three kinds of directory (the root [000000], a subdirectory, a big one). Also `DIRECTORY/FULL` on an ods2v2-made file and on a VMS-made one next to it: nothing may differ but dates, ids and sizes.
