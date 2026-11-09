@@ -113,6 +113,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include "ods2_volume.h"
 #include "ods2_path.h"
@@ -147,6 +148,12 @@ static bool g_paths_mode = false;
 /* DIR/FULL: a block of details per file (id, size, owner, dates, the
    ODS-5 fields) instead of one line. */
 static bool g_full_mode = false;
+/* While EXPORT runs, each entry DIR would list is handed to this instead
+   (and not printed). */
+typedef void (*entry_hook_fn)(void *ctx, ods2_volume_t *vol, const char *dir_spelling,
+                              const ods2_dir_entry_t *entry);
+static entry_hook_fn g_entry_hook = NULL;
+static void *g_entry_hook_ctx = NULL;
 
 /* Set by report_error(): some command since the last reset failed.
    main() turns it into the exit status of a single-shot command or an
@@ -506,6 +513,11 @@ static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_d
         rank = (i > 0 && same_name(entries[i].name, entries[i - 1].name)) ? rank + 1 : 0;
         if (ods2_wildcard_match(pattern, entries[i].name) &&
             version_selected(p, &entries[i], rank)) {
+            if (g_entry_hook != NULL) {
+                g_entry_hook(g_entry_hook_ctx, vol, dir_path, &entries[i]);
+                shown++;
+                continue;
+            }
             if (g_paths_mode) {
                 char slash[ODS2_PATH_MAX];
                 spelling_to_slash_path(dir_path, slash, sizeof(slash));
@@ -525,7 +537,7 @@ static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_d
             shown++;
         }
     }
-    if (shown > 0 && !g_paths_mode) {
+    if (shown > 0 && !g_paths_mode && g_entry_hook == NULL) {
         printf("\nTotal of %d file%s.\n", shown, (shown == 1) ? "" : "s");
     }
     return shown;
@@ -811,6 +823,296 @@ static void cmd_dir(ods2_volume_t *vol, const ods2_parsed_path_t *p)
                w.files_shown, (w.files_shown == 1) ? "" : "s");
     } else if (w.dirs_shown == 0 && w.errors == 0) {
         fprintf(stderr, "%%ODS2-W-NOFILES, no files found\n");
+    }
+}
+
+/* --- EXPORT: copy files off the volume to Linux files ------------------ */
+
+typedef struct {
+    ods2_volume_t *vol;
+    const char *local;        /* destination: a directory, or one file name */
+    bool dest_is_dir;
+    bool tree;                /* recreate the directory tree below `start` */
+    bool versions;            /* name ends ";N" */
+    bool overwrite;
+    bool links;               /* repeat FIDs become hard links */
+    const char *start;        /* the start directory's spelling (tree mode) */
+    int files, symlinks, dirs_skipped, specials_skipped, errors;
+    struct seen_fid { uint16_t num, seq; char *path; } *seen;
+    size_t seen_count, seen_cap;
+} export_ctx_t;
+
+/* A name made safe for one Linux path component. */
+static void linux_component(const char *literal, char *out, size_t cap)
+{
+    size_t n = 0;
+    const char *s;
+    if (literal[0] == '\0' || strcmp(literal, ".") == 0 || strcmp(literal, "..") == 0) {
+        snprintf(out, cap, "%s", literal[0] == '\0' ? "%00" : (literal[1] == '\0' ? "%2E" : "%2E%2E"));
+        return;
+    }
+    for (s = literal; *s && n + 4 < cap; s++) {
+        if (*s == '/') { out[n++] = '%'; out[n++] = '2'; out[n++] = 'F'; }
+        else out[n++] = *s;
+    }
+    out[n] = '\0';
+}
+
+static bool make_local_dirs(const char *path)
+{
+    char buf[ODS2_PATH_MAX * 2];
+    char *p;
+    struct stat st;
+
+    snprintf(buf, sizeof(buf), "%s", path);
+    for (p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (stat(buf, &st) != 0 && mkdir(buf, 0777) != 0 && errno != EEXIST) return false;
+            *p = '/';
+        }
+    }
+    return stat(buf, &st) == 0 ? S_ISDIR(st.st_mode) : mkdir(buf, 0777) == 0;
+}
+
+typedef struct { FILE *f; bool failed; } file_sink_t;
+
+static bool file_sink(void *ctx, const uint8_t *data, size_t n)
+{
+    file_sink_t *s = (file_sink_t *) ctx;
+    if (fwrite(data, 1, n, s->f) != n) { s->failed = true; return false; }
+    return true;
+}
+
+static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spelling,
+                         const ods2_dir_entry_t *e)
+{
+    export_ctx_t *x = (export_ctx_t *) ctx_;
+    uint8_t header[512];
+    const ods2_head_core_t *core = (const ods2_head_core_t *) header;
+    char dirpath[ODS2_PATH_MAX * 2], name[ODS2_DIR_MAX_NAME + 16], comp[ODS2_DIR_MAX_NAME * 2 + 16];
+    char path[ODS2_PATH_MAX * 3];
+    ods2_result_t r = ods2_read_header(vol, e->fid.fid_num, header);
+    unsigned special;
+    size_t i;
+
+    if (!r.ok) {
+        report_error("%%ODS2-E-READERR, %s: %s\n", e->name, r.problem);
+        x->errors++;
+        return;
+    }
+    if (core->filechar & 0x2000u) { x->dirs_skipped++; return; }
+    special = ods5_special_type(header);
+    if (special != 0 && special != ODS5_FAT_SYMBOLIC_LINK && special != ODS5_FAT_SYMLINK) {
+        fprintf(stderr, "%%ODS2-W-SPECIAL, %s: special file (type %u) skipped\n", e->name, special);
+        x->specials_skipped++;
+        return;
+    }
+
+    /* the Linux directory */
+    snprintf(dirpath, sizeof(dirpath), "%s", x->local);
+    if (x->tree) {
+        const char *rel = dir_spelling + strlen(x->start);
+        if (*rel == '.' && x->start[0] != '\0') rel++;
+        while (*rel) {
+            const char *end = rel;
+            char lit[ODS2_PATH_MAX];
+            size_t ul;
+            while (*end && *end != '.') { if (*end == '^' && end[1]) end++; end++; }
+            ul = ods5_unescape(rel, (size_t) (end - rel), lit, sizeof(lit));
+            if (ul == (size_t) -1) snprintf(lit, sizeof(lit), "%.*s", (int) (end - rel), rel);
+            linux_component(lit, comp, sizeof(comp));
+            if (strlen(dirpath) + strlen(comp) + 2 >= sizeof(dirpath)) break;
+            strcat(dirpath, "/");
+            strcat(dirpath, comp);
+            rel = end;
+            if (*rel == '.') rel++;
+        }
+    }
+    /* the Linux file name */
+    snprintf(name, sizeof(name), "%s", e->name);
+    linux_component(name, comp, sizeof(comp));
+    if (x->versions) {
+        size_t l = strlen(comp);
+        snprintf(comp + l, sizeof(comp) - l, ";%u", (unsigned) e->version);
+    }
+    if (x->dest_is_dir || x->tree) {
+        if (!make_local_dirs(dirpath)) {
+            report_error("%%ODS2-E-MKDIR, cannot create %s: %s\n", dirpath, strerror(errno));
+            x->errors++;
+            return;
+        }
+        snprintf(path, sizeof(path), "%s/%s", dirpath, comp);
+    } else {
+        if (x->files + x->symlinks > 0) {
+            report_error("%%ODS2-E-TOOMANY, more than one file matches; the destination %s "
+                         "must be a directory\n", x->local);
+            x->errors++;
+            return;
+        }
+        snprintf(path, sizeof(path), "%s", x->local);
+    }
+
+    if (x->overwrite) remove(path);
+
+    if (special != 0) {      /* a symbolic link: the data is the target text */
+        uint8_t target[1100];
+        char lit[2400];
+        size_t got = 0, len = ods2_file_content_length(header);
+        if (len == 0 || len >= sizeof(target) ||
+            !ods2_read_file(vol, header, target, sizeof(target), &got).ok ||
+            ods5_isl1_to_utf8(target, got, lit, sizeof(lit)) == (size_t) -1) {
+            report_error("%%ODS2-E-SYMLINK, %s: cannot read the link target\n", e->name);
+            x->errors++;
+            return;
+        }
+        if (symlink(lit, path) != 0) {
+            report_error("%%ODS2-E-SYMLINK, %s: %s\n", path, strerror(errno));
+            x->errors++;
+            return;
+        }
+        x->symlinks++;
+        return;
+    }
+
+    if (x->links) {
+        for (i = 0; i < x->seen_count; i++) {
+            if (x->seen[i].num == e->fid.fid_num && x->seen[i].seq == e->fid.fid_seq) {
+                if (link(x->seen[i].path, path) == 0) { x->files++; return; }
+                break;
+            }
+        }
+    }
+    {
+        FILE *f = fopen(path, "wbx");
+        file_sink_t sink;
+        size_t bytes = 0;
+        bool sink_failed = false;
+
+        if (f == NULL) {
+            report_error("%%ODS2-E-OPENERR, cannot create %s: %s\n", path, strerror(errno));
+            x->errors++;
+            return;
+        }
+        sink.f = f;
+        sink.failed = false;
+        r = ods2_read_file_stream(vol, header, file_sink, &sink, &bytes, &sink_failed);
+        if (fclose(f) != 0) sink.failed = true;
+        if (!r.ok || sink.failed) {
+            report_error("%%ODS2-E-READERR, %s: %s\n", e->name,
+                         r.ok ? "could not write the Linux file" : r.problem);
+            remove(path);
+            x->errors++;
+            return;
+        }
+        x->files++;
+        if (x->links) {
+            if (x->seen_count == x->seen_cap) {
+                size_t nc = x->seen_cap ? x->seen_cap * 2 : 64;
+                struct seen_fid *g = realloc(x->seen, nc * sizeof(*g));
+                if (g == NULL) return;
+                x->seen = g;
+                x->seen_cap = nc;
+            }
+            x->seen[x->seen_count].num = e->fid.fid_num;
+            x->seen[x->seen_count].seq = e->fid.fid_seq;
+            x->seen[x->seen_count].path = strdup(path);
+            if (x->seen[x->seen_count].path != NULL) x->seen_count++;
+        }
+    }
+}
+
+/* EXPORT[/VERSIONS][/OVERWRITE][/LINKS] <spec> <linux-path>: the files the spec names, to
+ * Linux. The destination is a directory (made if needed) for a spec with wildcards, versions
+ * or an ellipsis; a spec naming one file may also give the new file's name. An ellipsis
+ * recreates the directory tree below the start directory. File contents are the bytes of the
+ * file up to its end-of-file mark, as TYPE prints them; names are the UTF-8 names. */
+static void cmd_export(ods2_volume_t *vol, const ods2_parsed_path_t *p, const char *local,
+                       const char *quals)
+{
+    export_ctx_t x;
+    struct stat st;
+    entry_hook_fn saved_hook = g_entry_hook;
+    void *saved_ctx = g_entry_hook_ctx;
+    bool saved_paths = g_paths_mode;
+    char effective[ODS2_PATH_MAX], spec[ODS2_PATH_MAX + 4], start[ODS2_PATH_MAX], pattern[ODS2_PATH_MAX + 4];
+    const char *rest;
+    dir_walk_t w;
+    bool wild;
+    size_t i;
+
+    memset(&x, 0, sizeof(x));
+    x.vol = vol;
+    x.local = local;
+    while (quals != NULL && *quals == '/') {
+        char q[32];
+        size_t ql = strcspn(quals + 1, "/");
+        if (ql >= sizeof(q)) ql = sizeof(q) - 1;
+        memcpy(q, quals + 1, ql);
+        q[ql] = '\0';
+        if (matches(q, "VERSIONS")) x.versions = true;
+        else if (matches(q, "OVERWRITE")) x.overwrite = true;
+        else if (matches(q, "LINKS")) x.links = true;
+        else {
+            report_error("%%ODS2-E-BADQUAL, unrecognized EXPORT qualifier /%s "
+                         "(use /VERSIONS, /OVERWRITE or /LINKS)\n", q);
+            return;
+        }
+        quals += 1 + strcspn(quals + 1, "/");
+    }
+
+    resolve_effective_path(p, effective, sizeof(effective));
+    snprintf(spec, sizeof(spec), "%s%s", effective, p->recursive ? "..." : "");
+    rest = ods2_dir_spec_split_prefix(spec, start, sizeof(start));
+    if (rest == NULL) {
+        report_error("%%ODS2-E-BADPATH, [%s]: invalid directory specification\n", spec);
+        return;
+    }
+    canonical_dir_path(vol, start, sizeof(start));
+    x.start = start;
+    x.tree = p->dir_wildcard;
+    if (p->filename[0] == '\0') snprintf(pattern, sizeof(pattern), "*.*");
+    else if (ods5_find_unescaped(p->filename, '.') == NULL) snprintf(pattern, sizeof(pattern), "%s.*", p->filename);
+    else snprintf(pattern, sizeof(pattern), "%s", p->filename);
+    if (p->version_wildcard) x.versions = true;
+
+    wild = p->dir_wildcard || p->version_wildcard || p->filename[0] == '\0' ||
+           ods5_find_unescaped(p->filename, '.') == NULL;
+    for (i = 0; !wild && p->filename[i]; i++) {
+        if (p->filename[i] == '^') { if (p->filename[i + 1]) i++; continue; }
+        if (p->filename[i] == '*' || p->filename[i] == '%' || p->filename[i] == '?') wild = true;
+    }
+    if (stat(local, &st) == 0 && S_ISDIR(st.st_mode)) x.dest_is_dir = true;
+    else if (wild) {
+        if (!make_local_dirs(local)) {
+            report_error("%%ODS2-E-MKDIR, cannot create %s: %s\n", local, strerror(errno));
+            return;
+        }
+        x.dest_is_dir = true;
+    }
+
+    memset(&w, 0, sizeof(w));
+    w.vol = vol;
+    w.spec = rest;
+    w.pattern = pattern;
+    w.p = p;
+    g_entry_hook = export_entry;
+    g_entry_hook_ctx = &x;
+    g_paths_mode = false;
+    walk_directories(&w, start, "", 0);
+    g_entry_hook = saved_hook;
+    g_entry_hook_ctx = saved_ctx;
+    g_paths_mode = saved_paths;
+
+    for (i = 0; i < x.seen_count; i++) free(x.seen[i].path);
+    free(x.seen);
+    if (x.files + x.symlinks == 0 && x.errors == 0) {
+        fprintf(stderr, "%%ODS2-W-NOFILES, no files found\n");
+    } else {
+        printf("%%ODS2-I-EXPORTED, %d file%s, %d symbolic link%s copied to %s",
+               x.files, x.files == 1 ? "" : "s", x.symlinks, x.symlinks == 1 ? "" : "s", local);
+        if (x.dirs_skipped) printf("; %d director%s not copied", x.dirs_skipped, x.dirs_skipped == 1 ? "y" : "ies");
+        printf("\n");
     }
 }
 
@@ -1512,8 +1814,16 @@ static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p)
         report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
         return;
     }
-    /* p->version is 0 (highest) when no version was given. */
-    r = ods2_lookup_name_version(vol, dir_header, p->filename, p->version, &file_fid, NULL);
+    /* p->version is 0 (highest) when no version was given. The name is a
+       spelling (^-escapes): look up the characters it stands for. */
+    {
+        char literal[ODS2_PATH_MAX];
+        if (ods5_unescape(p->filename, strlen(p->filename), literal, sizeof(literal)) == (size_t) -1) {
+            report_error("%%ODS2-E-BADNAME, %s: malformed ^ escape in the file name\n", spec);
+            return;
+        }
+        r = ods2_lookup_name_version(vol, dir_header, literal, p->version, &file_fid, NULL);
+    }
     if (!r.ok) {
         report_error("%%ODS2-E-FNF, %s not found\n", spec);
         return;
@@ -1620,6 +1930,10 @@ static void print_help(void)
            "  DIR/FULL ...               per file: id, size, owner, protection, dates (also\n"
            "                             access and attribute dates on ODS-5), record format\n"
            "  SET NAMES UTF8|ESCAPED     the same for every command that shows names\n"
+           "  EXPORT[/VERSIONS][/OVERWRITE][/LINKS] <path> <linux-path>\n"
+           "                             copy files off the volume to Linux files (UTF-8 names;\n"
+           "                             wildcards, [dir...] recreates the tree; symbolic links\n"
+           "                             become Linux symbolic links); \"quotes\" keep a space\n"
            "  CREATE/DIRECTORY path      create a directory\n"
            "  COPY <local-file> <path>   write a local file onto the disk (Stream_LF)\n"
            "  COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) <local-file> <path>\n"
@@ -1661,8 +1975,18 @@ static int tokenize(char *line, char *tokens[MAX_TOKENS])
         while (*p && isspace((unsigned char) *p)) p++;
         if (!*p) break;
         tokens[count++] = p;
-        while (*p && !isspace((unsigned char) *p)) p++;
-        if (*p) *p++ = '\0';
+        {
+            /* "..." keeps white space inside one token (a Linux path with a
+               space, a name with a literal space); the quotes are dropped */
+            char *w = p;
+            bool in_quote = false;
+            while (*p && (in_quote || !isspace((unsigned char) *p))) {
+                if (*p == '"') { in_quote = !in_quote; p++; continue; }
+                *w++ = *p++;
+            }
+            if (*p) p++;
+            *w = '\0';
+        }
     }
     return count;
 }
@@ -1818,6 +2142,19 @@ static bool execute_line(ods2_volume_t *vol, char *line)
         g_utf8_names = saved_utf8;
         g_paths_mode = saved_paths;
         g_full_mode = saved_full;
+        return true;
+    }
+    if (matches(verb, "EXPORT") || matches(verb, "GET")) {
+        ods2_parsed_path_t p;
+        if (n < 3) {
+            report_error("%%ODS2-E-NOPARM, usage: EXPORT <path> <linux-file-or-directory>\n");
+            return true;
+        }
+        if (!ods2_parse_path(tokens[1], &p)) {
+            report_error("%%ODS2-E-BADPATH, could not parse %s\n", tokens[1]);
+            return true;
+        }
+        cmd_export(vol, &p, tokens[2], quals);
         return true;
     }
     if (matches(tokens[0], "CREATE/DIRECTORY") || matches(tokens[0], "CREATE/DIR") ||

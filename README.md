@@ -255,6 +255,22 @@ format, a symbolic link's target, and the primary link's name when the
 entry is an alias. `DIR/PATHS` prints one `dir/dir/NAME.EXT;ver` line
 per file, UTF-8, for scripts.
 
+**Copying files out.** `EXPORT <path> <linux-path>` (alias `GET`) copies
+files off the volume to Linux files: the bytes of the file up to its
+end-of-file mark, exactly what `TYPE` prints (RMS record structure is
+not interpreted), under the file's UTF-8 name. The destination is a
+directory (made if it does not exist) when the specification has
+wildcards, `;*` or an ellipsis; a specification naming one file may
+instead give the new file's name. An ellipsis (`[000000...]*.*`) recreates
+the directory tree below the start directory, directories by name
+(`Lots.Of.Periods/`, not `Lots^.Of^.Periods.DIR`). `/VERSIONS` appends
+`;N` to every name, `/OVERWRITE` replaces existing files (otherwise they
+are refused), `/LINKS` makes a repeated file (an alias or hard link, one
+file with several names) a Linux hard link instead of a second copy. A
+symbolic link (an ODS-5 special file) becomes a Linux symbolic link;
+other special files are skipped with a warning; directory files are not
+copied. A `"quoted"` argument keeps white space: `EXPORT [A]*.* "/my files"`.
+
 ### File dates and time zones
 
 VMS keeps file dates in local time, so `ods2` stamps new files (and
