@@ -16,11 +16,12 @@ volume for k = 1..n and checks what is left:
 Usage: fault_inject.py [--quick] [--level 2|5] [--op NAME ...] [--keep]   (run from the project root)
 Exit status 1 if any check failed; the report names the operation, level and k.
 """
-import argparse, hashlib, os, re, shutil, subprocess, sys
+import argparse, hashlib, os, random, re, shutil, subprocess, sys
 
 ODS2 = os.environ.get('FAULT_ODS2', './ods2_fault')
 INIT = './ods2_init'
 CHECK = ['python3', '-I', 'tests/ods5check.py']
+NEXT = {}   # base image -> the name whose insert grows the directory
 WORK = os.path.join(os.environ.get('TMPDIR', 'samples'), 'fault_inject_work')
 
 ALLOWED = [
@@ -57,6 +58,8 @@ def tree(img, tag):
     rc, text = ods2(img, 'EXPORT [000000...]*.*;* %s' % out)
     files = {}
     for dp, dn, fn in os.walk(out):
+        for d in dn:                      # an empty directory is a name too: it must stay listed
+            files['dir:' + os.path.relpath(os.path.join(dp, d), out)] = 'dir'
         for f in fn:
             rel = os.path.relpath(os.path.join(dp, f), out)
             if rel.split(os.sep)[-1].upper().startswith(('INDEXF.', 'BITMAP.', 'BADBLK.', 'CORIMG.', 'VOLSET.', 'CONTIN.',
@@ -67,12 +70,20 @@ def tree(img, tag):
     return rc, files, text
 
 
-def check(img):
+# A block that splits inside a directory with blocks after it is rewritten so that every name stays listed at
+# every write, a name being listed twice for a moment (F2): the checker reports that as duplicate entries and
+# a block out of order. Allowed for those operations only; a name missing is never allowed (the tree compare).
+SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order']
+EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
+                 'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT}
+
+
+def check(img, op=None):
     rc, text = run(CHECK + [img])
     errs = [l for l in text.splitlines() if l.startswith('ERROR')]
     bad, leaks = [], []
     for l in errs:
-        if any(re.search(a, l) for a in ALLOWED):
+        if any(re.search(a, l) for a in ALLOWED + EXTRA_ALLOWED.get(op, [])):
             leaks.append(l)
         else:
             bad.append(l)
@@ -101,12 +112,14 @@ def put_host(name, data):
     return p
 
 
-def setup(level, hardlinks, fill_for=None):
+def setup(level, hardlinks, fill_for=None, cluster=None):
     """the base volume: files of several sizes (one fragmented over holes), subdirectories, links"""
-    img = os.path.join(WORK, 'base_%d%s%s.img' % (level, 'h' if hardlinks else '', fill_for or ''))
+    img = os.path.join(WORK, 'base_%d%s%s%s.img' % (level, 'h' if hardlinks else '', fill_for or '', cluster or ''))
     if os.path.exists(img):
         os.remove(img)
-    a = [INIT, img, '8192', '--structure=%d' % level, '--label=FAULT']
+    a = [INIT, img, '65536' if cluster else '8192', '--structure=%d' % level, '--label=FAULT']
+    if cluster:
+        a.append('--cluster=%d' % cluster)
     if hardlinks and level == 5:
         a.append('--hardlinks')
     rc, out = run(a)
@@ -120,41 +133,48 @@ def setup(level, hardlinks, fill_for=None):
     for dst, src in (('[000000]A1.TXT', small), ('[000000]L.TXT', small), ('[000000]B.DAT', mid), ('[000000]C.DAT', big), ('[SUB]D.TXT', small)):
         rc, out = ods2(img, 'COPY %s %s' % (src, dst))
         assert rc == 0, out
-    # fragmentation: 16-block files fill the volume, every other one is deleted, then FRAG.DAT (1600 blocks)
-    # takes 100 of the 16-block holes: 100 extents, so it has extension headers
-    filler = put_host('filler.dat', blob(8192, 3))
-    script = os.path.join(WORK, 'fill.ods2')
-    with open(script, 'w') as f:
-        f.write('CREATE/DIRECTORY [FILL]\n')
-        for i in range(600):
-            f.write('COPY %s [FILL]F%03d.DAT\n' % (filler, i))
-        for i in range(0, 600, 2):
-            f.write('DELETE [FILL]F%03d.DAT\n' % i)
-    run([ODS2, img, '@' + script])
-    assert ods2(img, 'COPY %s [000000]FRAG.DAT' % put_host('frag.dat', blob(1600 * 512, 9)))[0] == 0
+    if not cluster:
+        # fragmentation: 16-block files fill the volume, every other one is deleted, then FRAG.DAT (1600 blocks)
+        # takes 100 of the 16-block holes: 100 extents, so it has extension headers
+        filler = put_host('filler.dat', blob(8192, 3))
+        script = os.path.join(WORK, 'fill.ods2')
+        with open(script, 'w') as f:
+            f.write('CREATE/DIRECTORY [FILL]\n')
+            for i in range(600):
+                f.write('COPY %s [FILL]F%03d.DAT\n' % (filler, i))
+            for i in range(0, 600, 2):
+                f.write('DELETE [FILL]F%03d.DAT\n' % i)
+        run([ODS2, img, '@' + script])
+        assert ods2(img, 'COPY %s [000000]FRAG.DAT' % put_host('frag.dat', blob(1600 * 512, 9)))[0] == 0
     # one file with another directory entry
     assert ods2(img, 'LINK [SUB]LNKA.TXT [000000]L.TXT')[0] == 0
     if level == 5:
         assert ods2(img, 'SYMLINK [000000]SYMA.TXT L.TXT')[0] == 0
     if fill_for:
-        # [FULL] filled up to just before the insert that splits a block (3) or moves the directory (4)
-        want = 3 if fill_for == 'split' else 4
+        # [FULL] is filled to just before an insert that grows it by a block: 'split' (one block to two: the
+        # new name sorts last), 'splitmid' (names in random order, three or more blocks: the block that
+        # splits has blocks after it, which move up one), 'move' (three blocks in use, as many as are
+        # allocated: the directory moves to a new, larger area). The next name to add is returned in NEXT.
+        rnd = random.Random(7)
+        order = list(range(2000))
+        if fill_for in ('splitmid', 'splitbig'):
+            rnd.shuffle(order)
+        before_wanted = {'split': 2, 'splitmid': 4, 'move': 4, 'movebig': 17, 'splitbig': 25}[fill_for]
         fid = fid_of(img, '[000000]FULL.DIR')
-        i = 0
-        while True:
+        for i in order:
+            name = 'N%05d.TXT' % i
             e = efblk(img, fid)
-            if e is not None and e >= want:
-                break
             probe = img + '.probe'
             shutil.copyfile(img, probe)
-            ods2(probe, 'COPY %s [FULL]N%05d.TXT' % (small, i))
-            if efblk(probe, fid) >= want:
-                os.remove(probe)
-                break
+            ods2(probe, 'COPY %s [FULL]%s' % (small, name))
+            grows = efblk(probe, fid) > e
             os.remove(probe)
-            assert ods2(img, 'COPY %s [FULL]N%05d.TXT' % (small, i))[0] == 0
-            i += 1
-            assert i < 400
+            if grows and e >= before_wanted:
+                NEXT[img] = name
+                break
+            assert ods2(img, 'COPY %s [FULL]%s' % (small, name))[0] == 0
+        else:
+            raise AssertionError('no growing insert found')
     return img
 
 
@@ -164,7 +184,7 @@ OPS = {
     'delete_mid': ('DELETE [000000]B.DAT', ['B.DAT;1'], False, False, None),
     'delete_fragmented': ('DELETE [000000]FRAG.DAT', ['FRAG.DAT;1'], False, False, None),
     'delete_all_versions': ('DELETE [SUB]D.TXT;*', ['SUB/D.TXT;1'], False, False, None),
-    'delete_empty_dir': ('DELETE [EMPTY]', ['EMPTY.DIR;1'], False, False, None),
+    'delete_empty_dir': ('DELETE [EMPTY]', ['EMPTY.DIR;1', 'dir:EMPTY'], False, False, None),
     'delete_alias': ('DELETE [SUB]LNKA.TXT', ['SUB/LNKA.TXT;1'], False, False, None),
     'delete_hardlink': ('DELETE [SUB]LNKA.TXT', ['SUB/LNKA.TXT;1'], True, True, None),
     'delete_primary_hardlink': ('DELETE [000000]L.TXT', ['L.TXT;1'], True, True, None),
@@ -176,10 +196,14 @@ OPS = {
     'link_hardlinks': ('LINK [SUB]LNKB.TXT [000000]B.DAT', ['SUB/LNKB.TXT;1'], True, True, None),
     'symlink': ('SYMLINK [000000]SYMB.TXT B.DAT', ['SYMB.TXT;1'], True, False, None),
     'set_label': ('SET VOLUME/LABEL=RELABEL', [], False, False, None),
-    'insert_split': ('COPY %(small)s [FULL]ZZSPLIT.TXT', ['FULL/ZZSPLIT.TXT;1'], False, False, 'split'),
-    'insert_move': ('COPY %(small)s [FULL]ZZMOVE.TXT', ['FULL/ZZMOVE.TXT;1'], False, False, 'move'),
+    'insert_split': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'split'),
+    'insert_split_mid': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'splitmid'),
+    'insert_split_big': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'splitbig'),
+    'insert_move_big': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'movebig'),
+    'insert_move': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'move'),
 }
-QUICK = ['delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label']
+QUICK = ['delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
+         'insert_split', 'insert_split_mid', 'insert_move']
 
 
 def main():
@@ -204,11 +228,13 @@ def main():
             cmd, targets, need5, need_hl, fill = OPS[name]
             if need5 and level != 5:
                 continue
-            cmd = cmd % ctx
             key = (level, need_hl, fill)
             if key not in bases:
-                bases[key] = setup(level, need_hl, fill)
+                bases[key] = setup(level, need_hl, fill, {'movebig': 16, 'splitbig': 64}.get(fill))
             base = bases[key]
+            ctx_op = dict(ctx, next=NEXT.get(base, ''))
+            cmd = cmd % ctx_op
+            targets = [t % ctx_op for t in targets]
             rc, base_files, _ = tree(base, 'base')
             assert rc == 0
             trial = os.path.join(WORK, 'trial.img')
@@ -228,7 +254,7 @@ def main():
                 shutil.copyfile(base, trial)
                 rc, out = ods2(trial, cmd, {'ODS2_FAULT_AFTER_WRITES': str(k)})
                 prob = []
-                bad, leaks = check(trial)
+                bad, leaks = check(trial, name)
                 prob += ['checker: ' + b for b in bad]
                 counts['leak' if leaks else 'clean'] += 1
                 rc2, files, text = tree(trial, 'after')
@@ -241,7 +267,7 @@ def main():
                 rc3, out3 = ods2(trial, 'COPY %s [000000]ZZ.DAT' % followup)
                 if rc3 != 0:
                     prob.append('the COPY after the fault failed: ' + out3.strip()[:120])
-                bad2, leaks2 = check(trial)
+                bad2, leaks2 = check(trial, name)
                 prob += ['after COPY, checker: ' + b for b in bad2]
                 rc4, files2, text = tree(trial, 'after2')
                 for p, h in base_files.items():

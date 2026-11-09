@@ -418,6 +418,69 @@ PY
     check "ODS-$level: COPY with a damaged INDEXF.SYS header fails (exit 1) and says so; the image is unchanged" "1 damaged $before" "$rc $msg $(md5sum < "$img")"
 done
 
+# ---- a directory component whose entry has an RVN is not followed, to read or to write (review 8, R8-1):
+# the entry for D.DIR in the MFD, the patch above; [D] is directory number NUM of this volume, whatever its RVN says
+for level in 2 5; do
+    for which in rvn; do
+        img="$TMP/c$level$which.img"
+        $INIT "$img" 8192 --structure=$level --label=PATHFID >/dev/null 2>&1
+        printf 'x\n' > "$TMP/u.txt"
+        $ODS2 "$img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+        $ODS2 "$img" "COPY $TMP/u.txt [D]X.TXT" >/dev/null 2>&1
+        mkdir -p "$TMP/tree/sub"; printf 'y\n' > "$TMP/tree/sub/y.txt"
+        dnum=$($ODS2 "$img" 'DIR/FULL [000000]D.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+        python3 -I "$TMP/fidpatch.py" "$img" 4 "$dnum" $which
+        before=$(md5sum < "$img")
+        for cmd in "COPY $TMP/u.txt [D]Y.TXT" "CREATE/DIRECTORY [D.S]" "IMPORT $TMP/tree [D]" "DIR [D]" "TYPE [D]X.TXT" "DELETE [D]X.TXT"; do
+            out=$($ODS2 "$img" "$cmd" 2>&1); rc=$?
+            case "$out" in *"not supported"*) msg=refused ;; *) msg="$out" ;; esac
+            check "ODS-$level: $cmd, with an $which in D.DIR's entry: refused (exit 1)" "1 refused" "$rc $msg"
+        done
+        check "ODS-$level: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
+    done
+done
+
+# ---- a refused operation writes nothing (F1, found by the stress harness): a change is made in memory and
+# reaches the image only when every step of it has succeeded, so a check that fails late cannot leave a
+# half-done delete. Three damaged volumes, DELETE (and COPY where the damage is in what it needs): exit 1, the
+# image byte for byte as it was.
+cat > "$TMP/damage.py" <<'PY'
+import struct, sys
+img, what, fnum = sys.argv[1], sys.argv[2], int(sys.argv[3])
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+def put(n, h):
+    struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+    f.seek((base + n - 1) * 512); f.write(h)
+def get(n):
+    f.seek((base + n - 1) * 512); return bytearray(f.read(512))
+if what == 'unaligned':                 # the file's first map pointer: LBN + 1, not a multiple of the cluster size
+    h = get(fnum); o = h[1] * 2
+    struct.pack_into('<H', h, o + 2, (struct.unpack_from('<H', h, o + 2)[0] + 1) & 0xFFFF); put(fnum, h)
+elif what == 'bitmap':                  # BITMAP.SYS (file 2): its map in use is empty, so its extents cannot be decoded
+    h = get(2); h[58] = 0; put(2, h)
+elif what == 'extension':               # the file claims an extension header the index file does not cover
+    h = get(fnum); struct.pack_into('<HH', h, 14, 60000, 1); put(fnum, h)
+PY
+for level in 2 5; do
+    for what in unaligned bitmap extension; do
+        img="$TMP/z$level$what.img"
+        $INIT "$img" 8192 --structure=$level --cluster=4 --label=REFUSED >/dev/null 2>&1
+        head -c 5000 /dev/zero | tr '\0' 'v' > "$TMP/v.dat"
+        $ODS2 "$img" "COPY $TMP/v.dat [000000]VICTIM.DAT" >/dev/null 2>&1
+        vnum=$($ODS2 "$img" 'DIR/FULL [000000]VICTIM.DAT' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+        python3 -I "$TMP/damage.py" "$img" $what "$vnum"
+        before=$(md5sum < "$img")
+        out=$($ODS2 "$img" 'DELETE [000000]VICTIM.DAT' 2>&1); rc=$?
+        [ $what = bitmap ] && [ $rc -eq 0 ] && rc="deleted (the bitmap is not needed?): $out"
+        check "ODS-$level: DELETE with $what damage is refused (exit 1) and the image is unchanged" "1 $before" "$rc $(md5sum < "$img")"
+        out=$($ODS2 "$img" "COPY $TMP/v.dat [000000]OTHER.DAT" 2>&1); rc=$?
+        if [ $what = bitmap ]; then
+            check "ODS-$level: COPY with the bitmap damaged is refused (exit 1) and the image is unchanged" "1 $before" "$rc $(md5sum < "$img")"
+        fi
+    done
+done
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"
