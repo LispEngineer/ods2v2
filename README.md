@@ -224,16 +224,39 @@ command that would write to it, and `ods2_mount_write()`, is refused
 and the image is not touched. Any other structure level is still
 refused. The image may be read-only (`chmod 444`).
 
-### ODS-5 volumes (structure level 5), read-only
+### ODS-5 volumes (structure level 5): read and write
 
-A structure level 5 volume mounts for reading (one `%ODS2-W-ODS5RO`
-warning on stderr); `SHOW VOLUME` reports `ODS-5, version 1` and the
-volume characteristics (`NOHIGHWATER`, `ACCESS_DATES`, `HARDLINKS`,
-...). Every command that would write to it, and `ods2_mount_write()`,
-is refused ("volume is ODS-5 ... read-only for now") and the image is
-not touched. Other levels (3, 4, 6) are refused. The on-disk
-differences are written up, with sources, in `ODS5_FORMAT_NOTES.md` of
-the ods5-cli project.
+A structure level 5 volume mounts like an ODS-2 one; `SHOW VOLUME` reports
+`ODS-5, version 1` and the volume characteristics (`NOHIGHWATER`,
+`ACCESS_DATES`, `HARDLINKS`, ...). An image that cannot be written
+(`chmod 444`) is mounted read-only and every command that would write
+is refused. Other levels (3, 4, 6) are refused. The on-disk differences
+are written up, with sources, in `ODS5_FORMAT_NOTES.md` of the ods5-cli
+project.
+
+**Writing.** `CREATE/DIRECTORY`, `COPY`, `DELETE`, `SET VOLUME/LABEL`
+work as on ODS-2, but a name keeps its case and may hold any character VMS
+accepts: write it with the circumflex escapes (`COPY notes.txt
+[Made^_By^.Hand]New^_Name.TXT`) or, with `COPY file [dir]` and no name,
+the Linux file name is used as it is (UTF-8: ISO Latin-1 when every
+character is up to U+00FF, else UCS-2). The new files carry level 5
+headers (FI5 ident area, link count, access and attribute dates) built as
+VMS V8.4 builds them, and are entered in the directory in VMS's order.
+A name equal to an existing one but for case is refused (it would be a new
+version, which ods2v2 does not make). Also:
+
+* `IMPORT <linux-dir> <path>` copies a Linux tree (directories made,
+  `%2F` in a name is a `/`, Linux symbolic links become VMS ones).
+* `SYMLINK <link-path> <target>` (or `CREATE/SYMLINK=target link`) makes a
+  symbolic link; `LINK <new-path> <existing-path>` (or `SET FILE/ENTER=new
+  existing`) makes another directory entry for a file on a `HARDLINKS`
+  volume and counts it; deleting one link takes the entry and one off the
+  count, the file goes with the last. (The primary link of a file that has
+  others is not deleted.)
+* `ods2_init <new-image> <size> [--structure=2|5] [--label=NAME]
+  [--hardlinks] [--access-dates] ...` makes an empty ODS-2 or ODS-5 volume
+  of any size from 8192 blocks, laid out as VMS V8.4's INITIALIZE does; the
+  image file must not exist.
 
 **Names.** ODS-5 keeps the case of names and allows spaces, many dots,
 ISO Latin-1 and UCS-2 characters. `DIR` shows them the way DCL does,

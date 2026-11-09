@@ -26,14 +26,14 @@ VOLUME_SRCS = src/ods5_names.c src/ods5_header.c src/ods2_volume.c src/ods2_vali
               src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c \
               src/ods2_text_var.c
 
-TOOLS = ods2 read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
+TOOLS = ods2 ods2_init read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
         ods2_put ods2_check_headers ods2_dump_root ods2_dump_header ods2_rm
 
 # `ods2` is the actual, intended day-to-day interface (DIR,
 # CREATE/DIRECTORY, COPY, TYPE, DELETE, SET DEFAULT - everything a
 # normal user needs, all in one binary). Built by default via
 #  make test / make all / make tools.
-MAIN_TOOLS = ods2
+MAIN_TOOLS = ods2 ods2_init
 
 # These ten tools are single-purpose tools used while building this
 # project - each testing or inspecting one specific piece in
@@ -153,6 +153,9 @@ $(BUILD)/ods2_indexf_large_selftest: tests/ods2_indexf_large_selftest.c $(VOLUME
 $(BUILD)/ods2_text_var_selftest: tests/ods2_text_var_selftest.c $(VOLUME_SRCS) include/ods2_text_var.h include/ods2_volume.h samples/synthetic_disk.img | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_text_var_selftest.c $(VOLUME_SRCS) -o $@
 
+ods2_init: tools/ods2_init.c src/ods2_init.c include/ods2_init.h $(VOLUME_SRCS) include/ods2_volume.h
+	$(CC) $(CFLAGS) $(SANFLAGS) tools/ods2_init.c src/ods2_init.c $(VOLUME_SRCS) -o $@
+
 # --- CLI tools (built directly into the project root, e.g. ./ods2_ls,
 #     not into build/, since that's where they're actually run from) ---
 
@@ -270,6 +273,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@sh tests/cli_ods5_files_check.sh
 	@echo "--- cli_ods5_write_check ---"
 	@sh tests/cli_ods5_write_check.sh
+	@echo "--- cli_ods5_init_check ---"
+	@sh tests/cli_ods5_init_check.sh
 	@echo "--- CLI recursive DIR regression check ---"
 	@if command -v timeout >/dev/null 2>&1; then \
 		rm -f samples/cli_regression_disk.img; \
