@@ -91,8 +91,46 @@ n=$((n + 1))
 check "RFM:UDF with sizes 0" "rtype=0x00 rattrib=0x00 rsize=0 maxrec=0" "$(hdr $n)"
 $ODS2 $DISK "COPY $TMP/notes.txt [000000]PLAIN.TXT" >/dev/null 2>&1
 n=$((n + 1))
-check "plain COPY is still Stream_LF, 512, no RAT" \
-    "rtype=0x05 rattrib=0x00 rsize=512 maxrec=512" "$(hdr $n)"
+# plain COPY chooses per file (ods5-wr2, after VMS V7.3-2 failed with RMS-W-RTB on binary files written as
+# Stream_LF with MRS 512): text is Stream_LF with CR carriage control, LRL the longest line ("line one" 8), MRS 0, as
+# VMS's own text files are; binary is fixed 512-byte records, no carriage control, exact end-of-file byte
+check "plain COPY of text: Stream_LF, RAT CR, LRL = longest line, MRS 0" \
+    "rtype=0x05 rattrib=0x02 rsize=8 maxrec=0" "$(hdr $n)"
+printf 'one\r\ntwo two\r\n' > "$TMP/dos.txt"
+$ODS2 $DISK "COPY $TMP/dos.txt [000000]DOS.TXT" >/dev/null 2>&1
+n=$((n + 1))
+check "plain COPY of CR LF text: Stream (CR LF), RAT CR, LRL 7, MRS 0" "rtype=0x04 rattrib=0x02 rsize=7 maxrec=0" "$(hdr $n)"
+head -c 3000 /dev/urandom > "$TMP/random.bin"
+$ODS2 $DISK "COPY $TMP/random.bin [000000]RANDOM.BIN" >/dev/null 2>&1
+n=$((n + 1))
+check "plain COPY of binary: fixed 512-byte records, no RAT" "rtype=0x01 rattrib=0x00 rsize=512 maxrec=512" "$(hdr $n)"
+$ODS2 $DISK "TYPE/RAW [000000]RANDOM.BIN" > "$TMP/random.out" 2>/dev/null
+check "... and its 3000 bytes come back exactly (end-of-file byte, not a whole record)" identical "$(cmp -s "$TMP/random.bin" "$TMP/random.out" && echo identical || echo different)"
+head -c 700 /dev/zero | tr '\0' 'a' > "$TMP/longline.txt"; printf '\n' >> "$TMP/longline.txt"
+for i in 1 2 3 4 5 6 7 8 9 10; do head -c 700 /dev/zero | tr '\0' 'b'; printf '\n'; done >> "$TMP/longline.txt"
+$ODS2 $DISK "COPY $TMP/longline.txt [000000]LONGLINE.TXT" >/dev/null 2>&1
+n=$((n + 1))
+check "text with 700-byte lines: Stream_LF, LRL 700 (not limited to 512)" "rtype=0x05 rattrib=0x02 rsize=700 maxrec=0" "$(hdr $n)"
+: > "$TMP/empty.dat"
+$ODS2 $DISK "COPY $TMP/empty.dat [000000]EMPTY.DAT" >/dev/null 2>&1
+n=$((n + 1))
+check "plain COPY of an empty file: Stream_LF, RAT CR, LRL 0" "rtype=0x05 rattrib=0x02 rsize=0 maxrec=0" "$(hdr $n)"
+printf 'text\n\000with a NUL\n' > "$TMP/nul.txt"
+$ODS2 $DISK "COPY $TMP/nul.txt [000000]NUL.TXT" >/dev/null 2>&1
+n=$((n + 1))
+check "a NUL byte makes it binary" "rtype=0x01 rattrib=0x00 rsize=512 maxrec=512" "$(hdr $n)"
+# /FORMAT overrides the choice
+$ODS2 $DISK "COPY/FORMAT=FIX512 $TMP/notes.txt [000000]FFIX.TXT" >/dev/null 2>&1
+n=$((n + 1))
+check "/FORMAT=FIX512 on text" "rtype=0x01 rattrib=0x00 rsize=512 maxrec=512" "$(hdr $n)"
+$ODS2 $DISK "COPY/FORMAT=STMLF $TMP/random.bin [000000]FSTM.BIN" >/dev/null 2>&1
+n=$((n + 1))
+check "/FORMAT=STMLF on binary: Stream_LF, LRL = its longest 'line'" "rtype=0x05 rattrib=0x02" "$(hdr $n | sed 's/ rsize.*//')"
+$ODS2 $DISK "COPY/FORMAT=UDF $TMP/notes.txt [000000]FUDF.TXT" >/dev/null 2>&1
+n=$((n + 1))
+check "/FORMAT=UDF: undefined, size = the file's" "rtype=0x00 rattrib=0x00 rsize=18 maxrec=0" "$(hdr $n)"
+check "/FORMAT with /ATTRIBUTES is refused" 1 "$(status $ODS2 $DISK "COPY/FORMAT=UDF/ATTRIBUTES=(RFM:FIX) $TMP/notes.txt [000000]X.TXT")"
+check "/FORMAT=BOGUS is refused" 1 "$(status $ODS2 $DISK "COPY/FORMAT=BOGUS $TMP/notes.txt [000000]X.TXT")"
 
 # --- COPY/CONVERT: host text to variable-length records (issue #15) ---
 printf 'first line\r\nsecond\n\nodd\nlast' > "$TMP/crlf.txt"

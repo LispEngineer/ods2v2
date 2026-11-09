@@ -1518,9 +1518,13 @@ static bool keyword(const char *word, size_t len, const char *name, size_t min)
 }
 
 /* COPY's options beyond the record attributes themselves. */
+typedef enum { FMT_AUTO = 0, FMT_STMLF, FMT_STM, FMT_FIX512, FMT_UDF } host_format_t;
+
 typedef struct {
     bool convert;   /* /CONVERT: host text lines -> VAR records */
     bool mrs_given; /* MRS:n was given */
+    bool attrs_given; /* /ATTRIBUTES was given: the record attributes are the user's, no choosing */
+    host_format_t format; /* /FORMAT=: FMT_AUTO chooses per file (see choose_format) */
 } copy_options_t;
 
 /* Parses COPY's qualifiers - everything after "COPY" in the command
@@ -1571,12 +1575,35 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
             opts->convert = true;
             continue;
         }
+        if (keyword(name, name_len, "FORMAT", 4)) {
+            const char *v;
+            size_t vl;
+            if (*q != '=') {
+                report_error("%%ODS2-E-VALREQ, /FORMAT needs a value: AUTO, STMLF, STM, FIX512 (or BINARY), UDF or VAR\n");
+                return false;
+            }
+            v = ++q;
+            while (*q && *q != '/') q++;
+            vl = (size_t) (q - v);
+            if (keyword(v, vl, "AUTO", 2)) opts->format = FMT_AUTO;
+            else if (keyword(v, vl, "STMLF", 5) || keyword(v, vl, "TEXT", 4)) opts->format = FMT_STMLF;
+            else if (keyword(v, vl, "STM", 3)) opts->format = FMT_STM;
+            else if (keyword(v, vl, "FIX512", 3) || keyword(v, vl, "BINARY", 3)) opts->format = FMT_FIX512;
+            else if (keyword(v, vl, "UDF", 3)) opts->format = FMT_UDF;
+            else if (keyword(v, vl, "VAR", 3)) opts->convert = true;
+            else {
+                report_error("%%ODS2-E-BADVALUE, /FORMAT=%.*s: use AUTO, STMLF (TEXT), STM, FIX512 (BINARY), UDF or VAR\n", (int) vl, v);
+                return false;
+            }
+            continue;
+        }
         if (!keyword(name, name_len, "ATTRIBUTES", 4)) {
             report_error("%%ODS2-E-IVQUAL, unrecognized qualifier /%.*s - COPY takes "
-                         "/ATTRIBUTES=(RFM:fmt,MRS:size,RAT:attr) and /CONVERT\n",
+                         "/ATTRIBUTES=(RFM:fmt,MRS:size,RAT:attr), /FORMAT=fmt and /CONVERT\n",
                          (int) name_len, name);
             return false;
         }
+        opts->attrs_given = true;
         if (*q != '=') {
             report_error("%%ODS2-E-VALREQ, /ATTRIBUTES needs a value, e.g. "
                          "/ATTRIBUTES=(RFM:FIX,MRS:8192)\n");
@@ -1685,6 +1712,14 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
     }
 
     opts->mrs_given = mrs_given;
+    if (opts->attrs_given && opts->format != FMT_AUTO) {
+        report_error("%%ODS2-E-CONFQUAL, /FORMAT and /ATTRIBUTES both choose the record format: give one\n");
+        return false;
+    }
+    if (opts->convert && opts->format != FMT_AUTO) {
+        report_error("%%ODS2-E-CONFQUAL, /FORMAT and /CONVERT both choose the record format: give one\n");
+        return false;
+    }
     if (opts->convert) {
         if (!rfm_given) a->rtype = ODS2_RFM_VAR;
         if (a->rtype != ODS2_RFM_VAR) {
@@ -1711,6 +1746,98 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
         if (mrs_given && !lrl_given) a->rsize = a->maxrec;
         else if (lrl_given && !mrs_given) a->maxrec = a->rsize;
         else if (!mrs_given && !lrl_given) a->rsize = a->maxrec = 512;
+    }
+    return true;
+}
+
+/* Which record format a host file gets when COPY/IMPORT is not told (no /ATTRIBUTES, /CONVERT or /FORMAT):
+ * text (no NUL byte, at most 1 percent control bytes other than TAB LF CR FF VT BS ESC, lines of at most
+ * 32767 bytes, LF line ends or CR LF line ends throughout) becomes Stream_LF (Stream for CR LF) with
+ * carriage-return carriage control, LRL the longest line and MRS 0, as VMS's own text files are; anything
+ * else becomes fixed 512-byte records with no carriage control and an exact end-of-file byte, as VMS binary
+ * FTP makes it. (Before, every file was Stream_LF with MRS 512, which VMS V7.3-2 cannot read when a "line"
+ * of a binary file is longer than 512 bytes: %RMS-W-RTB.) */
+typedef struct {
+    size_t total, nul, badctl, lf, crlf, longest_lf, longest_crlf;
+} host_stats_t;
+
+static bool scan_host_file(FILE *f, host_stats_t *s)
+{
+    uint8_t buf[65536];
+    size_t n, i, cur = 0;
+    bool prev_cr = false;
+
+    memset(s, 0, sizeof(*s));
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        for (i = 0; i < n; i++) {
+            uint8_t c = buf[i];
+            s->total++;
+            if (c == 0) s->nul++;
+            else if ((c < 0x20 && c != '\t' && c != '\n' && c != '\r' && c != '\f' && c != '\v' && c != 0x1b && c != '\b') ||
+                     c == 0x7f) s->badctl++;
+            if (c == '\n') {
+                s->lf++;
+                if (prev_cr) s->crlf++;
+                if (cur > s->longest_lf) s->longest_lf = cur;
+                if ((prev_cr ? cur - 1 : cur) > s->longest_crlf) s->longest_crlf = prev_cr ? cur - 1 : cur;
+                cur = 0;
+                prev_cr = false;
+            } else {
+                cur++;
+                prev_cr = (c == '\r');
+            }
+        }
+    }
+    if (ferror(f)) return false;
+    if (cur > s->longest_lf) s->longest_lf = cur;
+    if (cur > s->longest_crlf) s->longest_crlf = cur;
+    return fseek(f, 0, SEEK_SET) == 0;
+}
+
+/* Sets `attrs` for the host file `f` of `length` bytes as described above, or as /FORMAT says. */
+static bool choose_format(const copy_options_t *opts, FILE *f, size_t length, ods2_record_attrs_t *attrs,
+                          bool *partial_fix, const char *path)
+{
+    host_stats_t s;
+    host_format_t fmt = opts->format;
+    bool crlf_file;
+    size_t longest;
+
+    *partial_fix = false;
+    if (!scan_host_file(f, &s)) {
+        report_error("%%ODS2-E-READERR, error reading %s\n", path);
+        return false;
+    }
+    crlf_file = s.crlf > 0 && s.crlf == s.lf;
+    longest = crlf_file ? s.longest_crlf : s.longest_lf;
+    if (fmt == FMT_AUTO) {
+        bool text = s.nul == 0 && s.badctl * 100 <= s.total && longest <= 32767 && (s.crlf == 0 || crlf_file);
+        fmt = !text ? FMT_FIX512 : (crlf_file ? FMT_STM : FMT_STMLF);
+    }
+    memset(attrs, 0, sizeof(*attrs));
+    switch (fmt) {
+    case FMT_STM:
+    case FMT_STMLF:
+        if (longest > 32767) {
+            report_error("%%ODS2-E-LINETOOLONG, %s: a line of %zu bytes is longer than a stream record can be (32767)\n",
+                         path, longest);
+            return false;
+        }
+        attrs->rtype = (fmt == FMT_STM) ? ODS2_RFM_STM : ODS2_RFM_STMLF;
+        attrs->rattrib = ODS2_RAT_CR;
+        attrs->rsize = (uint16_t) longest;
+        attrs->maxrec = 0;
+        break;
+    case FMT_UDF:
+        attrs->rtype = ODS2_RFM_UDF;
+        attrs->rsize = (uint16_t) (length > 32767 ? 32767 : length);
+        attrs->maxrec = 0;
+        break;
+    default:
+        attrs->rtype = ODS2_RFM_FIX;
+        attrs->rsize = attrs->maxrec = 512;
+        *partial_fix = true;
+        break;
     }
     return true;
 }
@@ -1847,6 +1974,12 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
         }
     }
 
+    if (!opts->convert && !opts->attrs_given) {
+        if (!choose_format(opts, in.f, in.length, &attrs, &src.partial_fix_ok, local_file)) {
+            fclose(in.f);
+            return;
+        }
+    }
     {
         char effective_dir[ODS2_PATH_MAX];
         resolve_effective_path(p, effective_dir, sizeof(effective_dir));
@@ -2012,6 +2145,8 @@ typedef struct {
     ods2_volume_t *vol;
     int files, dirs, links, errors, skipped;
     unsigned long long bytes;
+    const copy_options_t *opts;          /* /FORMAT, /ATTRIBUTES */
+    const ods2_record_attrs_t *attrs_in; /* the /ATTRIBUTES given */
 } import_stats_t;
 
 static int import_name_cmp(const struct dirent **a, const struct dirent **b)
@@ -2109,10 +2244,13 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             src.read = host_input_read;
             src.ctx = &in;
             src.problem = in.problem;
-            attrs.rtype = ODS2_RFM_STMLF;
-            attrs.rattrib = 0;
-            attrs.rsize = 512;
-            attrs.maxrec = 512;
+            if (st->opts->attrs_given) {
+                attrs = *st->attrs_in;
+            } else if (!choose_format(st->opts, in.f, in.length, &attrs, &src.partial_fix_ok, path)) {
+                fclose(in.f);
+                st->errors++;
+                continue;
+            }
             r = ods2_create_file_source(st->vol, dir_header, literal, &src, &attrs, &fid);
             fclose(in.f);
             if (!r.ok) {
@@ -2147,7 +2285,8 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
     free(list);
 }
 
-static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods2_parsed_path_t *p)
+static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods2_parsed_path_t *p,
+                            const copy_options_t *opts, const ods2_record_attrs_t *attrs)
 {
     import_stats_t st;
     uint8_t dir_header[512];
@@ -2157,6 +2296,8 @@ static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods
 
     memset(&st, 0, sizeof(st));
     st.vol = vol;
+    st.opts = opts;
+    st.attrs_in = attrs;
     resolve_effective_path(p, effective_dir, sizeof(effective_dir));
     r = resolve_dir(vol, effective_dir, dir_header, &dir_fid);
     if (!r.ok) {
@@ -2867,7 +3008,11 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
                                  "path, not a file name\n");
                     return true;
                 }
-                cmd_import_tree(vol, tokens[1], &p);
+                if (opts.convert) {
+                    report_error("%%ODS2-E-CONFQUAL, IMPORT of a directory does not take /CONVERT (or /FORMAT=VAR)\n");
+                    return true;
+                }
+                cmd_import_tree(vol, tokens[1], &p, &opts, &attrs);
                 return true;
             }
         }

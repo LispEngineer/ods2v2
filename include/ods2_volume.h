@@ -412,6 +412,9 @@ typedef struct {
        text): RFM:VAR is then accepted, and checked by
        ods2_check_var_record_attrs() instead. */
     bool var_records;
+    /* a fixed-length format whose content is not a whole number of records is accepted: the end-of-file mark
+       stays exact and the last record is short (as VMS binary FTP makes FIX 512 files) */
+    bool partial_fix_ok;
 } ods2_content_source_t;
 
 /* ods2_create_file_attrs() with the content taken from `src` a chunk

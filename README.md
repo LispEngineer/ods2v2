@@ -144,7 +144,15 @@ version 1 and refuses a name that already exists.
 
 ### Record formats
 
-`COPY` makes a Stream_LF file, which suits text. Some files must have a
+With no qualifier `COPY` (and `IMPORT`) choose the record format per file: **text** (no NUL byte, hardly
+any other control byte, lines of at most 32767 bytes, LF or all CR LF line ends) becomes a Stream_LF (Stream
+for CR LF) file with carriage-return carriage control, the longest line as its record length and no
+maximum, as VMS's own text files are; **anything else** becomes fixed 512-byte records with no carriage
+control and an exact end-of-file byte, as VMS binary FTP makes it. (Before, every file was Stream_LF with a
+512-byte maximum record size; VMS V7.3-2 cannot read a binary file written like that when a "line" of it is
+longer than 512 bytes: `%RMS-W-RTB`. V8.4 could.) `/FORMAT=` overrides the choice: `AUTO` (the default),
+`STMLF` (or `TEXT`), `STM`, `FIX512` (or `BINARY`), `UDF` (size 0 maximum, the file's length as record size)
+or `VAR` (= `/CONVERT`); it cannot be combined with `/ATTRIBUTES`. Some files must have a
 particular RMS record format - OpenVMS PCSI kit files, for one, are
 sequential files of fixed 8192-byte records, and `PRODUCT` won't treat
 a Stream_LF copy of the same bytes as a kit. Give the attributes with
@@ -402,6 +410,9 @@ in every structural test.
   `TYPE` must use `TYPE/RAW` (`EXPORT` still copies the stored bytes by default; `EXPORT/RECORDS` gives text).
 - `DIR/FULL` shows the ACL, the record format and attributes and `Link count` as VMS does; ODS-2 directories
   are now made with the end-of-file VMS uses; directories' revision count rises by 2 per block gained.
+- **`COPY` and `IMPORT` choose the record format per file** (text: Stream_LF, RAT CR, no maximum; binary: fixed
+  512-byte records, no RAT), where every file used to be Stream_LF with a 512-byte maximum; `/FORMAT=` and
+  `/ATTRIBUTES` override it (see Record formats). An ODS-2 volume is treated the same.
 - `LINK` / `SET FILE/ENTER` on a volume without `HARDLINKS` makes a plain alias; `DELETE` of such an entry
   keeps the file and says so.
 

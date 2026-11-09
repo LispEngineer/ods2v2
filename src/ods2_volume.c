@@ -1703,8 +1703,13 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
                                        const ods2_record_attrs_t *attrs,
                                        ods2_fid_t *new_fid_out)
 {
-    const char *why = src->var_records ? ods2_check_var_record_attrs(attrs, src->length)
-                                       : ods2_check_record_attrs(attrs, src->length);
+    size_t check_len = src->length;
+    const char *why;
+    if (src->partial_fix_ok && attrs->rtype == ODS2_RFM_FIX && attrs->rsize != 0) {
+        check_len = (check_len / attrs->rsize) * attrs->rsize;
+    }
+    why = src->var_records ? ods2_check_var_record_attrs(attrs, check_len)
+                           : ods2_check_record_attrs(attrs, check_len);
     if (why != NULL) {
         return fail(why);
     }

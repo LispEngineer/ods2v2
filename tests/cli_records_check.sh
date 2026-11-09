@@ -49,6 +49,17 @@ check "DIR/FULL: fixed length line" "Record format:      Fixed length 20 byte re
 check "DIR/FULL: CR attribute" "Record attributes:  Carriage return carriage control" "$(echo "$full" | sed -n 's/^  Record attributes: */Record attributes:  /p')"
 full=$($ODS2 "$TMP/rms.img" 'DIR/FULL [000000]VAR_BLK.TXT' 2>&1)
 check "DIR/FULL: CR and non-spanned" "Record attributes:  Carriage return carriage control, Non-spanned" "$(echo "$full" | sed -n 's/^  Record attributes: */Record attributes:  /p')"
+# IMPORT of a tree chooses the record format per file as COPY does (text: Stream_LF, binary: fixed 512)
+mkdir -p "$TMP/tree"
+printf 'a text file\nwith two lines\n' > "$TMP/tree/text.txt"
+head -c 2000 /dev/urandom > "$TMP/tree/data.bin"
+$INIT "$TMP/imp.img" 8M --structure=5 --label=IMP >/dev/null 2>&1
+$ODS2 "$TMP/imp.img" "IMPORT $TMP/tree [000000]" >/dev/null 2>&1
+check "IMPORT: a text file is Stream_LF" "yes" "$($ODS2 "$TMP/imp.img" 'DIR/FULL [000000]text.txt' 2>&1 | grep -q 'Stream_LF, maximum 0 bytes, longest 14 bytes' && echo yes)"
+check "IMPORT: a binary file is fixed 512-byte records" "yes" "$($ODS2 "$TMP/imp.img" 'DIR/FULL [000000]data.bin' 2>&1 | grep -q 'Fixed length 512 byte records' && echo yes)"
+$ODS2 "$TMP/imp.img" "TYPE/RAW [000000]data.bin" > "$TMP/out" 2>/dev/null
+cmp -s "$TMP/tree/data.bin" "$TMP/out" && echo "PASS: IMPORT: the binary file's bytes come back exactly" || { echo "FAIL: IMPORT binary bytes"; fail=$((fail+1)); }
+python3 -I tests/ods5check.py "$TMP/imp.img" | tail -1 | grep -q '^0 error(s), 0 warning(s)' && echo "PASS: ... checker clean" || { echo "FAIL: checker after IMPORT"; fail=$((fail+1)); }
 # a note (a short last fixed record) is not a failure: EXPORT/RECORDS exits 0, like TYPE
 mkdir "$TMP/note"
 $ODS2 "$TMP/rms.img" "EXPORT/RECORDS [000000]FIX_SHORT.TXT $TMP/note" >/dev/null 2>"$TMP/err"; st=$?
