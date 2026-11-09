@@ -243,7 +243,32 @@ check "SET VOLUME/GEOMETRY=ra on 1 GiB: 57 x 15 x 2453 (the RA82), no prediction
     "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/tg.img" show) $(echo "$out" | grep -c PREDICTED)"
 $ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=nonesuch" >/dev/null 2>&1; check "an unknown device type is refused" 1 $?
 $INIT "$TMP/tg2.img" 3000000 --target=ld >/dev/null 2>"$TMP/tg2.err"
-check "an unmeasured size says it is a prediction" 1 "$(grep -c predicted "$TMP/tg2.err")"
+check "an unmeasured size says it is a prediction" 1 "$(grep -c prediction "$TMP/tg2.err")"
+
+# ods2_init says which geometry it wrote, and how to fit a VAX
+out=$($INIT "$TMP/pg.img" 1G --structure=2 2>&1)
+check "ods2_init (default): prints the geometry and the VAX advice" "1 1 1" \
+    "$(echo "$out" | grep -c 'I-GEOMETRY.*32 sectors x 16 tracks x 4096 cylinders (the default)') $(echo "$out" | grep -c -- '--target=ld') $(echo "$out" | grep -c 'SET VOLUME/GEOMETRY')"
+out=$($INIT "$TMP/pg2.img" 1G --structure=2 --target=ld 2>&1)
+check "ods2_init --target=ld: prints 38 x 38 x 1453 (ld), no advice line" "1 0" \
+    "$(echo "$out" | grep -c 'I-GEOMETRY.*38 sectors x 38 tracks x 1453 cylinders (ld)') $(echo "$out" | grep -c -- '-ODS2-I-VAX')"
+# R14: "measured" per size and per type, and the 16-bit cylinder count
+$INIT "$TMP/r1.img" 100G --structure=5 --target=rz >/dev/null 2>"$TMP/r1.err"
+check "R14-1: --target=rz at 100 GiB (not a measured size): says it is a prediction, and warns that 819,200 cylinders wrap" "1 1" \
+    "$(grep -c prediction "$TMP/r1.err") $(grep -c 'more than 16 bits' "$TMP/r1.err")"
+$INIT "$TMP/r2.img" 1G --structure=5 --target=rz >/dev/null 2>"$TMP/r2.err"
+check "R14-1/3: --target=rz at 1 GiB (measured): neither" "0 0" "$(grep -c prediction "$TMP/r2.err") $(grep -c 'more than 16 bits' "$TMP/r2.err")"
+$INIT "$TMP/r3.img" 4G --structure=5 --target=ra92 >/dev/null 2>"$TMP/r3.err"
+check "R14-2: --target=ra92 at 4 GiB (8,388,608 blocks is measured as RA92)" "0" "$(grep -c prediction "$TMP/r3.err")"
+$INIT "$TMP/r4.img" 4G --structure=5 --target=ra82 >/dev/null 2>"$TMP/r4.err"
+check "R14-2: --target=ra82 at 4 GiB (measured only as RA92): a prediction" "1" "$(grep -c prediction "$TMP/r4.err")"
+$INIT "$TMP/r5.img" 1G --structure=5 --target=ra92 >/dev/null 2>"$TMP/r5.err"
+check "R14-2: --target=ra92 at 1 GiB (measured only as RA82): a prediction" "1" "$(grep -c prediction "$TMP/r5.err")"
+$INIT "$TMP/r6.img" 20G --structure=5 >/dev/null 2>"$TMP/r6.err"
+check "the default geometry never wraps (20 GiB: 63 x 255), no warning" "0" "$(grep -c 'more than 16 bits' "$TMP/r6.err")"
+rm -f "$TMP"/r?.img
+out=$($ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=1,1" 2>&1)
+check "SET VOLUME/GEOMETRY with more than 65,535 cylinders warns (CYLWRAP)" 1 "$(echo "$out" | grep -c CYLWRAP)"
 
 # a block that only starts like a footer (the signature and the two bytes, but a wrong CRC) is not one: no message, a normal write mount
 cp "$TMP/s0.img" "$TMP/s4.img"; python3 -I "$TMP/foot.py" inside "$TMP/s4.img" 8192

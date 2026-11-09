@@ -2613,7 +2613,12 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
                     uint32_t ps = 0, pt = 0;
                     memcpy(nm, value, (size_t) (q - value));
                     nm[q - value] = '\0';
-                    if (vol->volsize == 0 || !ods2_target_geometry(nm, vol->volsize, &ps, &pt, &measured)) {
+                    if (vol->volsize == 0) {
+                        report_error("%%ODS2-E-GEOMERR, the volume size of the storage control block is unreadable or 0: the "
+                                     "geometry of a device type cannot be worked out (give sectors,tracks)\n");
+                        return;
+                    }
+                    if (!ods2_target_geometry(nm, vol->volsize, &ps, &pt, &measured)) {
                         report_error("%%ODS2-E-VALREQ, /GEOMETRY=%s: unknown device type (ld, ra, ra82, ra92, rq, scsi, axpbox, "
                                      "rz) or sectors,tracks\n", nm);
                         return;
@@ -2666,6 +2671,10 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
             return;
         }
         printf("%%ODS2-I-GEOMETRY, the storage control block now records %u sectors x %u tracks\n", geo_s, geo_t);
+        if (vol->volsize != 0 && ((uint64_t) vol->volsize + (uint64_t) geo_s * geo_t - 1) / ((uint64_t) geo_s * geo_t) > 65535) {
+            fprintf(stderr, "%%ODS2-W-CYLWRAP, that is more than 65,535 cylinders: a device with a 16-bit cylinder count (SIMH RQ) "
+                            "wraps it and then draws CHKSCB (or INTDIV) on VAX V7.3; measure the device's own geometry\n");
+        }
         if (label == NULL) return;
     }
     if (label == NULL) {
