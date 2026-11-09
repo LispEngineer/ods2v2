@@ -85,6 +85,11 @@ ods2_result_t ods2_mount_write(const char *path, ods2_volume_t *vol);
 ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block);
 
 /* Closes the volume. Safe to call even if mount failed partway. */
+/* Writes everything written so far to the disk: fflush and fdatasync (ODS2_NOSYNC=1 in the environment skips
+   the fdatasync). One call per mount, not one per block. A failure is reported: the command is not done.
+   Does nothing on a read mount. ods2_dismount() calls it too, ignoring the result. */
+ods2_result_t ods2_sync(ods2_volume_t *vol);
+
 void ods2_dismount(ods2_volume_t *vol);
 
 /* Reads the 512-byte header for `file_number` (1-based) into

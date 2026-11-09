@@ -551,8 +551,11 @@ in every structural test.
   freed), so an interrupted `DELETE` leaves a leak that `ANALYZE/DISK_STRUCTURE/REPAIR` cleans up, never a
   listed file on free space. A damaged directory block or file header, or a directory with an extension
   header, is refused ("not changed") instead of being written around. `ods2` locks the image: one process
-  writes, or many read; a second writer is refused (a reader finding the lock mounts read-only). It
-  `fdatasync`s a written image when it finishes (`ODS2_NOSYNC=1` skips that).
+  writes, or many read; a second writer is refused (a reader finding the lock mounts read-only). The lock
+  is advisory (it does not stop a simulator that has the image open), and a file system without `flock`
+  gives no lock and no message; `ODS2_NOLOCK=1` turns it off. `ods2` `fdatasync`s a written image when it
+  finishes and fails the command if that fails (`ODS2_NOSYNC=1` skips it). A directory entry that names a
+  file by a relative volume number or an extended file number is not followed by a write.
 
 ## Known limitations
 

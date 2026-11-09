@@ -336,11 +336,11 @@ def main():
 
     # --- per header: map, ident, fat ---
     owner = {}  # lbn cluster -> fid (for double allocation)
-    pend_owned = set()   # clusters mapped by a header marked for delete: may be allocated or free, not 'lost'
+    pend_owned = {}   # cluster -> a header marked for delete that maps it (such a cluster is not 'lost')
     for n in sorted(pending):
         for l, c in decode_map(headers_pending[n], fnd, 'file %d (marked for delete)' % n):
             for cl in range(l // v.cluster, (l + c - 1) // v.cluster + 1):
-                pend_owned.add(cl)
+                pend_owned[cl] = n
     file_extents = {}
     prim = {}   # primary file number -> (header, ident)
     for n, b in sorted(headers.items()):
@@ -428,6 +428,14 @@ def main():
                     fnd.warn(msg)   # the starter volume marks its own middle-of-disk reserved files free
                 else:
                     fnd.err(msg)
+            if cl in pend_owned and isfree:
+                # a finished delete frees the clusters its header maps; while the header is marked they must
+                # still be allocated (ods2v2 writes the final header before it frees anything)
+                fnd.err('cluster %d (LBN %d) is free but still mapped by header %d, marked for delete'
+                        % (cl, cl * v.cluster, pend_owned[cl]))
+            if cl in pend_owned and cl in owner:
+                fnd.err('cluster %d (LBN %d) is mapped by header %d, marked for delete, and owned by file %d'
+                        ' (finishing the delete would free a live file\'s cluster)' % (cl, cl * v.cluster, pend_owned[cl], owner[cl]))
             if not isfree and cl not in owner and cl not in pend_owned:
                 if starter_quirk and cl < 1100: continue
                 fnd.warn('cluster %d (LBN %d) is allocated but owned by no file (lost)' % (cl, cl * v.cluster))

@@ -167,7 +167,7 @@ PY
     before=$(md5sum < "$img")
     for cmd in "COPY $TMP/u.txt [D]TWO.TXT" "DELETE [D]ONE.TXT" "CREATE/DIRECTORY [D.SUB]"; do
         out=$($ODS2 "$img" "$cmd" 2>&1); rc=$?
-        case "$out" in *"extension header"*) msg="refused, extension header" ;; *) msg="$out" ;; esac
+        case "$out" in *"does not write to such a directory"*) msg="refused, extension header" ;; *) msg="$out" ;; esac
         check "ODS-$level: $cmd, directory with an extension header: refused" "1 refused, extension header" "$rc $msg"
     done
     check "ODS-$level: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
@@ -308,6 +308,114 @@ for level in 2 5; do
     printf 'x\n' > "$TMP/u.txt"
     check "ODS-$level: an image locked by another process: write refused, read refused; locked for reading: read works, write refused; unlocked: write works" \
         "1 True 1 True 0 1 True 0" "$(python3 -I "$TMP/lock.py" "$img" "$TMP")"
+done
+
+# ---- the checker sees a header marked for delete whose clusters are free, or are owned by a live file (review 7,
+# R7-1): a finished delete would free a live file's clusters. (The VMS-made AXP1 system disk has neither state.)
+cat > "$TMP/marked.py" <<'PY'
+import struct, sys
+mode, img, cluster, a, b = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+def pos(n): return (base + n - 1) * 512
+def header(n):
+    f.seek(pos(n)); return bytearray(f.read(512))
+def put(n, h):
+    struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+    f.seek(pos(n)); f.write(h)
+ha = header(a)
+mp = ha[1] * 2
+w0, w1 = struct.unpack_from('<HH', ha, mp)
+lbn = (((w0 >> 8) & 0x3f) << 16) | w1
+struct.pack_into('<I', ha, 52, struct.unpack_from('<I', ha, 52)[0] | 0x8000)       # a: marked for delete
+put(a, ha)
+if mode == 'free':
+    hb = header(2); mb = hb[1] * 2
+    x0, x1 = struct.unpack_from('<HH', hb, mb)
+    bm = ((((x0 >> 8) & 0x3f) << 16) | x1) + 1
+    cl = lbn // cluster
+    f.seek(bm * 512 + cl // 8); byte = f.read(1)[0]
+    f.seek(bm * 512 + cl // 8); f.write(bytes([byte | (1 << (cl % 8))]))             # its first cluster free
+else:
+    hb = header(b)
+    mpb = hb[1] * 2
+    struct.pack_into('<HH', hb, mpb, w0, w1)                                          # b maps a's first extent too
+    put(b, hb)
+PY
+for level in 2 5; do
+    for mode in free share; do
+        img="$TMP/p$level$mode.img"
+        $INIT "$img" 8192 --structure=$level --label=PENDING >/dev/null 2>&1
+        printf 'x\n' > "$TMP/u.txt"
+        $ODS2 "$img" "COPY $TMP/u.txt [000000]A.TXT" >/dev/null 2>&1
+        $ODS2 "$img" "COPY $TMP/u.txt [000000]B.TXT" >/dev/null 2>&1
+        cluster=$($ODS2 "$img" 'SHOW VOLUME' | sed -n 's/^  Cluster size: *//p')
+        na=$($ODS2 "$img" 'DIR/FULL [000000]A.TXT' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+        nb=$($ODS2 "$img" 'DIR/FULL [000000]B.TXT' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+        python3 -I "$TMP/marked.py" $mode "$img" "$cluster" "$na" "$nb"
+        $ODS2 "$img" 'DELETE [000000]A.TXT' >/dev/null 2>&1        # the entry goes: A is an unlisted, marked header
+        out=$(python3 -I tests/ods5check.py "$img" | grep "^ERROR")
+        case "$mode" in
+            free) want="is free but still mapped by header" ;;
+            share) want="and owned by file" ;;
+        esac
+        case "$out" in *"$want"*) r=reported ;; *) r="not reported: $out" ;; esac
+        check "ODS-$level: checker: a marked header's clusters $mode" reported "$r"
+    done
+done
+
+# ---- a directory entry with an RVN or an NMX is not followed (review 7, R7-2): it would resolve to another
+# file's header by number alone
+cat > "$TMP/fidpatch.py" <<'PY'
+import struct, sys
+img, dnum, fnum, which = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+f.seek((base + dnum - 1) * 512); h = f.read(512)
+mp = h[1] * 2
+w0, w1 = struct.unpack_from('<HH', h, mp)
+lbn = (((w0 >> 8) & 0x3f) << 16) | w1
+f.seek(lbn * 512); b = bytearray(f.read(512))
+i = b.find(struct.pack('<HH', 1, fnum), 6)             # the version entry: version 1, FID number, sequence, RVN, NMX
+assert i > 0
+b[i + (6 if which == 'rvn' else 7)] = 1
+f.seek(lbn * 512); f.write(b)
+PY
+for level in 2 5; do
+    for which in rvn nmx; do
+        img="$TMP/i$level$which.img"
+        $INIT "$img" 8192 --structure=$level --label=FIDBITS >/dev/null 2>&1
+        printf 'x\n' > "$TMP/u.txt"
+        $ODS2 "$img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+        $ODS2 "$img" "COPY $TMP/u.txt [D]ONE.TXT" >/dev/null 2>&1
+        dnum=$($ODS2 "$img" 'DIR/FULL [000000]D.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+        fnum=$($ODS2 "$img" 'DIR/FULL [D]ONE.TXT' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+        python3 -I "$TMP/fidpatch.py" "$img" "$dnum" "$fnum" $which
+        before=$(md5sum < "$img")
+        out=$($ODS2 "$img" 'DELETE [D]ONE.TXT' 2>&1); rc=$?
+        case "$out" in *"does not follow"*) msg=refused ;; *) msg="$out" ;; esac
+        check "ODS-$level: DELETE of an entry whose FID has an $which is refused (exit 1), nothing changes" "1 refused $before" "$rc $msg $(md5sum < "$img")"
+    done
+done
+
+# ---- INDEXF.SYS's own header is checked before it is rewritten (review 7, R7-4): IDOFFSET 250, checksum refreshed
+for level in 2 5; do
+    img="$TMP/ix$level.img"
+    $INIT "$img" 8192 --structure=$level --label=INDEXHDR >/dev/null 2>&1
+    printf 'x\n' > "$TMP/u.txt"
+    python3 -I - "$img" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+f.seek(base * 512); h = bytearray(f.read(512))
+h[0] = 250
+struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+f.seek(base * 512); f.write(h)
+PY
+    before=$(md5sum < "$img")
+    out=$($ODS2 "$img" "COPY $TMP/u.txt [000000]X.TXT" 2>&1); rc=$?
+    case "$out" in *damaged*) msg=damaged ;; *) msg="$out" ;; esac
+    check "ODS-$level: COPY with a damaged INDEXF.SYS header fails (exit 1) and says so; the image is unchanged" "1 damaged $before" "$rc $msg $(md5sum < "$img")"
 done
 
 rm -rf "$TMP"
