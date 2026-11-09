@@ -156,6 +156,7 @@ def read_volume(path, want_md5=True):
         fi.ffbyte = u16(b, 32)
         fi.fchar = u32(b, 52)
         fi.markdel = bool(fi.fchar & 0x8000)
+        fi.versions = u16(b, 50)     # FAT$W_VERSIONS: for a directory its default version limit for new entries (0 = none)
         fi.directory = bool(fi.fchar & 0x2000)
         fi.linkcount = u16(b, 74)
         fi.rtype = b[20]

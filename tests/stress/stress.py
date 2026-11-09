@@ -39,9 +39,9 @@ ENV['UBSAN_OPTIONS'] = 'print_stacktrace=1:halt_on_error=1:exitcode=78'
 ENV['TZ'] = 'UTC'
 
 VMS_BASELINES = ['asim12-ods5t-20261108', 'asim12-ods2t-20261108', 'asim6-ods5t6-20261108', 'asim6-ods2t6-20261108',
-                 'w1c-f5-after-asim12', 'w1c-f2-after-asim12', 'w1-ods5t-after-asim12', 'w1-ods2t-after-asim12',
-                 'm1-hl-after-asim12', 'm1-nohl-after-asim12', 'm1-ods2-after-asim12', 'm23-after-asim12',
-                 'm2b-after-asim12', 'phvs2-ods2v-20261108', 'w1c-f5-after-asim6', 'w1-ods5t6-after-asim6']
+                 'phvs2-ods2v-20261108']
+# (the w1*/w1c*/m*-after-* images were written into by the OLD ods2v2, which put version limit 1 on its ODS-2 entries: ods5check
+#  rightly warns of those, so they are no longer baselines; the pure VMS-made images above have 0 warnings)
 
 
 # What VMS writes in DIR$W_VERLIMIT of every file and directory it creates: 32767 (no limit). Measured on the pure VMS-made images
@@ -330,6 +330,7 @@ class Model:
         self.secondary = set()        # entry keys that are non-primary aliases made by us
         self.vlim = {}                # entry key -> DIR$W_VERLIMIT the directory record must carry (VMS writes 32767)
         self.dlim = {}                # folded directory path -> version limit of the directory's own entry
+        self.ddef = {}                # folded directory path -> its default version limit (header FAT$W_VERSIONS, 0 = none)
 
     # lookups
     def fkpath(self, path):
@@ -385,12 +386,13 @@ class Model:
 
     def add_file(self, path, display, obj):
         self.ents[(self.fkpath(path), key_of(display), 1)] = (display, obj)
-        self.vlim[(self.fkpath(path), key_of(display), 1)] = VMS_VERLIMIT
+        self.vlim[(self.fkpath(path), key_of(display), 1)] = self.ddef.get(self.fkpath(path)) or VMS_VERLIMIT
 
     def add_dir(self, path, name):
         full = tuple(path) + (name,)
         self.dirs[self.fkpath(full)] = full
-        self.dlim[self.fkpath(full)] = VMS_VERLIMIT
+        self.dlim[self.fkpath(full)] = self.ddef.get(self.fkpath(path)) or VMS_VERLIMIT
+        self.ddef[self.fkpath(full)] = self.ddef.get(self.fkpath(path), 0)     # a directory made inside one with a default carries the same default
 
     def remove_dir(self, path):
         del self.dirs[self.fkpath(path)]
@@ -427,6 +429,8 @@ def model_from_volume(vol, ods5, hardlinks, skip_dangling=False):
     for dp, vl in vol.dirlimit.items():
         if m.fkpath(dp) in m.dirs:
             m.dlim[m.fkpath(dp)] = vl
+    for dp, fid in vol.dirs.items():
+        m.ddef[m.fkpath(dp)] = vol.info[fid].versions
     for dp in vol.dir_aliases:
         m.frozen.append(dp)
     # a directory that is the target of an alias is reachable by 2 paths: freeze both
@@ -643,6 +647,9 @@ class Harness:
         for fp, dpath in self.model.dirs.items():
             if dpath and fp in self.model.dlim and self.model.dlim[fp] is not None and vol.dirlimit.get(dpath) != self.model.dlim[fp]:
                 self.fail('%s: version limit of directory %r: the directory record says %s, VMS would write %s' % (tag, dpath, vol.dirlimit.get(dpath), self.model.dlim[fp]))
+        for fp, dpath in self.model.dirs.items():
+            if dpath and vol.dirs.get(dpath) in vol.info and vol.info[vol.dirs[dpath]].versions != self.model.ddef.get(fp, 0):
+                self.fail('%s: directory %r header default version limit %s, expected %s' % (tag, dpath, vol.info[vol.dirs[dpath]].versions, self.model.ddef.get(fp, 0)))
         mdirs = set(self.model.dirs.values())
         vdirs = set(vol.dirs)
         if mdirs != vdirs:
@@ -951,6 +958,36 @@ class Harness:
             for (f2, k2, v2, o2) in hits:
                 m.ents.pop((f2, k2, v2), None)
 
+    def op_set_vlimit(self):
+        """SET FILE/VERSION_LIMIT=n name: the directory records of every version of the name carry n (0 = no limit = 32767);
+        n above 32767 is refused and changes nothing"""
+        m, r = self.model, self.rng
+        n = r.choice([0, 2, 3, 5, 32, 100, 32766, 32767, 32768, 99999])    # not 1: ods5check warns of a directory whose entries have limit 1
+        if r.random() < 0.2:
+            cands = [p for p in m.dirs.values() if p and not m.is_frozen(p)]
+            if not cands:
+                return
+            p = r.choice(cands)
+            cmd = 'SET FILE/VERSION_LIMIT=%d %s%s.DIR' % (n, spec_dir(p[:-1], r, self.ods5), spec_dir_name(p[-1], r, self.ods5))
+            res = run_ods2(self.img, cmd)
+            self.note('%s -> rc=%d' % (cmd[:200], res.rc))
+            ok = self.check_result('set version limit of a directory', res, n <= 32767, True)
+            if ok:
+                m.dlim[m.fkpath(p)] = 32767 if n == 0 else n
+            return
+        e = self.pick_entry(False)
+        if e is None:
+            return
+        (fp, key, ver), display, dp, obj = e
+        cmd = 'SET FILE/VERSION_LIMIT=%d %s%s' % (n, spec_dir(dp, r, self.ods5), spec_file_name(display, r, self.ods5))
+        res = run_ods2(self.img, cmd)
+        self.note('%s -> rc=%d' % (cmd[:200], res.rc))
+        ok = self.check_result('set version limit', res, n <= 32767, True)
+        if ok:
+            for (f2, k2, v2) in list(m.vlim):
+                if f2 == fp and k2 == key:
+                    m.vlim[(f2, k2, v2)] = 32767 if n == 0 else n
+
     def op_rmdir(self):
         m, r = self.model, self.rng
         cands = [p for p in m.dirs.values() if p and not m.is_frozen(p)]
@@ -1189,7 +1226,7 @@ class Harness:
         'links': [('copy', 15), ('link', 30), ('delete', 30), ('symlink', 10), ('mkdir', 8), ('rmdir', 6), ('type', 3)],
         'bigfile': [('copy', 50), ('delete', 20), ('type', 10), ('mkdir', 5), ('link', 5), ('import', 5)],
         'mix': [('copy', 40), ('mkdir', 8), ('delete', 14), ('rmdir', 4), ('link', 4), ('symlink', 3), ('label', 1),
-                ('import', 5), ('bad_name', 4), ('case', 3), ('type', 6), ('set_default', 3), ('wild_delete', 3)],
+                ('import', 5), ('bad_name', 4), ('case', 3), ('type', 6), ('set_default', 3), ('wild_delete', 3), ('set_vlimit', 3)],
     }
 
     def do_op(self, name):
