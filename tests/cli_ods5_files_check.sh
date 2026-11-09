@@ -157,5 +157,11 @@ $ODS2 $DISK "EXPORT/LINKS [000000]*.txt $TMP/links" >/dev/null 2>&1
 check "EXPORT/LINKS makes the alias a hard link" 2 "$(stat -c %h "$TMP/links/alias.txt")"
 check "the image is untouched by all of it" same "$(same $DISK $DISK)"
 
+# A short fuzz run (tests/fuzz_ods5.py runs longer ones): damaged copies of this volume must give
+# errors, never a crash, a sanitizer report or a hang.
+check "40 damaged copies of the volume: no crash, no sanitizer report, no hang" 0 \
+    "$(python3 -I tests/fuzz_ods5.py $ODS2 $DISK 40 7 $TMP/fuzz >$TMP/fuzz.log 2>&1; echo $?)"
+cat $TMP/fuzz.log | grep -E '^FAIL' | head -3
+
 rm -rf "$TMP" "$DISK"
 [ "$fails" -eq 0 ] || { echo "$fails ODS-5 files check(s) failed"; exit 1; }

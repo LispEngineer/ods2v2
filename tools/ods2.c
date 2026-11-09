@@ -145,6 +145,7 @@ static bool g_utf8_names = false;
 /* DIR/PATHS: one "dir/dir/NAME.TYP;ver" line per file, UTF-8, '/' between
    the names, nothing else - for scripts and for comparing listings. */
 static bool g_paths_mode = false;
+static bool g_paths_fid = false;   /* DIR/PATHS/FID: "\t<file number>,<sequence>" after each line */
 /* DIR/FULL: a block of details per file (id, size, owner, dates, the
    ODS-5 fields) instead of one line. */
 static bool g_full_mode = false;
@@ -521,7 +522,12 @@ static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_d
             if (g_paths_mode) {
                 char slash[ODS2_PATH_MAX];
                 spelling_to_slash_path(dir_path, slash, sizeof(slash));
-                printf("%s/%s;%u\n", slash, entries[i].name, entries[i].version);
+                printf("%s/%s;%u", slash, entries[i].name, entries[i].version);
+                if (g_paths_fid) {
+                    printf("\t%u,%u,%u", (unsigned) entries[i].fid.fid_num,
+                           (unsigned) entries[i].fid.fid_seq, (unsigned) entries[i].fid.fid_rvn);
+                }
+                printf("\n");
                 shown++;
                 continue;
             }
@@ -2139,7 +2145,9 @@ static bool execute_line(ods2_volume_t *vol, char *line)
                 if (ql >= sizeof(q)) ql = sizeof(q) - 1;
                 memcpy(q, s + 1, ql);
                 q[ql] = '\0';
-                if (matches(q, "FULL")) {
+                if (matches(q, "FID")) {
+                    g_paths_fid = true;
+                } else if (matches(q, "FULL")) {
                     g_full_mode = true;
                 } else if (matches(q, "PATHS")) {
                     g_paths_mode = true;
@@ -2154,6 +2162,7 @@ static bool execute_line(ods2_volume_t *vol, char *line)
                     g_utf8_names = saved_utf8;
                     g_paths_mode = saved_paths;
                     g_full_mode = saved_full;
+                    g_paths_fid = false;
                     return true;
                 }
                 s += 1 + strcspn(s + 1, "/");
@@ -2163,6 +2172,7 @@ static bool execute_line(ods2_volume_t *vol, char *line)
         g_utf8_names = saved_utf8;
         g_paths_mode = saved_paths;
         g_full_mode = saved_full;
+        g_paths_fid = false;
         return true;
     }
     if (matches(verb, "EXPORT") || matches(verb, "GET")) {
