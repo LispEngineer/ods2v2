@@ -2587,8 +2587,9 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
         target_core->seg_num == 0) {
         /* No HARDLINKS characteristic: an extra directory entry for a file is an alias (SET FILE/ENTER,
            LINK), with no link count. An entry that is not the file's primary one (the header names
-           another directory or another name) is just taken out; the file stays. PROVISIONAL: what VMS
-           does is measured in batch m1 (ODS5_FORMAT_NOTES 15). */
+           another directory or another name) is just taken out; the file stays. Measured on V8.4 (batch m1,
+           ODS5_FORMAT_NOTES 15.7): the file stays; the entries left when the primary one is
+           deleted dangle. */
         ods5_ident_t id;
         const char *why;
         char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
