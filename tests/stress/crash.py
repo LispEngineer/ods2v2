@@ -300,7 +300,11 @@ def run_seed(seed, nops, nkills, work_root):
         op = random_op(h, rng)
         if op is not None and rng.random() < 0.3:
             # a script of 2-4 commands in ONE process: the buffer, the commit and the fault counter span several commands
-            ops = [op] + [o for o in (random_op(h, rng) for _ in range(rng.randint(1, 3))) if o]
+            # no LINK inside a script: LINK a->b followed by DELETE b (both chosen from the same model) leaves a dangling alias on a
+            # volume without link counts, and a later COPY that reuses b's file number turns it into a stale entry: by design, not a crash effect
+            ops = [op] + [o for o in (random_op(h, rng) for _ in range(rng.randint(1, 3))) if o and o[0] != 'LINK']
+            if op[0] == 'LINK':
+                ops = [op]
             if len(ops) > 1:
                 sp = os.path.join(h.dir, 'trial%d.cmd' % attempts)
                 open(sp, 'w', encoding='utf-8').write('\n'.join(o[1] for o in ops) + '\n')
