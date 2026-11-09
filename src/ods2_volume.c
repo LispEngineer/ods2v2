@@ -1224,6 +1224,7 @@ static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_num
 }
 
 /* --- ods2_lookup_name(): streams the directory, no size limit --- */
+#define ODS2_NAME_NOT_FOUND "name not found in directory"
 typedef struct {
     const char *name;
     ods2_fid_t fid;
@@ -1258,7 +1259,7 @@ ods2_result_t ods2_lookup_name(ods2_volume_t *vol, const uint8_t *dir_header,
     ctx.found = false;
     r = walk_directory(vol, dir_header, visit_lookup, &ctx);
     if (!r.ok) return r;
-    if (!ctx.found) return fail("name not found in directory");
+    if (!ctx.found) return fail(ODS2_NAME_NOT_FOUND);
     *fid_out = ctx.fid;
     return ok();
 }
@@ -1333,7 +1334,7 @@ ods2_result_t ods2_lookup_name_version(ods2_volume_t *vol, const uint8_t *dir_he
     ctx.version = version;
     r = walk_directory(vol, dir_header, visit_lookup_version, &ctx);
     if (!r.ok) return r;
-    if (!ctx.name_found) return fail("name not found in directory");
+    if (!ctx.name_found) return fail(ODS2_NAME_NOT_FOUND);
     if (!ctx.found) return fail("version not found");
     *fid_out = ctx.fid;
     if (version_out != NULL) *version_out = ctx.found_version;
@@ -1401,12 +1402,82 @@ ods2_result_t ods2_lookup_path(ods2_volume_t *vol, const char *path, ods2_fid_t 
     return ok();
 }
 
+/* A header read for a change (review 6, finding 4): nothing on the write path may rewrite a header with a
+   fresh checksum without looking at it, or the damage would be made to look right. The checksum, the level,
+   the offsets in order and inside the block, room for the identification area the writers store into (a
+   level 2 ident up to its revision date, a level 5 one up to its attribute date), and the FID's own file
+   number. A header that fails is not changed. */
+static ods2_result_t header_ok_for_write(const uint8_t *h, unsigned file_number)
+{
+    const ods2_head_core_t *core = (const ods2_head_core_t *) h;
+    unsigned level = core->struclev >> 8;
+    size_t ident_need = (level == ODS5_LEVEL_5) ? ODS5_FI5_ATTDATE + 8 : 38;
+
+    if (ods2_checksum(h, 255) != (uint16_t) (h[510] | (h[511] << 8)) ||
+        (level != ODS5_LEVEL_2 && level != ODS5_LEVEL_5) ||
+        core->idoffset < 40 || core->idoffset > core->mpoffset || core->mpoffset > core->acoffset ||
+        core->acoffset > core->rsoffset ||
+        (size_t) core->idoffset * 2 + ident_need > (size_t) core->mpoffset * 2 ||
+        core->fid.fid_num != file_number || core->fid.fid_nmx != 0) {
+        return fail("a file header is damaged (checksum, offsets or file number): it is not changed - "
+                    "run ANALYZE/DISK_STRUCTURE/REPAIR on VMS");
+    }
+    return ok();
+}
+
+static ods2_result_t load_directory(ods2_volume_t *vol, const uint8_t *dir_header,
+                                    unsigned spare, uint8_t **blocks_out, unsigned *used_out);
+
+/* header_ok_for_write() for a directory that is about to be changed. A directory with an extension header
+   is refused (review 6, finding 5): store_directory moves a directory that outgrows its allocation into one
+   new extent and replaces only the primary header's map, so the old chain's extents would stay mapped
+   after the move, and later writes would land in clusters now owned by other files. ods2v2 never makes such
+   a directory (a contiguous directory has one extent), and VMS keeps them contiguous; to release the chain
+   instead would be new, untested code on the one path that holds every name on the volume. */
+static ods2_result_t directory_header_ok(const uint8_t *h, unsigned file_number)
+{
+    ods2_result_t r = header_ok_for_write(h, file_number);
+    if (!r.ok) return r;
+    if (((const ods2_head_core_t *) h)->ext_fid.fid_num != 0) {
+        return fail("this directory has an extension header (it is fragmented over many extents): it is "
+                    "not changed - ods2v2 does not write to such a directory");
+    }
+    return ok();
+}
+
+/* Before a name is created: ok if the directory has no such name, `exists` if it has, and the lookup's own
+   failure if the directory could not be read - a read error or a bad extent is not "no such name"
+   (review 6, finding 8: the create went on and could insert a second entry with the same name). */
+static ods2_result_t name_available(ods2_volume_t *vol, const uint8_t *dir_header, const char *name,
+                                    const char *exists)
+{
+    ods2_fid_t existing;
+    ods2_result_t r = ods2_lookup_name(vol, dir_header, name, &existing);
+    if (r.ok) return fail(exists);
+    if (r.problem != NULL && strcmp(r.problem, ODS2_NAME_NOT_FOUND) == 0) return ok();
+    return r;
+}
+
+/* Before anything is allocated or written for a change to a directory: its header and every block of it
+   are in order (header_ok_for_write, load_directory's block check), so a refusal leaves the volume as it
+   was instead of undoing half a create. `file_number` is the number the header was read from. */
+static ods2_result_t directory_ready(ods2_volume_t *vol, const uint8_t *dir_header, unsigned file_number)
+{
+    uint8_t *blocks = NULL;
+    unsigned used;
+    ods2_result_t r = directory_header_ok(dir_header, file_number);
+    if (!r.ok) return r;
+    r = load_directory(vol, dir_header, 0, &blocks, &used);
+    if (!r.ok) return r;
+    free(blocks);
+    return ok();
+}
+
 ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_header,
                                      const char *name, ods2_fid_t *new_fid_out)
 {
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
     char dirname[ODS5_MAX_LITERAL_NAME + 8];
-    ods2_fid_t existing;
     unsigned file_number;
     uint16_t seq_num;
     uint32_t content_lbn;
@@ -1448,10 +1519,11 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
     /* Refuse to create a name that already exists matching VMS
        behavior (CREATE/DIRECTORY on an existing name fails) and
        avoids silently shadowing an existing directory. */
-    r = ods2_lookup_name(vol, parent_header, dirname, &existing);
-    if (r.ok) {
-        return fail("a file or directory with this name already exists in the parent");
-    }
+    r = directory_ready(vol, parent_header, parent_core->fid.fid_num);
+    if (!r.ok) return r;
+    r = name_available(vol, parent_header, dirname,
+                       "a file or directory with this name already exists in the parent");
+    if (!r.ok) return r;
 
     /* A file number, its header slot inside INDEXF.SYS's end-of-file,
        and its bit marked in use. */
@@ -1758,7 +1830,6 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
 {
     uint8_t dir_header[512], target_header[512];
     ods2_head_core_t *core = (ods2_head_core_t *) target_header;
-    ods2_fid_t existing;
     char link_name[ODS5_MAX_LITERAL_NAME + 8];
     const char *why;
     unsigned count;
@@ -1783,6 +1854,10 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
         (core->filechar & 0x8000u)) {
         return fail("the file to link to does not exist");
     }
+    if (hardlinks) {
+        r = header_ok_for_write(target_header, target.fid_num); /* its link count is rewritten */
+        if (!r.ok) return r;
+    }
     if (core->filechar & 0x2000u) {
         return fail("a link to a directory is not made here");
     }
@@ -1797,8 +1872,11 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
 
     r = ods2_read_header(vol, dir_file_number, dir_header);
     if (!r.ok) return r;
-    r = ods2_lookup_name(vol, dir_header, link_name, &existing);
-    if (r.ok) return fail("a file or directory with this name already exists in the directory");
+    r = directory_ready(vol, dir_header, dir_file_number);
+    if (!r.ok) return r;
+    r = name_available(vol, dir_header, link_name,
+                       "a file or directory with this name already exists in the directory");
+    if (!r.ok) return r;
 
     if (!hardlinks) {
         /* Without the HARDLINKS characteristic (any ODS-2 volume, an ODS-5 one without it) VMS SET
@@ -1909,7 +1987,6 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
 {
     size_t content_len = src->length;
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
-    ods2_fid_t existing;
     size_t blocks_needed;
     size_t blocks_remaining;
     ods2_extent_t extents[ODS2_MAX_EXTENTS];
@@ -1964,10 +2041,11 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
     }
     name = upper_name; /* every use below now sees the on-disk name */
 
-    r = ods2_lookup_name(vol, parent_header, name, &existing);
-    if (r.ok) {
-        return fail("a file or directory with this name already exists in the parent");
-    }
+    r = directory_ready(vol, parent_header, ((const ods2_head_core_t *) parent_header)->fid.fid_num);
+    if (!r.ok) return r;
+    r = name_available(vol, parent_header, name,
+                       "a file or directory with this name already exists in the parent");
+    if (!r.ok) return r;
 
     blocks_needed = (content_len + 511) / 512;
     if (blocks_needed == 0) blocks_needed = 1; /* a zero-length file still needs one block for EFBLK=1... */
@@ -2354,6 +2432,15 @@ static ods2_result_t load_directory(ods2_volume_t *vol, const uint8_t *dir_heade
        block inside its EOF. They are dropped from `used`, so that a write puts the end-of-file right (the
        directory's own block 1 stays, and carries the marker) instead of keeping or moving a zero block. */
     while (used > 1 && blocks[(size_t) (used - 1) * 512] == 0 && blocks[(size_t) (used - 1) * 512 + 1] == 0) used--;
+    /* A directory is changed only if every block of it is well formed (review 6, finding 3): a record whose
+       name count or size runs past its block would be read, shifted or split on trust. */
+    for (v = 0; v < used; v++) {
+        if (!ods2_dir_block_ok(blocks + (size_t) v * 512, 512)) {
+            free(blocks);
+            return fail("a directory block is damaged (a record runs past the block): the directory is not "
+                        "changed - run ANALYZE/DISK_STRUCTURE/REPAIR on VMS");
+        }
+    }
     *blocks_out = blocks;
     *used_out = used;
     return ok();
@@ -2389,6 +2476,8 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
         return not_writable(vol);
     }
     r = ods2_read_header(vol, dir_file_number, dir_header);
+    if (!r.ok) return r;
+    r = directory_header_ok(dir_header, dir_file_number);
     if (!r.ok) return r;
     r = load_directory(vol, dir_header, 1, &blocks, &used);
     if (!r.ok) return r;
@@ -2522,7 +2611,9 @@ static ods2_result_t remove_directory_entry(ods2_volume_t *vol, unsigned dir_fil
     uint8_t *blocks = NULL;
     unsigned used, v;
     bool removed = false;
-    ods2_result_t r = load_directory(vol, dir_header, 0, &blocks, &used);
+    ods2_result_t r = directory_header_ok(dir_header, dir_file_number);
+    if (!r.ok) return r;
+    r = load_directory(vol, dir_header, 0, &blocks, &used);
     if (!r.ok) return r;
     for (v = 0; v < used && !removed; v++) {
         uint8_t *block = blocks + (size_t) v * 512;
@@ -2610,6 +2701,8 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
 
     r = ods2_read_header(vol, dir_file_number, dir_header);
     if (!r.ok) return r;
+    r = directory_ready(vol, dir_header, dir_file_number);
+    if (!r.ok) return r;
 
     r = ods2_lookup_name_version(vol, dir_header, name, version, &target_fid, &target_version);
     if (!r.ok) return r;
@@ -2646,6 +2739,8 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
         unsigned links = (unsigned) (target_header[ODS5_FH2_LINKCOUNT] |
                                      (target_header[ODS5_FH2_LINKCOUNT + 1] << 8));
         if (links > 1) {
+            r = header_ok_for_write(target_header, target_fid.fid_num); /* its link count is rewritten */
+            if (!r.ok) return r;
             /* VMS V8.4 (measured): deleting a link of a file with others takes its entry and one off
                the count; the header keeps its name even if it was the primary link's, and when it was,
                the back link becomes (0xFFFFFF,0,0); dates and revision do not change; the data stays */
@@ -2727,6 +2822,10 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
                         "(matches VMS's own DELETE/DIRECTORY behavior)");
         }
     }
+
+    /* The header is rewritten (marked for delete) with a fresh checksum: it must be a sound one */
+    r = header_ok_for_write(target_header, target_fid.fid_num);
+    if (!r.ok) return r;
 
     /* Read everything the delete needs before anything is changed, so that a failure here (a damaged
        map, an extension header that cannot be read) leaves the file as it was. */

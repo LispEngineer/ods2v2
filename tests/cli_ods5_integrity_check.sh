@@ -81,6 +81,124 @@ PY
         "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" | tail -1)"
 done
 
+# ---- a damaged directory block is not written to (review 6, finding 3): a name count that runs past the block
+for level in 2 5; do
+    img="$TMP/d$level.img"
+    $INIT "$img" 8192 --structure=$level --label=DAMAGED >/dev/null 2>&1
+    printf 'x\n' > "$TMP/u.txt"
+    $ODS2 "$img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+    $ODS2 "$img" "COPY $TMP/u.txt [D]ONE.TXT" >/dev/null 2>&1
+    fnum=$($ODS2 "$img" 'DIR/FULL [000000]D.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+    python3 -I - "$img" "$fnum" <<'PY'
+import struct, sys
+img, fnum = sys.argv[1], int(sys.argv[2])
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+f.seek((base + fnum - 1) * 512); h = f.read(512)
+mp = h[1] * 2
+w0, w1 = struct.unpack_from('<HH', h, mp)
+lbn = (((w0 >> 8) & 0x3f) << 16) | w1
+f.seek(lbn * 512); b = bytearray(f.read(512))
+b[5] = 255            # the first record's name count: 255 bytes of name in a short record
+f.seek(lbn * 512); f.write(b)
+PY
+    before=$(md5sum < "$img")
+    out=$($ODS2 "$img" "COPY $TMP/u.txt [D]TWO.TXT" 2>&1); rc=$?
+    case "$out" in *damaged*) msg=damaged ;; *) msg="$out" ;; esac
+    check "ODS-$level: COPY into a directory with a damaged block fails (exit 1) and says so" "1 damaged" "$rc $msg"
+    out=$($ODS2 "$img" "DELETE [D]ONE.TXT" 2>&1); rc=$?
+    case "$out" in *damaged*) msg=damaged ;; *) msg="$out" ;; esac
+    check "ODS-$level: DELETE in a directory with a damaged block fails (exit 1) and says so" "1 damaged" "$rc $msg"
+    check "ODS-$level: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
+done
+
+# ---- a damaged header is not rewritten (review 6, finding 4): IDOFFSET 250 puts the ident stores past the block
+# (the checksum is refreshed, so only the offsets are wrong; the old end-of-file makes the directory be stored);
+# a file header with a wrong checksum is not marked for delete with a fresh one
+for level in 2 5; do
+    img="$TMP/h$level.img"
+    $INIT "$img" 8192 --structure=$level --label=HDRBAD >/dev/null 2>&1
+    printf 'x\n' > "$TMP/u.txt"
+    $ODS2 "$img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+    $ODS2 "$img" "COPY $TMP/u.txt [D]ONE.TXT" >/dev/null 2>&1
+    dnum=$($ODS2 "$img" 'DIR/FULL [000000]D.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+    fnum=$($ODS2 "$img" 'DIR/FULL [D]ONE.TXT' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+    cat > "$TMP/patch.py" <<'PY'
+import struct, sys
+img, fnum, what = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+pos = (base + fnum - 1) * 512
+f.seek(pos); h = bytearray(f.read(512))
+if what == 'idoffset':
+    h[0] = 250
+    h[28:32] = bytes([0, 0, 1, 0]); h[32:34] = bytes([2, 0])      # EFBLK 1, FFBYTE 2: the old end-of-file
+    struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+elif what == 'extension':
+    struct.pack_into('<HH', h, 14, 20, 1)                            # EXT_FID (20,1): an extension header
+    struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+elif what == 'maplbn':
+    mp = h[1] * 2
+    struct.pack_into('<H', h, mp + 2, 0xFFFF)                        # the directory's first extent: far beyond the volume
+    struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+else:
+    h[510] ^= 0x55                                                   # a wrong checksum
+f.seek(pos); f.write(h)
+PY
+    python3 -I "$TMP/patch.py" "$img" "$dnum" idoffset
+    before=$(md5sum < "$img")
+    out=$($ODS2 "$img" "COPY $TMP/u.txt [D]TWO.TXT" 2>&1); rc=$?
+    case "$out" in *damaged*) msg=damaged ;; *) msg="$out" ;; esac
+    check "ODS-$level: COPY into a directory whose header has a bad IDOFFSET fails (exit 1) and says so" "1 damaged" "$rc $msg"
+    out=$($ODS2 "$img" "DELETE [D]ONE.TXT" 2>&1); rc=$?
+    case "$out" in *damaged*) msg=damaged ;; *) msg="$out" ;; esac
+    check "ODS-$level: DELETE in it fails (exit 1) and says so" "1 damaged" "$rc $msg"
+    out=$($ODS2 "$img" "CREATE/DIRECTORY [D.SUB]" 2>&1); rc=$?
+    check "ODS-$level: CREATE/DIRECTORY in it fails (exit 1)" 1 "$rc"
+    check "ODS-$level: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
+
+    # a directory with an extension header is not written to (review 6, finding 5)
+    img="$TMP/e$level.img"
+    $INIT "$img" 8192 --structure=$level --label=EXTHDR >/dev/null 2>&1
+    $ODS2 "$img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+    $ODS2 "$img" "COPY $TMP/u.txt [D]ONE.TXT" >/dev/null 2>&1
+    dnum=$($ODS2 "$img" 'DIR/FULL [000000]D.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+    python3 -I "$TMP/patch.py" "$img" "$dnum" extension
+    before=$(md5sum < "$img")
+    for cmd in "COPY $TMP/u.txt [D]TWO.TXT" "DELETE [D]ONE.TXT" "CREATE/DIRECTORY [D.SUB]"; do
+        out=$($ODS2 "$img" "$cmd" 2>&1); rc=$?
+        case "$out" in *"extension header"*) msg="refused, extension header" ;; *) msg="$out" ;; esac
+        check "ODS-$level: $cmd, directory with an extension header: refused" "1 refused, extension header" "$rc $msg"
+    done
+    check "ODS-$level: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
+
+    # a directory that cannot be read is not "no such name" (review 6, finding 8): no duplicate entry is made
+    img="$TMP/n$level.img"
+    $INIT "$img" 8192 --structure=$level --label=NOREAD >/dev/null 2>&1
+    $ODS2 "$img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+    $ODS2 "$img" "COPY $TMP/u.txt [D]ONE.TXT" >/dev/null 2>&1
+    dnum=$($ODS2 "$img" 'DIR/FULL [000000]D.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+    python3 -I "$TMP/patch.py" "$img" "$dnum" maplbn
+    before=$(md5sum < "$img")
+    for cmd in "COPY $TMP/u.txt [D]ONE.TXT" "COPY $TMP/u.txt [D]TWO.TXT" "CREATE/DIRECTORY [D.SUB]"; do
+        out=$($ODS2 "$img" "$cmd" 2>&1); rc=$?
+        case "$out" in *"already exists"*) msg="said it exists: $out" ;; *) msg=refused ;; esac
+        check "ODS-$level: $cmd, directory unreadable: exit 1, and not taken for a free name" "1 refused" "$rc $msg"
+    done
+    check "ODS-$level: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
+
+    img="$TMP/g$level.img"
+    $INIT "$img" 8192 --structure=$level --label=HDRBAD >/dev/null 2>&1
+    $ODS2 "$img" "COPY $TMP/u.txt [000000]ONE.TXT" >/dev/null 2>&1
+    fnum=$($ODS2 "$img" 'DIR/FULL [000000]ONE.TXT' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+    python3 -I "$TMP/patch.py" "$img" "$fnum" checksum
+    before=$(md5sum < "$img")
+    out=$($ODS2 "$img" "DELETE [000000]ONE.TXT" 2>&1); rc=$?
+    case "$out" in *damaged*) msg=damaged ;; *) msg="$out" ;; esac
+    check "ODS-$level: DELETE of a file whose header has a bad checksum fails (exit 1) and says so" "1 damaged" "$rc $msg"
+    check "ODS-$level: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
+done
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"

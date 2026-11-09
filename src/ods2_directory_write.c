@@ -84,6 +84,40 @@ static size_t record_name_utf8(const uint8_t *rec, char *out, size_t cap)
     return n;
 }
 
+/* Is the record at `pos` (its size word is neither the end marker nor zero) well formed and entirely inside
+   the block? Size word, a name of at least one byte, its padding, and then a whole number of 8-byte version
+   entries (at least one): the layout every VMS-written record has. The name count and the size word are
+   fields of a block that may be damaged, so nothing reads a record's name before this passes (review 6,
+   finding 3: a name count of 255 near the end of a block read 250 bytes past it). */
+static bool record_ok(const uint8_t *block, size_t pos, size_t block_size)
+{
+    size_t size, total, namecount, padded;
+
+    if (pos + 2 > block_size) return false;
+    size = read_word(block + pos);
+    if (size == 0 || size == 0xffff) return false;
+    total = size + 2;
+    if (total < 16 || pos + total > block_size) return false;
+    namecount = block[pos + 5];
+    if (namecount == 0) return false;
+    padded = namecount + (namecount % 2);
+    if (6 + padded + 8 > total || (total - 6 - padded) % 8 != 0) return false;
+    return true;
+}
+
+bool ods2_dir_block_ok(const uint8_t *block, size_t block_size)
+{
+    size_t pos = 0;
+
+    while (pos + 6 <= block_size) {
+        uint16_t size = read_word(block + pos);
+        if (size == 0xffff || size == 0) return true; /* end marker, or an unused rest */
+        if (!record_ok(block, pos, block_size)) return false;
+        pos += (size_t) size + 2;
+    }
+    return true;
+}
+
 /* The on-disk record at `rec` against a caller's nul-terminated UTF-8 name. */
 static int compare_record(const uint8_t *rec, const char *name)
 {
@@ -240,6 +274,7 @@ bool ods2_insert_dir_entry_flags(uint8_t *block, size_t block_size,
         if (size == 0) {
             break; /* empty/uninitialized rest of block, no real sentinel yet */
         }
+        if (!record_ok(block, pos, block_size)) return false; /* a damaged block is not written to */
         if (insert_pos == (size_t) -1 && compare_record(block + pos, name) > 0) {
             insert_pos = pos;
         }
@@ -300,47 +335,6 @@ bool ods2_insert_dir_entry_flags(uint8_t *block, size_t block_size,
     return true;
 }
 
-bool ods2_remove_dir_entry(uint8_t *block, size_t block_size, const char *name)
-{
-    size_t pos = 0;
-    size_t match_pos = (size_t) -1;
-    size_t match_record_total = 0;
-    size_t end_pos;
-
-    /* Scan for a record matching name, remembering where the whole
-       used-content region ends (the sentinel, or the point scanning
-       stops for lack of a real one). */
-    while (pos + 6 <= block_size) {
-        uint16_t size = read_word(block + pos);
-        if (size == 0xffff || size == 0) {
-            break;
-        }
-        if (match_pos == (size_t) -1 && compare_record(block + pos, name) == 0) {
-            match_pos = pos;
-            match_record_total = (size_t) size + 2;
-        }
-        pos += (size_t) size + 2;
-    }
-    end_pos = pos;
-
-    if (match_pos == (size_t) -1) {
-        return false; /* not found in this block */
-    }
-
-    /* Shift everything after the matched record (through the
-       sentinel's own 2 bytes) back by the matched record's size,
-       closing the gap exactly - the inverse of the insert-side shift. */
-    memmove(block + match_pos, block + match_pos + match_record_total,
-            (end_pos + 2) - (match_pos + match_record_total));
-
-    /* The region the shift vacated at the tail is now stale/garbage -
-       zero it so it can never be misread as a further record if
-       anything ever scans past where it should stop. */
-    memset(block + end_pos + 2 - match_record_total, 0, match_record_total);
-
-    return true;
-}
-
 bool ods2_remove_dir_version(uint8_t *block, size_t block_size, const char *name,
                              uint16_t version)
 {
@@ -361,7 +355,7 @@ bool ods2_remove_dir_version(uint8_t *block, size_t block_size, const char *name
             break;
         }
         this_total = (size_t) size + 2;
-        if (pos + this_total > block_size) {
+        if (!record_ok(block, pos, block_size)) {
             return false; /* malformed - refuse to edit */
         }
         namecount = block[pos + 5];
@@ -429,7 +423,7 @@ static int block_records(const uint8_t *block, size_t block_size, size_t *offset
     int n = 0;
     while (pos + 2 <= block_size) {
         uint16_t size = read_word(block + pos);
-        if (size == 0xffff || size == 0 || pos + (size_t) size + 2 > block_size) break;
+        if (size == 0xffff || size == 0 || !record_ok(block, pos, block_size)) break;
         if (offsets != NULL && n < max) {
             offsets[n] = pos;
             sizes[n] = (size_t) size + 2;

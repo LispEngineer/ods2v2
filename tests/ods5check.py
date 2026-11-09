@@ -513,6 +513,12 @@ def main():
                 nrec += 1
             if nrec == 0 and used_blocks > 1 and False:
                 fnd.err('%s block %d: empty block inside the EOF' % (where, bi + 1))
+        seen_nv = set()
+        for ent in lst:
+            key = (ent[0], ent[2])   # exact: the VMS-made asim8 ODS-5 disk has lp.COM and LP.COM in one directory
+            if key in seen_nv:
+                fnd.err('%s: two entries for %r;%d' % (where, ent[0], ent[2]))
+            seen_nv.add(key)
         entries[n] = lst
     # --- cross checks: entries -> headers, backlinks ---
     referenced = set()

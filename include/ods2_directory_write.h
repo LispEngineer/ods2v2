@@ -67,22 +67,6 @@ bool ods2_insert_dir_entry_flags(uint8_t *block, size_t block_size,
                                  const char *name, uint16_t version, ods2_fid_t fid,
                                  unsigned level, uint8_t extra_flags);
 
-/* Removes the whole directory RECORD matching `name` (case-
- * insensitive) from `block` - the name and EVERY version it holds in
- * this block - shifting all following bytes (through the sentinel)
- * back to close the gap - the exact inverse of ods2_insert_dir_entry().
- * Returns true if a matching record was found and removed, false if
- * no record with that name exists in this block (callers checking
- * multiple blocks should treat false as "not in this one, try the
- * next" rather than an error).
- *
- * To delete one version of a file that may have several, use
- * ods2_remove_dir_version() instead: removing the whole record would
- * also drop the other versions' entries while their headers stay
- * allocated.
- */
-bool ods2_remove_dir_entry(uint8_t *block, size_t block_size, const char *name);
-
 /* Removes just the (`version`, FID) pair of `name` (case-insensitive)
  * from `block`, shrinking that record by 8 bytes and shifting all
  * following bytes (through the sentinel) back to close the gap. If
@@ -131,6 +115,9 @@ int ods2_dir_name_compare(const char *a, size_t a_len, const char *b, size_t b_l
 
 /* Is `block` empty (no records before its -1 end marker)? */
 bool ods2_dir_block_is_empty(const uint8_t *block);
+
+/* Is every record of `block` (up to its end marker, or the end of the block) well formed and inside the block? */
+bool ods2_dir_block_ok(const uint8_t *block, size_t block_size);
 
 /* Which of `count` consecutive 512-byte blocks `name` belongs in: the
    last non-empty block whose first record sorts at or before `name`,
