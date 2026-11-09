@@ -357,6 +357,15 @@ class Model:
             return True
         return False
 
+    def name_hard(self, path, display):
+        """a real collision: an entry of the same case-folded name in the directory (what VMS refuses)"""
+        fp, k = self.fkpath(path), key_of(display)
+        return any(d == fp and key == k for (d, key, ver) in self.ents)
+
+    def dir_hard(self, path, name):
+        fp = self.fkpath(path)
+        return (fp + (fold_str(name),)) in self.dirs
+
     def dir_taken(self, path, name):
         fp = self.fkpath(path)
         fk = fold_str(name)
@@ -755,6 +764,8 @@ class Harness:
         name = self.names.dir_name()
         spec_parent = tuple(parent) + (name,)
         taken = m.dir_taken(parent, name)
+        if taken and not m.dir_hard(parent, name):
+            return
         depth_bad = (not self.ods5) and len(spec_parent) > 8
         expect = not taken and not depth_bad
         cmd = 'CREATE/DIRECTORY ' + spec_dir(spec_parent, r, self.ods5)
@@ -797,6 +808,8 @@ class Harness:
         elif fmt:
             q = '/FORMAT=' + fmt
         taken = m.name_taken(dirpath, display)
+        if taken and not m.name_hard(dirpath, display):
+            return      # only the harness's own export-collision avoidance (file "e." beside directory "e"): not a refusal case
         longline = False
         if fmt in ('STMLF', 'STM', 'ATTR_STM', 'VAR'):
             longline = max_line(data, b'\n') > 32767
@@ -945,6 +958,8 @@ class Harness:
         if not self.ods5:
             ndisp = ndisp.upper()
         taken = m.name_taken(ndp, ndisp)
+        if taken and not m.name_hard(ndp, ndisp):
+            return
         cmd = 'LINK %s%s %s%s;%d' % (spec_dir(ndp, r, self.ods5), spec_file_name(ndisp, r, self.ods5),
                                      spec_dir(dp, r, self.ods5), spec_file_name(display, r, self.ods5), ver)
         res = run_ods2(self.img, cmd)
@@ -962,6 +977,8 @@ class Harness:
         display, strict = self.names.file_name('plain' if r.random() < 0.7 else None)
         target = r.choice(['x', 'some/relative/path.txt', '../up/file', '/abs/path/to/thing', 'a' * 200, 'dir/' * 20 + 'f'])
         taken = m.name_taken(dp, display)
+        if taken and not m.name_hard(dp, display):
+            return
         cmd = 'SYMLINK %s%s %s' % (spec_dir(dp, r, self.ods5), spec_file_name(display, r, self.ods5), target)
         res = run_ods2(self.img, cmd)
         self.note('%s -> rc=%d' % (cmd[:200], res.rc))
