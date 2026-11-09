@@ -109,6 +109,9 @@ static bool vbn_to_lbn(const ods2_extent_t *extents, int extent_count,
     return false;
 }
 
+/* Most extension headers the index file may chain (a loop stops here). */
+#define ODS2_MAX_HEADER_SEGMENTS_MOUNT 64
+
 static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
                                      const char *fopen_mode, bool writable)
 {
@@ -165,6 +168,28 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
     if (vol->indexf_extent_count <= 0) {
         ods2_dismount(vol);
         return fail("could not decode INDEXF.SYS's own retrieval pointers");
+    }
+
+    /* A fragmented index file continues in extension headers (FH2$W_EXT_FID),
+       which are themselves headers inside the index file: found through the
+       extents known so far, each one adding its own. If one cannot be read the
+       extents known so far are kept. */
+    {
+        uint8_t current[512];
+        int segment;
+        memcpy(current, indexf_header, sizeof(current));
+        for (segment = 0; segment < ODS2_MAX_HEADER_SEGMENTS_MOUNT; segment++) {
+            const ods2_head_core_t *core = (const ods2_head_core_t *) current;
+            uint8_t next[512];
+            int n;
+            if (core->ext_fid.fid_num == 0) break;
+            if (!ods2_read_header(vol, core->ext_fid.fid_num, next).ok) break;
+            n = decode_header_extents(next, vol->indexf_extents + vol->indexf_extent_count,
+                                      (size_t) (ODS2_MAX_EXTENTS - vol->indexf_extent_count));
+            if (n <= 0) break;
+            vol->indexf_extent_count += n;
+            memcpy(current, next, sizeof(current));
+        }
     }
 
     r = ok();

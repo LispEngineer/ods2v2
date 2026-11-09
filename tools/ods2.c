@@ -606,6 +606,7 @@ static void canonical_dir_path(ods2_volume_t *vol, char *path, size_t cap)
 /* VMS allows 255 directory levels; this is a finite backstop against a
    directory cycle on a corrupted disk image. */
 #define MAX_RECURSION_DEPTH 255
+#define MAX_DIR_VISITS 1000000
 
 /* State for one DIR across a wildcard directory spec. */
 typedef struct {
@@ -617,6 +618,7 @@ typedef struct {
     int dirs_shown;
     int files_shown;
     int errors;
+    long visits;                   /* directories read so far, aliases counted each time */
     /* The directories on the current recursion path, [0..depth]: their
        FIDs and absolute paths, to refuse an entry that points back at
        one of them (a loop). Aliases that are not ancestors are still
@@ -646,6 +648,17 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
     char *bufs;
 
     if (!here && !deeper) return;
+    /* A directory reached through aliases is read again each time, as on VMS (the V8.4
+       CD's 256 SYSn aliases make 33,560 visits); a damaged or hostile volume whose
+       aliases multiply could take forever, so a very large number of visits is refused. */
+    if (++w->visits > MAX_DIR_VISITS) {
+        if (w->visits == MAX_DIR_VISITS + 1) {
+            report_error("%%ODS2-E-TOOMANYDIRS, more than %d directories visited; "
+                         "stopping (aliases that multiply?)\n", MAX_DIR_VISITS);
+            w->errors++;
+        }
+        return;
+    }
     if (depth > MAX_RECURSION_DEPTH) {
         report_error("%%ODS2-E-TOODEEP, recursion limit reached, skipping "
                         "subtree under [%s]\n", abs_path);
@@ -910,23 +923,31 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
     }
 
     /* the Linux directory */
-    snprintf(dirpath, sizeof(dirpath), "%s", x->local);
-    if (x->tree) {
-        const char *rel = dir_spelling + strlen(x->start);
-        if (*rel == '.' && x->start[0] != '\0') rel++;
-        while (*rel) {
-            const char *end = rel;
-            char lit[ODS2_PATH_MAX];
-            size_t ul;
-            while (*end && *end != '.') { if (*end == '^' && end[1]) end++; end++; }
-            ul = ods5_unescape(rel, (size_t) (end - rel), lit, sizeof(lit));
-            if (ul == (size_t) -1) snprintf(lit, sizeof(lit), "%.*s", (int) (end - rel), rel);
-            linux_component(lit, comp, sizeof(comp));
-            if (strlen(dirpath) + strlen(comp) + 2 >= sizeof(dirpath)) break;
-            strcat(dirpath, "/");
-            strcat(dirpath, comp);
-            rel = end;
-            if (*rel == '.') rel++;
+    {
+        bool too_long = false;
+        snprintf(dirpath, sizeof(dirpath), "%s", x->local);
+        if (x->tree) {
+            const char *rel = dir_spelling + strlen(x->start);
+            if (*rel == '.' && x->start[0] != '\0') rel++;
+            while (*rel) {
+                const char *end = rel;
+                char lit[ODS2_PATH_MAX];
+                size_t ul;
+                while (*end && *end != '.') { if (*end == '^' && end[1]) end++; end++; }
+                ul = ods5_unescape(rel, (size_t) (end - rel), lit, sizeof(lit));
+                if (ul == (size_t) -1) snprintf(lit, sizeof(lit), "%.*s", (int) (end - rel), rel);
+                linux_component(lit, comp, sizeof(comp));
+                if (strlen(dirpath) + strlen(comp) + 2 >= 4000) { too_long = true; break; }
+                strcat(dirpath, "/");
+                strcat(dirpath, comp);
+                rel = end;
+                if (*rel == '.') rel++;
+            }
+            if (too_long) {
+                report_error("%%ODS2-E-PATHTOOLONG, %s: the Linux path would be too long\n", e->name);
+                x->errors++;
+                return;
+            }
         }
     }
     /* the Linux file name */
