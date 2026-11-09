@@ -122,6 +122,7 @@
 #include "ods2_directory_write.h"
 #include "ods2_text_var.h"
 #include "ods2_records.h"
+#include "ods2_acl.h"
 #include "ods2_validate.h"
 #include "ods5_ondisk.h"
 #include "ods5_names.h"
@@ -411,6 +412,15 @@ static void protection_text(unsigned nibble, char *out)
     out[n] = '\0';
 }
 
+/* The ACL lines of DIR/FULL: the first after the label, the rest under it, as VMS lays them out. */
+typedef struct { int n; } acl_print_t;
+static void acl_print_line(void *ctx, const char *text)
+{
+    acl_print_t *a = (acl_print_t *) ctx;
+    printf("  %s%s\n", a->n == 0 ? "Access Cntrl List:  " : "                    ", text);
+    a->n++;
+}
+
 /* DIR/FULL for one entry: what the file header says. */
 static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
 {
@@ -452,6 +462,22 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
     protection_text((core->fileprot >> 8) & 15, g_);
     protection_text((core->fileprot >> 12) & 15, w_);
     printf("  Protection:         (S:%s, O:%s, G:%s, W:%s)\n", s_, o_, g_, w_);
+    {
+        /* the ACEs lie in the primary header and, when they do not fit there, in its extension
+           headers (the primary's first, as VMS lists them) */
+        acl_print_t ap = { 0 };
+        uint8_t ext[512];
+        const uint8_t *h = header;
+        int guard;
+        for (guard = 0; guard < 32; guard++) {
+            const ods2_head_core_t *hc = (const ods2_head_core_t *) h;
+            unsigned next = hc->ext_fid.fid_num | ((unsigned) hc->ext_fid.fid_nmx << 16);
+            ods2_acl_walk(h, acl_print_line, &ap);
+            if (next == 0 || !ods2_read_header(vol, next, ext).ok ||
+                ((const ods2_head_core_t *) ext)->fid.fid_num != hc->ext_fid.fid_num) break;
+            h = ext;
+        }
+    }
     ods5_format_vms_time(id.credate, t, sizeof(t));
     printf("  Created:            %s\n", t);
     /* ODS-5: the header's revision date is the data modification date; what VMS
