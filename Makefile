@@ -213,7 +213,12 @@ ods2: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_part
 ods2_fault: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c include/ods2_volume.h include/ods2_text_var.h include/ods2_records.h include/ods2_acl.h include/ods2_path.h include/ods2_wildcard.h third_party/linenoise/linenoise.h
 	$(CC) $(CFLAGS) -DODS2_FAULT_INJECTION -D_DEFAULT_SOURCE -Ithird_party/linenoise $(SANFLAGS) tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c -o $@
 
-test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_fault
+# Makes trees deeper than the 255 levels ods2 creates (ODS2_TEST_MAX_DIR_DEPTH, in this test build only), for
+# tests/cli_deep_check.sh.
+ods2_deep_make: tests/ods2_deep_make.c $(VOLUME_SRCS) include/ods2_volume.h
+	$(CC) $(CFLAGS) -DODS2_FAULT_INJECTION $(SANFLAGS) tests/ods2_deep_make.c $(VOLUME_SRCS) -o $@
+
+test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_fault ods2_deep_make
 	@echo "--- ods2_ondisk_selftest ---"
 	@$(BUILD)/ods2_ondisk_selftest
 	@echo "--- ods2_checksum_selftest ---"
@@ -302,6 +307,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_nmx_check.sh
 	@echo "--- cli_ods5_integrity_check ---"
 	@sh tests/cli_ods5_integrity_check.sh
+	@echo "--- cli_deep_check (trees deeper than 255 levels) ---"
+	@sh tests/cli_deep_check.sh
 	@echo "--- fault_inject (interrupted writes) ---"
 	@python3 tests/fault_inject.py --quick
 	@echo "--- cli_ods5_review_check ---"
@@ -352,4 +359,4 @@ clean:
 	rm -rf $(BUILD)
 	rm -f samples/synthetic_disk.img samples/synthetic_disk_working.img samples/synthetic_disk_v0.img
 	rm -f samples/versions_disk.img samples/versions_cli_disk.img samples/cli_wildcard_disk.img samples/cli_loop_disk.img samples/file_alloc_disk.img samples/dir_order_disk.img samples/large_file_disk.img samples/cli_status_disk.img samples/cli_attrs_disk.img samples/record_attrs_disk.img samples/indexf_large_disk.img samples/text_var_disk.img samples/cli_label_disk.img samples/cli_label_orig.img
-	rm -f $(TOOLS) ods2_fault
+	rm -f $(TOOLS) ods2_fault ods2_deep_make

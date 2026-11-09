@@ -348,7 +348,11 @@ version, which ods2v2 does not make; it creates version 1 only). Also:
 * `ods2_init <new-image> <size> [--structure=2|5] [--label=NAME]
   [--hardlinks] [--access-dates] ...` makes an empty ODS-2 or ODS-5 volume
   of any size from 8192 blocks, laid out as VMS V8.4's INITIALIZE does; the
-  image file must not exist.
+  image file must not exist. `--geometry=SECTORS,TRACKS` sets the disk geometry
+  the storage control block records (cylinders = ceil(blocks / (sectors x
+  tracks)), as VMS writes them; the default is 32 x 16, and 63 x 255 above
+  16 GiB so that the cylinder count stays below 65,536). VMS writes the geometry
+  of the device it initialized.
 
 **Names.** ODS-5 keeps the case of names and allows spaces, many dots,
 ISO Latin-1 and UCS-2 characters. `DIR` shows them the way DCL does,
@@ -590,8 +594,21 @@ in every structural test.
   and its index bitmap; an entry naming a file by a relative volume number (a volume set) is refused.
 - A directory is limited to 65,536 blocks (32 MiB of records), the most one
   contiguous extent is allowed here (it is held in memory while it changes), and directories nest at most 255
-  levels. A file with more than 1,024 extents, or a header chain with more than 64 segments, is refused
-  (read and delete) rather than handled partly.
+  levels (a VMS volume can hold more: V7.3-2 made 400). Reading has no such limit: `DIR [...]`, `EXPORT` and the
+  other readers follow a tree down to 4,096 levels (a bound on the C stack; a deeper tree is reported with the
+  directory's name and entry count, never cut silently). `EXPORT` copies what the host's 4,096-character path limit
+  allows and names every file or directory it could not copy (and counts the rest); the exit status is 1. On an
+  ODS-2 volume `CREATE/DIRECTORY` and `IMPORT` warn from the 8th level below [000000], which OpenVMS VAX V7.3
+  cannot reach (`%RMS-F-DIR`; Alpha V7.3-2 and later can). A file with more than 1,024 extents, or a header chain
+  with more than 64 segments, is refused (read and delete) rather than handled partly.
+- Mounting warns (`%ODS2-W-CHKSCB`, read only; the volume is used as before) when the storage control block is one
+  OpenVMS ANALYZE/DISK_STRUCTURE would call invalid: another structure level or cluster factor than the volume's,
+  a blocking factor of 0 (OpenVMS VAX V7.3 then fails with INTDIV; a SIMH RQ disk above about 26 GiB makes this),
+  or a geometry more than a cylinder from the volume size.
+- A disk container footer of the simh/simh simulator (the last 512 bytes, signature `simh`) is not volume data: it
+  is noted, never read or written. If it lies inside the volume (a 32-bit overflow on images of 4 GiB or more puts
+  it in the last data block) the volume is mounted read-only with a warning. No block at or past the volume size
+  (SCB$L_VOLSIZE) is ever written.
 
 ## Dependencies
 
