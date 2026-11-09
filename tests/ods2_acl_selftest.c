@@ -84,6 +84,16 @@ int main(void)
     ngot = 0;
     check("an ACE longer than the area is reported damaged", ods2_acl_walk(h, visit, NULL) == 1 && strstr(got[0], "damaged"));
 
+    /* AXP1SYS (V8.4-2L2) DEFSTYLE.DDIF, an APPLICATION ACE with the HIDDEN flag: VMS with SECURITY printed
+       (APPLICATION,SIZE=%D25,FLAGS=%X0E03,ACCESS=%X00010000,DATA=%X00140000,%X00010002,%X00000002,%X03010302,%X00000001) */
+    {
+        static const uint8_t app[25] = { 25, 7, 0x03, 0x0E, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x14, 0x00, 0x02, 0x00, 0x01, 0x00,
+                                         0x02, 0x00, 0x00, 0x00, 0x02, 0x03, 0x01, 0x03, 0x01 };
+        ngot = 0; memset(h, 0, 512); h[0] = 40; h[1] = 100; h[2] = 242; h[3] = 255; memcpy(h + 484, app, sizeof(app)); /* ACL area at 484: as in the AXP1SYS header */
+        check("an APPLICATION ACE is shown as VMS prints it (SECURITY privilege)", ods2_acl_walk(h, visit, NULL) == 1 &&
+              strcmp(got[0], "(APPLICATION,SIZE=%D25,FLAGS=%X0E03,ACCESS=%X00010000,DATA=%X00140000,%X00010002,%X00000002,%X03010302,%X00000001)") == 0);
+    }
+
     ods2_acl_format_id(0x80010001u, id, sizeof(id)); check("unnamed general identifier in hex", strcmp(id, "%X80010001") == 0);
 
 

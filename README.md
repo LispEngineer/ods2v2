@@ -413,10 +413,13 @@ $ ods2 vms-made.img "DIR/FULL [CORPUS.ACL]ACL1.TXT"
                       (IDENTIFIER=[200,1],ACCESS=READ+WRITE+EXECUTE+DELETE)
 ```
 
-Identifier, CREATOR, DEFAULT_PROTECTION, AUDIT and ALARM ACEs (also those continued in extension headers) are
-shown, with the options DEFAULT, PROTECTED and NOPROPAGATE. Identifiers are numbers, `[group,member]` in octal:
+Identifier, CREATOR, DEFAULT_PROTECTION, AUDIT, ALARM and APPLICATION ACEs (also those continued in extension headers)
+are shown, with the options DEFAULT, PROTECTED and NOPROPAGATE. Identifiers are numbers, `[group,member]` in octal:
 ods2v2 has no rights database, so `[USERS,USER1]` of VMS's listing is `[200,1]` here. An ACE of another kind (and
-HIDDEN) is shown as its bytes: `(ACE type N, flags %Xnnnn, data ..)`. ACLs are read, never written.
+an ACE with unusual flags) is shown as its bytes: `(ACE type N, flags %Xnnnn, data ..)`. An APPLICATION ACE
+(the hidden one DDIF files of a system disk carry) is shown as VMS prints it with the SECURITY privilege:
+`(APPLICATION,SIZE=%D25,FLAGS=%X0E03,ACCESS=%X00010000,DATA=%X...,%X...)`. VMS hides such an ACE (HIDDEN flag)
+from users without SECURITY; ods2 reads the disk with every privilege and shows it. ACLs are read, never written.
 
 **Records.** `TYPE` shows a sequential file the way VMS `TYPE` does (see "Record formats" above); a file with
 records, for example:
@@ -431,9 +434,11 @@ $ ods2 vms-made.img "DIR/FULL [CORPUS.RMS]SEQ_VFC.DAT"
 `TYPE/RAW` and `EXPORT` give the stored bytes, `EXPORT/RECORDS` the text, `TYPE/LINES` one line per record.
 
 **Limits.** No volume sets, no ODS levels 3, 4 or 6 (refused), no quota or journaling, no UCS-2 beyond the Basic
-Multilingual Plane in names, file numbers up to 65,535 (FID_NMX is not used). Rights identifiers are numbers (above);
-HIDDEN and SUBSYSTEM ACEs, and the combinations of print or FORTRAN carriage control with the stream record formats,
-have not been compared with VMS (the stream formats are always shown as lines). A directory whose end-of-file is
+Multilingual Plane in names. File numbers are 24 bits (FID_NMX << 16 | FID_NUM), as on VMS volumes with more
+than 65,535 files; an entry naming another volume of a set (a nonzero RVN) is refused. Rights identifiers are numbers (above);
+SUBSYSTEM ACEs, and the combinations of FORTRAN or print carriage control with the stream record formats that VMS
+accepts, have not been compared with VMS (the stream formats are always shown as lines; print control with a stream
+format is refused, as VMS does). A directory whose end-of-file is
 wrong (as old ods2v2 versions left them on ODS-2) is put right by the next write to it; other directory damage is not repaired.
 
 **Tested on.** Volumes written by ods2v2 (ODS-2 and ODS-5, also volumes it made with `ods2_init`) mount and pass
@@ -575,17 +580,18 @@ in every structural test.
   version 1 of a new name only.
 - `TYPE` and `DELETE` don't take wildcards yet, in file names or
   directories (VMS's do); only `DIR` does.
-- INDEXF.SYS is extended as new files need it, anywhere on a volume
-  of any size (Format 1 retrieval pointers below LBN 4,194,304,
-  Format 2 above it), up to what its own header's map area holds -
-  a few dozen extensions of up to 256 blocks (one header each), so
-  on the order of ten thousand files beyond the headers INITIALIZE
-  preallocated (`/HEADERS`). INDEXF.SYS extension headers aren't
-  written.
-- File numbers stop at 65,535 (the FID_NMX extension isn't used, also when a directory entry is checked against
-  the file header it names).
-- A directory is limited to 256 blocks (a few thousand entries), the
-  most one contiguous extent can map here.
+- INDEXF.SYS is extended as new files need it, anywhere on a volume of any size (Format 1 retrieval pointers
+  below LBN 4,194,304, Format 2 above it): by 256 blocks at a time while it is under 4,096 blocks, then by half
+  its size, at most 16,384 blocks (one Format 2 pointer). Only the pointers its own header's map area holds are
+  available (about 51 Format 2 ones: roughly 510,000 files, more if the early steps were small); past that new
+  files are refused ("no room for another extent") and nothing else is affected. INDEXF.SYS extension headers
+  are read (a VMS volume that has them mounts) but not yet written.
+- File numbers are 24 bits (up to 16,777,215, FID_NMX << 16 | FID_NUM), bounded by the volume's MAXIMUM_FILES
+  and its index bitmap; an entry naming a file by a relative volume number (a volume set) is refused.
+- A directory is limited to 65,536 blocks (32 MiB of records), the most one
+  contiguous extent is allowed here (it is held in memory while it changes), and directories nest at most 255
+  levels. A file with more than 1,024 extents, or a header chain with more than 64 segments, is refused
+  (read and delete) rather than handled partly.
 
 ## Dependencies
 

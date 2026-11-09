@@ -88,6 +88,20 @@ typedef struct {
     uint8_t  fid_nmx;   /* extension of fid_num (files > 65535) */
 } ods2_fid_t;
 
+/* The 24-bit file number of a FID: FID$W_NUM is the low 16 bits and FID$B_NMX the high 8 (a volume with more
+   than 65,535 files numbers them past 65535: file number = NMX << 16 | NUM). Every use of a FID as a file
+   number goes through these two, never fid_num alone. */
+static inline unsigned ods2_fid_number(ods2_fid_t f)
+{
+    return (unsigned) f.fid_num | ((unsigned) f.fid_nmx << 16);
+}
+
+static inline void ods2_fid_set_number(ods2_fid_t *f, unsigned number)
+{
+    f->fid_num = (uint16_t) (number & 0xffffu);
+    f->fid_nmx = (uint8_t) ((number >> 16) & 0xffu);
+}
+
 /* ----------------------------------------------------------------
  * Home Block (HOME2) - spec section 5.1.9. Exactly 512 bytes.
  * Two checksums: HM2$W_CHECKSUM1 covers the first 29 words (the

@@ -38,6 +38,7 @@
 #define ACE_TYPE_AUDIT 5u      /* AUDIT=class */
 #define ACE_TYPE_ALARM 6u      /* ALARM=class */
 #define ACE_TYPE_CREATOR 13u   /* CREATOR */
+#define ACE_TYPE_APPLICATION 7u /* APPLICATION (ACE$C_INFO): the text is VMS's own, measured on AXP1SYS (batch A) */
 #define ACE_FLAG_DEFAULT 0x0100u
 #define ACE_FLAG_PROTECTED 0x0200u
 #define ACE_FLAG_NOPROPAGATE 0x0800u
@@ -158,6 +159,22 @@ size_t ods2_acl_walk(const uint8_t *header, void (*visit)(void *, const char *),
             cls[cl] = '\0';
             format_access(rd32(header + o + 4), flags, 1, acc, sizeof(acc));
             snprintf(text, sizeof(text), "(%s=%s,ACCESS=%s)", type == ACE_TYPE_ALARM ? "ALARM" : "AUDIT", cls, acc);
+            done = true;
+        } else if (type == ACE_TYPE_APPLICATION && size >= 8) {
+            /* VMS, with SECURITY privilege (and DUMP/HEADER always; without the privilege the ACE is hidden, as
+               its HIDDEN flag says, and DIRECTORY prints nothing): (APPLICATION,SIZE=%D25,FLAGS=%X0E03,
+               ACCESS=%X00010000,DATA=%X00140000,%X00010002,...) - the size byte in decimal, the flags in hex, the
+               access longword at offset 4, then the rest as hex longwords, the last padded with zeros. This
+               program reads the disk with every privilege, so the ACE is shown. */
+            size_t k, n = appendf(text, sizeof(text), 0, "(APPLICATION,SIZE=%%D%u,FLAGS=%%X%04X,ACCESS=%%X%08X,DATA=",
+                                  size, flags, (unsigned) rd32(header + o + 4));
+            for (k = 8; k < size; k += 4) {
+                uint32_t w = 0;
+                size_t b;
+                for (b = 0; b < 4 && k + b < size; b++) w |= (uint32_t) header[o + k + b] << (8 * b);
+                n = appendf(text, sizeof(text), n, "%s%%X%08X", k > 8 ? "," : "", (unsigned) w);
+            }
+            appendf(text, sizeof(text), n, ")");
             done = true;
         } else if (type == ACE_TYPE_DEFPROT && size == 24 && flags == 0 && rd32(header + o + 4) == 0) {
             char s_[8], o_[8], g_[8], w_[8];

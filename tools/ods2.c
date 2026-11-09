@@ -445,10 +445,10 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
     }
     if (!ods2_header_is_file(header, e->fid)) {
         printf("  no such file (the entry's file, ID (%u,%u,%u), no longer exists)\n",
-               (unsigned) e->fid.fid_num, (unsigned) e->fid.fid_seq, (unsigned) e->fid.fid_rvn);
+               ods2_fid_number(e->fid), (unsigned) e->fid.fid_seq, (unsigned) e->fid.fid_rvn);
         return;
     }
-    printf("  File ID:            (%u,%u,%u)\n", (unsigned) e->fid.fid_num,
+    printf("  File ID:            (%u,%u,%u)\n", ods2_fid_number(e->fid),
            (unsigned) e->fid.fid_seq, (unsigned) e->fid.fid_rvn);
     if (!ods5_read_ident(header, &id, &why)) {
         printf("  (ident area not readable: %s)\n", why);
@@ -480,10 +480,10 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
         int guard;
         for (guard = 0; guard < 32; guard++) {
             const ods2_head_core_t *hc = (const ods2_head_core_t *) h;
-            unsigned next = hc->ext_fid.fid_num | ((unsigned) hc->ext_fid.fid_nmx << 16);
+            unsigned next = ods2_fid_number(hc->ext_fid);
             ods2_acl_walk(h, acl_print_line, &ap);
             if (next == 0 || !ods2_read_header(vol, next, ext).ok ||
-                ((const ods2_head_core_t *) ext)->fid.fid_num != hc->ext_fid.fid_num) break;
+                ods2_fid_number(((const ods2_head_core_t *) ext)->fid) != next) break;
             h = ext;
         }
     }
@@ -602,7 +602,7 @@ static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_d
                     printf("%s/%s;%u", slash, safe, entries[i].version);
                 }
                 if (g_paths_fid) {
-                    printf("\t%u,%u,%u", (unsigned) entries[i].fid.fid_num,
+                    printf("\t%u,%u,%u", ods2_fid_number(entries[i].fid),
                            (unsigned) entries[i].fid.fid_seq, (unsigned) entries[i].fid.fid_rvn);
                 }
                 printf("\n");
@@ -793,7 +793,7 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
            contains a "000000.DIR" entry pointing straight back at
            itself (FID (4,4), present on every ODS-2 volume). This is
            also why "[*]" never matches [000000], as on VMS. */
-        if (entries[i].fid.fid_num == dir_fid.fid_num &&
+        if (ods2_fid_number(entries[i].fid) == ods2_fid_number(dir_fid) &&
             entries[i].fid.fid_seq == dir_fid.fid_seq) {
             continue;
         }
@@ -846,7 +846,7 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
         {
             int d, loop = -1;
             for (d = 0; d <= depth; d++) {
-                if (w->path_fid[d].fid_num == entries[i].fid.fid_num &&
+                if (ods2_fid_number(w->path_fid[d]) == ods2_fid_number(entries[i].fid) &&
                     w->path_fid[d].fid_seq == entries[i].fid.fid_seq) {
                     loop = d;
                     break;
@@ -937,7 +937,7 @@ typedef struct {
     bool lines;               /* /LINES: ignore the files' carriage control, one line per record */
     const char *start;        /* the start directory's spelling (tree mode) */
     int files, symlinks, dirs_skipped, specials_skipped, errors;
-    struct seen_fid { uint16_t num, seq; char *path; } *seen;
+    struct seen_fid { unsigned num; uint16_t seq; char *path; } *seen;
     size_t seen_count, seen_cap;
 } export_ctx_t;
 
@@ -1221,7 +1221,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
 
     if (x->links) {
         for (i = 0; i < x->seen_count; i++) {
-            if (x->seen[i].num == e->fid.fid_num && x->seen[i].seq == e->fid.fid_seq) {
+            if (x->seen[i].num == ods2_fid_number(e->fid) && x->seen[i].seq == e->fid.fid_seq) {
                 if (link(x->seen[i].path, path) == 0) { x->files++; return; }
                 break;
             }
@@ -1264,7 +1264,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
                 x->seen = g;
                 x->seen_cap = nc;
             }
-            x->seen[x->seen_count].num = e->fid.fid_num;
+            x->seen[x->seen_count].num = ods2_fid_number(e->fid);
             x->seen[x->seen_count].seq = e->fid.fid_seq;
             x->seen[x->seen_count].path = strdup(path);
             if (x->seen[x->seen_count].path != NULL) x->seen_count++;
@@ -2144,14 +2144,14 @@ static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods
         report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
         return;
     }
-    r = ods2_create_link(vol, dir_fid.fid_num, literal, target_fid);
+    r = ods2_create_link(vol, ods2_fid_number(dir_fid), literal, target_fid);
     if (!r.ok) {
         report_error("%%ODS2-E-LINK, %s\n", r.problem);
         return;
     }
     printf("%%ODS2-I-LINKED, %s;1 is %s file (%u,%u,%u)\n", np->filename,
            (vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS)) ? "a link to" : "an alias of",
-           (unsigned) target_fid.fid_num, (unsigned) target_fid.fid_seq, (unsigned) target_fid.fid_rvn);
+           ods2_fid_number(target_fid), (unsigned) target_fid.fid_seq, (unsigned) target_fid.fid_rvn);
 }
 
 /* IMPORT <linux-directory> <path>: copies a Linux directory tree onto the
@@ -2245,7 +2245,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
                 }
                 st->dirs++;
             }
-            import_tree(st, path, fid.fid_num, depth + 1);
+            import_tree(st, path, ods2_fid_number(fid), depth + 1);
         } else if (S_ISREG(sb.st_mode)) {
             host_input_t in;
             ods2_content_source_t src;
@@ -2329,7 +2329,7 @@ static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods
         report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
         return;
     }
-    import_tree(&st, local_dir, dir_fid.fid_num, 0);
+    import_tree(&st, local_dir, ods2_fid_number(dir_fid), 0);
     printf("%%ODS2-I-IMPORTED, %d file%s (%llu bytes), %d director%s, %d symbolic link%s imported "
            "from %s; %d skipped, %d error%s\n", st.files, st.files == 1 ? "" : "s", st.bytes,
            st.dirs, st.dirs == 1 ? "y" : "ies", st.links, st.links == 1 ? "" : "s", local_dir,
@@ -2637,7 +2637,7 @@ static void cmd_delete(ods2_volume_t *vol, const ods2_parsed_path_t *p)
        ";*" every version - highest first, until none remain. */
     do {
         ods2_delete_info_t info;
-        r = ods2_delete_version_info(vol, dir_fid.fid_num, name,
+        r = ods2_delete_version_info(vol, ods2_fid_number(dir_fid), name,
                                      p->version_wildcard ? ODS2_VERSION_HIGHEST : version,
                                      &deleted_version, &info);
         if (!r.ok) break;
