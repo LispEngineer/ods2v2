@@ -195,6 +195,10 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
 
     vol->indexf_extent_count = decode_header_extents(indexf_header,
         vol->indexf_extents, ODS2_MAX_EXTENTS);
+    if (vol->indexf_extent_count == ODS2_DECODE_TOO_MANY) {
+        ods2_dismount(vol);
+        return fail("INDEXF.SYS has more extents than ods2v2 can hold (1024): the volume is not mounted");
+    }
     if (vol->indexf_extent_count <= 0) {
         ods2_dismount(vol);
         return fail("could not decode INDEXF.SYS's own retrieval pointers");
@@ -217,6 +221,10 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
             if (!extension_header_ok(next, core->ext_fid, 1, (unsigned) segment + 1)) break;
             n = decode_header_extents(next, vol->indexf_extents + vol->indexf_extent_count,
                                       (size_t) (ODS2_MAX_EXTENTS - vol->indexf_extent_count));
+            if (n == ODS2_DECODE_TOO_MANY) {
+                ods2_dismount(vol);
+                return fail("INDEXF.SYS has more extents than ods2v2 can hold (1024): the volume is not mounted");
+            }
             if (n <= 0) break;
             vol->indexf_extent_count += n;
             memcpy(current, next, sizeof(current));
@@ -263,11 +271,131 @@ static void fault_point(void)
 #define fault_point() ((void) 0)
 #endif
 
-ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block)
+/* --- changes are made in memory first (review: F1, a refused DELETE had already written) ---
+
+   A write to the volume made while a change is open (txn_begin() ... txn_end()) is kept in memory, in order,
+   and a read of that block sees it. txn_end() writes them to the image, in the order they were made, only if
+   the operation succeeded; if it failed, they are dropped and the image is as it was (INDEXF.SYS's cached
+   extents are put back too). So nothing that can fail after the first write can leave a half-done change:
+   what is left to fail at commit is the write itself (an I/O error). The order of the writes at commit is the
+   order the operation made them, which is the order the crash-safety rules need (a marked header before the
+   entry goes, a final header before blocks are freed ...). File content written by write_extents() goes
+   straight to free clusters and is done after everything else that can fail (create_file). */
+typedef struct {
+    uint32_t lbn;
+    uint8_t  data[512];
+} txn_write_t;
+
+struct ods2_txn {
+    txn_write_t  *w;
+    size_t        n, cap;
+    size_t       *table;       /* open addressing: index + 1 of the latest write of an lbn, 0 = empty */
+    size_t        table_cap;   /* a power of two */
+    ods2_extent_t saved_extents[ODS2_MAX_EXTENTS];
+    int           saved_extent_count;
+};
+
+static size_t txn_slot(const struct ods2_txn *t, uint32_t lbn)
 {
-    if (!vol->writable) {
-        return not_writable(vol);
+    size_t h = ((size_t) lbn * 2654435761u) & (t->table_cap - 1);
+    while (t->table[h] != 0 && t->w[t->table[h] - 1].lbn != lbn) h = (h + 1) & (t->table_cap - 1);
+    return h;
+}
+
+static bool txn_grow_table(struct ods2_txn *t)
+{
+    size_t cap = t->table_cap ? t->table_cap * 2 : 256, i;
+    size_t *table = calloc(cap, sizeof(*table));
+    if (table == NULL) return false;
+    free(t->table);
+    t->table = table;
+    t->table_cap = cap;
+    for (i = 0; i < t->n; i++) t->table[txn_slot(t, t->w[i].lbn)] = i + 1;
+    return true;
+}
+
+static const uint8_t *txn_find(const ods2_volume_t *vol, uint32_t lbn)
+{
+    const struct ods2_txn *t = vol->txn;
+    if (t == NULL || t->n == 0) return NULL;
+    {
+        size_t at = t->table[txn_slot(t, lbn)];
+        return at != 0 ? t->w[at - 1].data : NULL;
     }
+}
+
+static ods2_result_t txn_add(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block)
+{
+    struct ods2_txn *t = vol->txn;
+    if (t->n == t->cap) {
+        size_t cap = t->cap ? t->cap * 2 : 64;
+        txn_write_t *w = realloc(t->w, cap * sizeof(*w));
+        if (w == NULL) return fail("out of memory keeping a change of the volume");
+        t->w = w;
+        t->cap = cap;
+    }
+    if ((t->n + 1) * 2 > t->table_cap && !txn_grow_table(t)) return fail("out of memory keeping a change of the volume");
+    t->w[t->n].lbn = lbn;
+    memcpy(t->w[t->n].data, block, 512);
+    t->n++;
+    t->table[txn_slot(t, lbn)] = t->n;
+    return ok();
+}
+
+/* Reads a block as the change in progress sees it. */
+static ods2_result_t read_block(ods2_volume_t *vol, uint32_t lbn, uint8_t *out, const char *why)
+{
+    const uint8_t *pending = txn_find(vol, lbn);
+    if (pending != NULL) {
+        memcpy(out, pending, 512);
+        return ok();
+    }
+    if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 || fread(out, 1, 512, vol->fp) != 512) {
+        return fail(why);
+    }
+    return ok();
+}
+
+static void txn_begin(ods2_volume_t *vol)
+{
+    if (!vol->writable) return;
+    if (vol->txn_depth++ == 0) {
+        vol->txn = calloc(1, sizeof(*vol->txn));
+        if (vol->txn != NULL) {
+            memcpy(vol->txn->saved_extents, vol->indexf_extents, sizeof(vol->txn->saved_extents));
+            vol->txn->saved_extent_count = vol->indexf_extent_count;
+        }
+    }
+}
+
+static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block);
+
+/* The end of a change: written if `r` says it succeeded, dropped if not. Returns `r`, or the failure of a write
+   at commit. A nested change commits or drops with the outermost one. */
+static ods2_result_t txn_end(ods2_volume_t *vol, ods2_result_t r)
+{
+    struct ods2_txn *t;
+    size_t i;
+
+    if (!vol->writable) return r;
+    if (--vol->txn_depth > 0) return r;
+    t = vol->txn;
+    vol->txn = NULL;
+    if (t == NULL) return r;
+    if (r.ok) {
+        for (i = 0; i < t->n && r.ok; i++) r = raw_write_block(vol, t->w[i].lbn, t->w[i].data);
+    } else {
+        memcpy(vol->indexf_extents, t->saved_extents, sizeof(t->saved_extents));
+        vol->indexf_extent_count = t->saved_extent_count;
+    }
+    free(t->w);
+    free(t->table);
+    free(t);
+    return r;
+}
+
+static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block)
+{
     if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
         fwrite(block, 1, 512, vol->fp) != 512) {
         return fail("could not write block");
@@ -277,6 +405,15 @@ ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *
     }
     fault_point();
     return ok();
+}
+
+ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block)
+{
+    if (!vol->writable) {
+        return not_writable(vol);
+    }
+    if (vol->txn != NULL) return txn_add(vol, lbn, block);
+    return raw_write_block(vol, lbn, block);
 }
 
 ods2_result_t ods2_sync(ods2_volume_t *vol)
@@ -342,11 +479,7 @@ ods2_result_t ods2_read_header(ods2_volume_t *vol, unsigned file_number, uint8_t
     if (!header_lbn(vol, file_number, &lbn)) {
         return fail("file number's header VBN is not covered by INDEXF.SYS's known extents");
     }
-    if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
-        fread(header_out, 1, 512, vol->fp) != 512) {
-        return fail("could not read file header block");
-    }
-    return ok();
+    return read_block(vol, lbn, header_out, "could not read file header block");
 }
 
 ods2_result_t ods2_write_header(ods2_volume_t *vol, unsigned file_number, const uint8_t *header_in)
@@ -374,11 +507,7 @@ ods2_result_t ods2_read_file_block(ods2_volume_t *vol, const uint8_t *header,
     if (!vbn_to_lbn(extents, n, vbn, &lbn)) {
         return fail("requested VBN is not covered by this file's extents");
     }
-    if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
-        fread(block_out, 1, 512, vol->fp) != 512) {
-        return fail("could not read file content block");
-    }
-    return ok();
+    return read_block(vol, lbn, block_out, "could not read file content block");
 }
 
 ods2_result_t ods2_write_file_block(ods2_volume_t *vol, const uint8_t *header,
@@ -554,6 +683,11 @@ ods2_result_t ods2_decode_all_extents(ods2_volume_t *vol, const uint8_t *header,
                                        extents_out + total,
                                        (max_extents > (size_t) total)
                                            ? max_extents - (size_t) total : 0);
+        if (n == ODS2_DECODE_TOO_MANY) {
+            /* never a shortened list: a reader would stop short of the file's end, a delete would free only
+               the extents it was given and leak the rest */
+            return fail("this file has more extents than ods2v2 can hold (1024): refused");
+        }
         if (n < 0) {
             return fail("could not decode retrieval pointers for a header segment");
         }
@@ -931,16 +1065,15 @@ static ods2_result_t mark_index_bitmap(ods2_volume_t *vol, unsigned file_number,
     unsigned bit_in_byte = bit_in_block % 8;
     uint32_t lbn;
     uint8_t block[512];
+    ods2_result_t r;
 
     if (block_index >= vol->home.ibmapsize) {
         return fail("file number is beyond the index bitmap's own extent");
     }
     lbn = vol->home.ibmaplbn + block_index;
 
-    if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
-        fread(block, 1, 512, vol->fp) != 512) {
-        return fail("could not read index bitmap block");
-    }
+    r = read_block(vol, lbn, block, "could not read index bitmap block");
+    if (!r.ok) return r;
 
     /* Deliberately NOT using ods2_bitmap_mark() here - that helper
        implements the STORAGE bitmap's convention (set=free), and the
@@ -1019,11 +1152,7 @@ static ods2_result_t read_index_bitmap_block(ods2_volume_t *vol, unsigned block_
                                              uint8_t *block)
 {
     uint32_t lbn = vol->home.ibmaplbn + block_index;
-    if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
-        fread(block, 1, 512, vol->fp) != 512) {
-        return fail("could not read index bitmap block");
-    }
-    return ok();
+    return read_block(vol, lbn, block, "could not read index bitmap block");
 }
 
 /* Highest file number marked in use in the index file bitmap, or 0. */
@@ -1135,6 +1264,9 @@ static ods2_result_t write_indexf_header(ods2_volume_t *vol, uint8_t *indexf_hea
         if (!r.ok) return r;
     }
     count = decode_header_extents(indexf_header, vol->indexf_extents, ODS2_MAX_EXTENTS);
+    if (count == ODS2_DECODE_TOO_MANY) {
+        return fail("INDEXF.SYS would need more extents than ods2v2 can hold (1024)");
+    }
     if (count <= 0) {
         return fail("INDEXF.SYS's header no longer decodes after updating it");
     }
@@ -1560,8 +1692,18 @@ static ods2_result_t directory_ready(ods2_volume_t *vol, const uint8_t *dir_head
     return ok();
 }
 
+static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *parent_header,
+                                           const char *name, ods2_fid_t *new_fid_out);
+
 ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_header,
                                      const char *name, ods2_fid_t *new_fid_out)
+{
+    txn_begin(vol);
+    return txn_end(vol, create_directory_impl(vol, parent_header, name, new_fid_out));
+}
+
+static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *parent_header,
+                                           const char *name, ods2_fid_t *new_fid_out)
 {
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
     char dirname[ODS5_MAX_LITERAL_NAME + 8];
@@ -1924,8 +2066,18 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
     return create_file(vol, parent_header, name, src, attrs, 0, new_fid_out);
 }
 
+static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
+                                      ods2_fid_t target);
+
 ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
                                ods2_fid_t target)
+{
+    txn_begin(vol);
+    return txn_end(vol, create_link_impl(vol, dir_file_number, name, target));
+}
+
+static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
+                                      ods2_fid_t target)
 {
     uint8_t dir_header[512], target_header[512];
     ods2_head_core_t *core = (ods2_head_core_t *) target_header;
@@ -2083,10 +2235,24 @@ ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
     }
 }
 
+static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_header,
+                                      const char *name, ods2_content_source_t *src,
+                                      const ods2_record_attrs_t *attrs, unsigned special,
+                                      ods2_fid_t *new_fid_out);
+
 static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_header,
                                  const char *name, ods2_content_source_t *src,
                                  const ods2_record_attrs_t *attrs, unsigned special,
                                  ods2_fid_t *new_fid_out)
+{
+    txn_begin(vol);
+    return txn_end(vol, create_file_impl(vol, parent_header, name, src, attrs, special, new_fid_out));
+}
+
+static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_header,
+                                      const char *name, ods2_content_source_t *src,
+                                      const ods2_record_attrs_t *attrs, unsigned special,
+                                      ods2_fid_t *new_fid_out)
 {
     size_t content_len = src->length;
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
@@ -2234,10 +2400,6 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
         if (!r.ok) goto undo;
         numbered++;
     }
-    /* The content goes down before any header refers to it. */
-    r = write_extents(vol, extents, extent_count, src);
-    if (!r.ok) goto undo;
-
     memset(&spec, 0, sizeof(spec));
     spec.level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
     spec.link_count = (vol->home.volchar & ODS5_VC_HARDLINKS) ? 1 : 0;
@@ -2305,6 +2467,13 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
     r = insert_into_directory(vol, parent_core->fid.fid_num, name, 1, spec.fid,
                               special != 0 ? ODS5_DIR_SPECIAL : 0);
     if (!r.ok) goto undo;   /* no directory entry: give the headers, blocks and file numbers back */
+
+    /* The content goes to the free clusters last, when nothing else can fail: the structure (bitmaps, headers,
+       entry) is still only in memory, and reaches the image after this, in the order the crash-safety rules
+       need - so the content is on the disk before any header refers to it, and a refused copy has not
+       written a byte. */
+    r = write_extents(vol, extents, extent_count, src);
+    if (!r.ok) goto undo;
 
     *new_fid_out = spec.fid;
     return ok();
@@ -2563,7 +2732,10 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
 ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
                                           const char *name, uint16_t version, ods2_fid_t fid)
 {
-    return insert_into_directory(vol, dir_file_number, name, version, fid, 0);
+    ods2_result_t r;
+    txn_begin(vol);
+    r = insert_into_directory(vol, dir_file_number, name, version, fid, 0);
+    return txn_end(vol, r);
 }
 
 static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
@@ -2780,9 +2952,21 @@ static bool is_reserved_file(const ods2_volume_t *vol, unsigned dir_file_number,
     return false;
 }
 
+static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_number,
+                                         const char *name, int version, uint16_t *version_out,
+                                         ods2_delete_info_t *info);
+
 ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_number,
                                        const char *name, int version, uint16_t *version_out,
                                        ods2_delete_info_t *info)
+{
+    txn_begin(vol);
+    return txn_end(vol, delete_version_impl(vol, dir_file_number, name, version, version_out, info));
+}
+
+static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_number,
+                                         const char *name, int version, uint16_t *version_out,
+                                         ods2_delete_info_t *info)
 {
     uint16_t target_version;
     uint8_t dir_header[512];
@@ -3223,8 +3407,7 @@ ods2_result_t ods2_volume_space(ods2_volume_t *vol, uint64_t *total_blocks_out,
         uint32_t b;
         for (b = 0; b < extents[i].block_count; b++, vbn++) {
             uint32_t k;
-            if (fseek(vol->fp, (long) (extents[i].lbn + b) * 512, SEEK_SET) != 0 ||
-                fread(block, 1, 512, vol->fp) != 512) {
+            if (!read_block(vol, extents[i].lbn + b, block, "could not read BITMAP.SYS").ok) {
                 return fail("could not read BITMAP.SYS");
             }
             if (vbn == 1) {

@@ -445,6 +445,11 @@ static void test_fragmented(void)
         assert(ods2_read_header(&vol, primary.fid_num, h).ok);
         assert(ods2_decode_all_extents(&vol, h, ext, ODS2_MAX_EXTENTS, &n).ok);
         assert(n == total_extents);
+        /* more extents than the caller's array is an error, never a shortened list (a delete would free only
+           those and leak the rest, an EXPORT would stop short): LARGE_VOLUMES.md section 6 */
+        r = ods2_decode_all_extents(&vol, h, ext, (size_t) total_extents - 1, &n);
+        assert(!r.ok && strstr(r.problem, "more extents") != NULL);
+        assert(ods2_decode_all_extents(&vol, h, ext, (size_t) total_extents, &n).ok && n == total_extents);
     }
     read_back_and_compare(&vol, primary.fid_num, content, len);
     ods2_dismount(&vol);

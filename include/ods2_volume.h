@@ -57,6 +57,12 @@ typedef struct {
        INDEXF.SYS's own content, which is what this enables). */
     ods2_extent_t  indexf_extents[ODS2_MAX_EXTENTS];
     int            indexf_extent_count;
+    /* A change to the volume (a delete, a create, a link) is made in memory first and written when it is
+       known to succeed: every check that can fail runs before the first write to the image, so a refused
+       or failed operation leaves the image byte for byte as it was (see txn_begin() in ods2_volume.c).
+       Not for callers to touch. */
+    struct ods2_txn *txn;
+    int            txn_depth;
 } ods2_volume_t;
 
 typedef struct {
