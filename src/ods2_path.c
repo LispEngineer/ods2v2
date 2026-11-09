@@ -24,6 +24,7 @@
 
 #include "ods2_path.h"
 #include "ods2_wildcard.h"
+#include "ods5_names.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -35,7 +36,8 @@
 bool ods2_split_version(char *name, bool *has_version, bool *version_wildcard,
                         int *version)
 {
-    char *semi = strchr(name, ';');
+    /* the version follows the first ';' that is not escaped (^;) */
+    char *semi = (char *) ods5_find_unescaped(name, ';');
     const char *v;
     bool negative = false;
     long value = 0;
@@ -95,7 +97,7 @@ bool ods2_parse_path(const char *input, ods2_parsed_path_t *out)
         return false;
     }
 
-    open_bracket = strchr(input, '[');
+    open_bracket = ods5_find_unescaped(input, '[');
     if (open_bracket == NULL) {
         /* No brackets at all - the whole thing is a filename/wildcard,
            implicitly relative to whatever the caller's current
@@ -108,11 +110,11 @@ bool ods2_parse_path(const char *input, ods2_parsed_path_t *out)
     }
     out->had_brackets = true;
 
-    close_bracket = strchr(open_bracket, ']');
+    close_bracket = ods5_find_unescaped(open_bracket + 1, ']');
     if (close_bracket == NULL) {
         return false; /* unmatched '[' */
     }
-    if (strchr(close_bracket + 1, '[') != NULL) {
+    if (ods5_find_unescaped(close_bracket + 1, '[') != NULL) {
         return false; /* more than one bracketed section - not supported */
     }
 

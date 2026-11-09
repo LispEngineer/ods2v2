@@ -23,57 +23,25 @@
  */
 
 #include "ods2_wildcard.h"
+#include "ods5_names.h"
 #include <ctype.h>
 #include <stddef.h>
 #include <string.h>
 
-static int upper(char c)
-{
-    return toupper((unsigned char) c);
-}
-
 bool ods2_wildcard_match(const char *pattern, const char *name)
 {
-    const char *p = pattern;
-    const char *n = name;
-    const char *star_p = NULL; /* pattern position right after the last '*' seen */
-    const char *star_n = NULL; /* name position to resume trying from */
-
-    while (*n) {
-        if (*p == '%' || (*p && upper(*p) == upper(*n))) {
-            /* '%' matches exactly one character, or literal match */
-            p++;
-            n++;
-        } else if (*p == '*') {
-            /* Remember this position; try matching zero characters
-               first, backtrack to consume one more from `name` on
-               failure. */
-            star_p = p + 1;
-            star_n = n;
-            p++;
-        } else if (star_p != NULL) {
-            /* Mismatch, but we have a previous '*' to backtrack to:
-               let it consume one more character from name. */
-            p = star_p;
-            star_n++;
-            n = star_n;
-        } else {
-            return false;
-        }
-    }
-    /* Consume any trailing '*' characters in the pattern - they can
-       always match the empty remainder. */
-    while (*p == '*') p++;
-
-    return *p == '\0';
+    /* One matcher for ODS-2 and ODS-5 names: '*', '%' and '?' as wildcards,
+       ^-escapes literal, case-blind, a character being a whole UTF-8
+       character (ods5_names.h). */
+    return ods5_wildcard_match(pattern, name);
 }
 
 /* --- Directory specifications (see ods2_wildcard.h) --- */
 
 /* Deeper than any real volume: VMS allows 8 directory levels, and
    ellipses only shorten what has to be written down. */
-#define MAX_DIR_TOKENS 64
-#define MAX_DIR_NAME   128
+#define MAX_DIR_TOKENS 256
+#define MAX_DIR_NAME   768
 
 typedef struct {
     bool ellipsis;              /* "..." rather than a name */
@@ -115,10 +83,22 @@ static int tokenize_dir(const char *s, dir_token_t *toks, bool allow_ellipsis)
             size_t len = 0;
             toks[n].ellipsis = false;
             toks[n].start = s + i;
-            while (s[i + len] != '\0' && s[i + len] != '.') len++;
+            /* a '.' ends the name unless escaped (^.); the character after
+               a ^ is part of the name whatever it is */
+            while (s[i + len] != '\0' && s[i + len] != '.') {
+                if (s[i + len] == '^' && s[i + len + 1] != '\0') len++;
+                len++;
+            }
             if (len >= MAX_DIR_NAME) return -1;
             memcpy(toks[n].name, s + i, len);
             toks[n].name[len] = '\0';
+            /* A concrete path's names are literal: the characters their
+               spellings stand for, to be matched against a spec's pattern. */
+            if (!allow_ellipsis) {
+                char literal[MAX_DIR_NAME];
+                size_t k = ods5_unescape(toks[n].name, len, literal, sizeof(literal));
+                if (k != (size_t) -1) memcpy(toks[n].name, literal, k + 1);
+            }
             n++;
             i += len;
         }
@@ -162,10 +142,26 @@ bool ods2_dir_spec_valid(const char *spec)
     return tokenize_dir(spec, toks, true) >= 0;
 }
 
+/* '*', '%' or '?' that is not escaped by a ^. */
+static bool name_has_wildcard(const char *s)
+{
+    for (; *s; s++) {
+        if (*s == '^' && s[1] != '\0') { s++; continue; }
+        if (*s == '*' || *s == '%' || *s == '?') return true;
+    }
+    return false;
+}
+
 bool ods2_dir_spec_has_wildcard(const char *spec)
 {
-    return strchr(spec, '*') != NULL || strchr(spec, '%') != NULL ||
-           strstr(spec, "...") != NULL;
+    /* an ellipsis is three dots; ^. is a literal one, and the
+       character after a ^ never starts one */
+    const char *s;
+    for (s = spec; *s; s++) {
+        if (*s == '^' && s[1] != '\0') { s++; continue; }
+        if (s[0] == '.' && s[1] == '.' && s[2] == '.') return true;
+    }
+    return name_has_wildcard(spec);
 }
 
 bool ods2_dir_spec_match(const char *spec, const char *path)

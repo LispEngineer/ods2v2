@@ -24,6 +24,7 @@
 
 #include "ods2_volume.h"
 #include "ods2_validate.h"
+#include "ods5_ondisk.h"
 #include "ods2_bitmap.h"
 #include "ods2_header_build.h"
 #include "ods2_directory_write.h"
@@ -486,9 +487,11 @@ static ods2_result_t walk_directory(ods2_volume_t *vol, const uint8_t *dir_heade
         r = ods2_read_file_block(vol, dir_header, block_index, block);
         if (!r.ok) return r;
 
-        n = ods2_parse_directory(block, sizeof(block), block_entries,
-                                  ODS2_DIR_MAX_ENTRIES_PER_BLOCK);
+        n = ods2_parse_directory_level(block, sizeof(block),
+                                       vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2,
+                                       block_entries, ODS2_DIR_MAX_ENTRIES_PER_BLOCK);
         if (n < 0) {
+            vol->dir_block_errors++;
             /* Malformed block content is a real problem, but an
                entirely EMPTY block (all zero, size word 0x0000) just
                means "no more entries in this particular block" for a
@@ -1242,7 +1245,7 @@ ods2_result_t ods2_lookup_name_version(ods2_volume_t *vol, const uint8_t *dir_he
 ods2_result_t ods2_lookup_path(ods2_volume_t *vol, const char *path, ods2_fid_t *fid_out)
 {
     ods2_fid_t current;
-    char component[256];
+    char component[ODS2_DIR_MAX_NAME + 8];
     const char *p = path;
 
     /* Root directory's FID is always (4,4) - not a magic constant,
@@ -1262,13 +1265,21 @@ ods2_result_t ods2_lookup_path(ods2_volume_t *vol, const char *path, ods2_fid_t 
     while (*p) {
         uint8_t header[512];
         ods2_result_t r;
-        size_t len = 0;
+        size_t len = 0, ulen;
+        char spelling[ODS2_DIR_MAX_NAME * 3 + 8];
 
-        while (*p && *p != '.' && len < sizeof(component) - 5) {
-            component[len++] = *p++;
+        /* One directory name, written as a spelling: a '.' only ends it
+           if it is not escaped (^.), and ^-escapes name the characters. */
+        while (*p && *p != '.' && len < sizeof(spelling) - 1) {
+            if (*p == '^' && p[1] != '\0' && len < sizeof(spelling) - 3) {
+                spelling[len++] = *p++;
+            }
+            spelling[len++] = *p++;
         }
-        component[len] = '\0';
+        spelling[len] = '\0';
         if (*p == '.') p++;
+        ulen = ods5_unescape(spelling, len, component, sizeof(component) - 5);
+        if (ulen == (size_t) -1) return fail("bad ^ escape in a directory name");
 
         r = ods2_read_header(vol, current.fid_num, header);
         if (!r.ok) return r;

@@ -23,6 +23,7 @@
  */
 
 #include "ods2_directory.h"
+#include "ods5_ondisk.h"
 #include <string.h>
 
 static uint16_t read_word(const uint8_t *p)
@@ -33,12 +34,19 @@ static uint16_t read_word(const uint8_t *p)
 int ods2_parse_directory(const uint8_t *data, size_t len,
                           ods2_dir_entry_t *entries_out, size_t max_entries)
 {
+    return ods2_parse_directory_level(data, len, ODS5_LEVEL_2, entries_out, max_entries);
+}
+
+int ods2_parse_directory_level(const uint8_t *data, size_t len, unsigned level,
+                               ods2_dir_entry_t *entries_out, size_t max_entries)
+{
     size_t pos = 0;
     size_t count = 0;
 
     while (pos + 6 <= len) {
         uint16_t size = read_word(data + pos);
         uint16_t namecount;
+        uint8_t flags;
         size_t name_start, name_end, entry_start, record_total;
 
         if (size == 0xffff) {
@@ -64,6 +72,14 @@ int ods2_parse_directory(const uint8_t *data, size_t len,
         }
 
         namecount = data[pos + 5];
+        flags = data[pos + 4];
+        if (level == ODS5_LEVEL_5 &&
+            (flags & ODS5_DIR_TYPE_MASK) == ODS5_DIR_TYPE_LINKNAME) {
+            /* a link name record holds a name, not version/FID pairs:
+               not a file entry */
+            pos += record_total;
+            continue;
+        }
         name_start = pos + 6;
         name_end = name_start + namecount;
         if (name_end > len) {
@@ -85,12 +101,31 @@ int ods2_parse_directory(const uint8_t *data, size_t len,
             size_t record_end = pos + record_total;
             size_t e;
             size_t copy_len = namecount;
-            if (copy_len > ODS2_DIR_MAX_NAME) copy_len = ODS2_DIR_MAX_NAME;
+            char converted[ODS2_DIR_MAX_NAME + 1];
+            unsigned name_type = 0;
+            const char *name_text = (const char *) (data + name_start);
+
+            if (level == ODS5_LEVEL_5) {
+                name_type = (flags & ODS5_DIR_NAMETYPE_MASK) >> ODS5_DIR_NAMETYPE_SHIFT;
+                if (name_type == ODS5_NAME_UCS2) {
+                    copy_len = ods5_ucs2_to_utf8(data + name_start, namecount,
+                                                 converted, sizeof(converted));
+                } else {
+                    copy_len = ods5_isl1_to_utf8(data + name_start, namecount,
+                                                 converted, sizeof(converted));
+                }
+                if (copy_len == (size_t) -1) return -1;
+                name_text = converted;
+            } else if (copy_len > ODS2_DIR_MAX_NAME) {
+                copy_len = ODS2_DIR_MAX_NAME;
+            }
 
             for (e = entry_start; e + 8 <= record_end; e += 8) {
                 if (count < max_entries) {
-                    memcpy(entries_out[count].name, data + name_start, copy_len);
+                    memcpy(entries_out[count].name, name_text, copy_len);
                     entries_out[count].name[copy_len] = '\0';
+                    entries_out[count].flags = (level == ODS5_LEVEL_5) ? flags : 0;
+                    entries_out[count].name_type = (uint8_t) name_type;
 
                     entries_out[count].version = read_word(data + e);
                     entries_out[count].fid.fid_num = read_word(data + e + 2);

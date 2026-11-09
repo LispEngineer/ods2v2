@@ -120,6 +120,7 @@
 #include "ods2_text_var.h"
 #include "ods2_validate.h"
 #include "ods5_ondisk.h"
+#include "ods5_names.h"
 
 #define MAX_LINE 1024
 #define MAX_TOKENS 8
@@ -131,6 +132,13 @@
    single-threaded, single-volume interactive tool - there is exactly
    one "current session" for it to belong to. */
 static char g_default_dir[ODS2_PATH_MAX] = "";
+
+/* ODS-5 volumes keep the case of names, and show names the way DCL does
+   (^-escapes); g_ods5 is set when the mounted volume is ODS-5.
+   g_utf8_names (DIR/UTF8, SET NAMES UTF8, ODS2_NAMES=utf8) shows the
+   names as UTF-8 instead, for use on Linux. */
+static bool g_ods5 = false;
+static bool g_utf8_names = false;
 
 /* Set by report_error(): some command since the last reset failed.
    main() turns it into the exit status of a single-shot command or an
@@ -245,7 +253,7 @@ static void resolve_effective_path(const ods2_parsed_path_t *p, char *out, size_
     if (p->up_levels > 0) {
         int levels_to_strip = p->up_levels;
         while (levels_to_strip > 0 && base[0] != '\0') {
-            char *last_dot = strrchr(base, '.');
+            char *last_dot = (char *) ods5_rfind_unescaped(base, '.');
             if (last_dot != NULL) {
                 *last_dot = '\0';
             } else {
@@ -271,7 +279,7 @@ static void resolve_effective_path(const ods2_parsed_path_t *p, char *out, size_
         snprintf(out, out_size, "%s", p->dir_path);
     }
 
-    uppercase_display_path(out);
+    if (!g_ods5) uppercase_display_path(out);
 }
 
 /* Resolves a parsed path's directory component to a header. Every
@@ -320,6 +328,28 @@ static bool version_selected(const ods2_parsed_path_t *p, const ods2_dir_entry_t
     return rank == -p->version; /* 0 = highest, -1 = next lower, ... */
 }
 
+/* A file name as shown to the user: with VMS's ^-escapes, as DCL
+   writes it (a space is ^_, a dot that is not the type delimiter is ^.,
+   a character above U+00FF is ^Uxxxx), or as plain UTF-8 under /UTF8. */
+static void display_name(const char *literal, char *out, size_t cap)
+{
+    if (g_utf8_names ||
+        ods5_escape_name(literal, ODS5_ESC_KEEP_LAST_DOT, out, cap) == (size_t) -1) {
+        snprintf(out, cap, "%s", literal);
+    }
+}
+
+/* One DIR line: the name padded to 20 characters, then ";version". */
+static void print_listed_name(const char *literal, unsigned version)
+{
+    char shown[ODS2_PATH_MAX];
+    size_t width;
+
+    display_name(literal, shown, sizeof(shown));
+    width = ods5_utf8_length(shown);
+    printf("%s%*s;%u\n", shown, (width < 20) ? (int) (20 - width) : 0, "", version);
+}
+
 /* Lists the entries of one directory that match `pattern` and the
  * version filter, VMS DIRECTORY style: the "Directory [path]" heading,
  * the entries and a "Total of N files." line. Like VMS, prints nothing
@@ -341,7 +371,7 @@ static int show_directory(const char *dir_path, const ods2_dir_entry_t *entries,
                 printf("\nDirectory [%s%s]\n\n", (dir_path[0] == '\0') ? "000000" : "",
                        dir_path);
             }
-            printf("%-20s;%u\n", entries[i].name, entries[i].version);
+            print_listed_name(entries[i].name, entries[i].version);
             shown++;
         }
     }
@@ -351,9 +381,69 @@ static int show_directory(const char *dir_path, const ods2_dir_entry_t *entries,
     return shown;
 }
 
-/* Real VMS allows 8 directory levels; this is a generous but finite
-   backstop against a directory cycle on a corrupted disk image. */
-#define MAX_RECURSION_DEPTH 50
+/* Rewrites a directory path (dot-separated spelling, as typed) with the
+ * names as they are stored: on an ODS-5 volume the case of each
+ * directory is kept, and DCL shows it, whatever case was typed. Every
+ * component is looked up in its parent; if one is not found the path is
+ * left as it is (the lookup that follows reports the error). */
+static void canonical_dir_path(ods2_volume_t *vol, char *path, size_t cap)
+{
+    char result[ODS2_PATH_MAX], piece[ODS2_PATH_MAX], literal[ODS2_DIR_MAX_NAME + 8];
+    char wanted[ODS2_DIR_MAX_NAME + 16], shown[ODS2_PATH_MAX];
+    const char *p = path;
+    ods2_fid_t fid;
+    uint8_t header[512];
+    size_t rlen = 0;
+
+    if (path[0] == '\0' || !g_ods5) return;
+    fid.fid_num = 4; fid.fid_seq = 4; fid.fid_rvn = 0; fid.fid_nmx = 0;
+    result[0] = '\0';
+    while (*p) {
+        const char *end = p;
+        size_t plen, ulen;
+        ods2_dir_entry_t *entries = NULL;
+        int count = 0, i;
+        bool found = false;
+
+        while (*end && *end != '.') {
+            if (*end == '^' && end[1] != '\0') end++;
+            end++;
+        }
+        plen = (size_t) (end - p);
+        if (plen >= sizeof(piece)) return;
+        memcpy(piece, p, plen);
+        piece[plen] = '\0';
+        ulen = ods5_unescape(piece, plen, literal, sizeof(literal) - 5);
+        if (ulen == (size_t) -1) return;
+        snprintf(wanted, sizeof(wanted), "%s.DIR", literal);
+        if (!ods2_read_header(vol, fid.fid_num, header).ok ||
+            !ods2_list_directory_alloc(vol, header, &entries, &count).ok) {
+            return;
+        }
+        for (i = 0; i < count && !found; i++) {
+            if (same_name(entries[i].name, wanted)) {
+                size_t nl = strlen(entries[i].name);
+                fid = entries[i].fid;
+                memcpy(literal, entries[i].name, nl - 4);
+                literal[nl - 4] = '\0';
+                found = true;
+            }
+        }
+        free(entries);
+        if (!found) return;
+        if (ods5_escape_name(literal, 0, shown, sizeof(shown)) == (size_t) -1) return;
+        if (rlen + strlen(shown) + 2 > sizeof(result)) return;
+        rlen += (size_t) snprintf(result + rlen, sizeof(result) - rlen, "%s%s",
+                                  rlen ? "." : "", shown);
+        p = end;
+        if (*p == '.') p++;
+    }
+    snprintf(path, cap, "%s", result);
+}
+
+/* VMS allows 255 directory levels; this is a finite backstop against a
+   directory cycle on a corrupted disk image. */
+#define MAX_RECURSION_DEPTH 255
 
 /* State for one DIR across a wildcard directory spec. */
 typedef struct {
@@ -391,6 +481,7 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
     ods2_result_t r;
     bool here = ods2_dir_spec_match(w->spec, rel_path);
     bool deeper = ods2_dir_spec_could_descend(w->spec, rel_path);
+    char *bufs;
 
     if (!here && !deeper) return;
     if (depth > MAX_RECURSION_DEPTH) {
@@ -415,6 +506,13 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
 
     w->path_fid[depth] = dir_fid;
     w->path_name[depth] = abs_path;
+    bufs = malloc(3 * (size_t) ODS2_PATH_MAX);
+    if (bufs == NULL) {
+        report_error("%%ODS2-E-NOMEM, out of memory listing [%s]\n", abs_path);
+        w->errors++;
+        free(entries);
+        return;
+    }
 
     if (here) {
         int shown = show_directory(abs_path, entries, count, w->pattern, w->p);
@@ -426,9 +524,9 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
 
     for (i = 0; deeper && i < count; i++) {
         uint8_t sub_header[512];
-        char name[ODS2_PATH_MAX];
-        char child_abs[ODS2_PATH_MAX];
-        char child_rel[ODS2_PATH_MAX];
+        char *name = bufs, *child_abs = bufs + ODS2_PATH_MAX,
+             *child_rel = bufs + 2 * ODS2_PATH_MAX;
+        char shown[ODS2_PATH_MAX];
         size_t len;
         int a, b;
 
@@ -447,18 +545,27 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
         }
         /* Directories are NAME.DIR; the name is the path component. */
         len = strlen(entries[i].name);
-        if (len <= 4 || len >= sizeof(name) || !same_name(entries[i].name + len - 4, ".DIR")) {
+        if (len <= 4 || len >= (size_t) ODS2_PATH_MAX || !same_name(entries[i].name + len - 4, ".DIR")) {
             continue;
         }
         memcpy(name, entries[i].name, len - 4);
         name[len - 4] = '\0';
+        /* the path component is written as a spelling: a dot in a
+           directory name is ^. , a space ^_ ... (it is a bracketed path) */
+        if (ods5_escape_name(name, 0, shown, sizeof(shown)) == (size_t) -1) {
+            report_error("%%ODS2-E-PATHTOOLONG, directory name too long, "
+                            "skipping subtree under [%s]\n", abs_path);
+            w->errors++;
+            continue;
+        }
+        snprintf(name, ODS2_PATH_MAX, "%s", shown);
 
-        a = snprintf(child_abs, sizeof(child_abs), "%s%s%s", abs_path,
+        a = snprintf(child_abs, ODS2_PATH_MAX, "%s%s%s", abs_path,
                      abs_path[0] ? "." : "", name);
-        b = snprintf(child_rel, sizeof(child_rel), "%s%s%s", rel_path,
+        b = snprintf(child_rel, ODS2_PATH_MAX, "%s%s%s", rel_path,
                      rel_path[0] ? "." : "", name);
-        if (a < 0 || (size_t) a >= sizeof(child_abs) || b < 0 ||
-            (size_t) b >= sizeof(child_rel)) {
+        if (a < 0 || (size_t) a >= (size_t) ODS2_PATH_MAX || b < 0 ||
+            (size_t) b >= (size_t) ODS2_PATH_MAX) {
             report_error("%%ODS2-E-PATHTOOLONG, path too deep to represent, "
                             "skipping subtree under [%s]\n", abs_path);
             w->errors++;
@@ -495,6 +602,7 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
         }
         walk_directories(w, child_abs, child_rel, depth + 1);
     }
+    free(bufs);
     free(entries);
 }
 
@@ -526,6 +634,7 @@ static void cmd_dir(ods2_volume_t *vol, const ods2_parsed_path_t *p)
         report_error("%%ODS2-E-BADPATH, [%s]: invalid directory specification\n", spec);
         return;
     }
+    canonical_dir_path(vol, start, sizeof(start));
 
     memset(&w, 0, sizeof(w));
     w.vol = vol;
@@ -535,7 +644,7 @@ static void cmd_dir(ods2_volume_t *vol, const ods2_parsed_path_t *p)
        their dot, "MAKEFILE.", so the bare pattern would match nothing.) */
     if (p->filename[0] == '\0') {
         snprintf(file_pattern, sizeof(file_pattern), "*.*");
-    } else if (strchr(p->filename, '.') == NULL) {
+    } else if (ods5_find_unescaped(p->filename, '.') == NULL) {
         snprintf(file_pattern, sizeof(file_pattern), "%s.*", p->filename);
     } else {
         snprintf(file_pattern, sizeof(file_pattern), "%s", p->filename);
@@ -1354,6 +1463,9 @@ static void print_help(void)
            "  DIR [path...] [wildcard]   list a directory and everything beneath it\n"
            "  DIR [*...] [wildcard]      '*' '%%' in directory names, '...' anywhere\n"
            "                             ([*], [*.SRC], [...SALES], [DECUS...SRC])\n"
+           "  DIR/UTF8 ...               show names as UTF-8 (default: with ^-escapes as DCL\n"
+           "                             shows them: ^_ space, ^. dot, ^xx and ^Uxxxx)\n"
+           "  SET NAMES UTF8|ESCAPED     the same for every command that shows names\n"
            "  CREATE/DIRECTORY path      create a directory\n"
            "  COPY <local-file> <path>   write a local file onto the disk (Stream_LF)\n"
            "  COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) <local-file> <path>\n"
@@ -1428,6 +1540,16 @@ static bool execute_line(ods2_volume_t *vol, char *line)
         print_help();
         return true;
     }
+    if (matches(tokens[0], "SET") && n > 1 && matches(tokens[1], "NAMES")) {
+        if (n > 2 && matches(tokens[2], "UTF8")) {
+            g_utf8_names = true;
+        } else if (n > 2 && (matches(tokens[2], "ESCAPED") || matches(tokens[2], "DCL"))) {
+            g_utf8_names = false;
+        } else {
+            report_error("%%ODS2-E-NOPARM, usage: SET NAMES UTF8|ESCAPED\n");
+        }
+        return true;
+    }
     if (matches(tokens[0], "SET") && n > 1 && is_volume_word(tokens[1])) {
         cmd_set_volume(vol, tokens, n);
         return true;
@@ -1471,6 +1593,7 @@ static bool execute_line(ods2_volume_t *vol, char *line)
             report_error("%%ODS2-E-NOTDIR, %s is not a directory\n", tokens[2]);
             return true;
         }
+        canonical_dir_path(vol, effective, sizeof(effective));
         strncpy(g_default_dir, effective, sizeof(g_default_dir) - 1);
         g_default_dir[sizeof(g_default_dir) - 1] = '\0';
         printf("%%ODS2-I-DEFSET, default set to [%s%s]\n",
@@ -1482,8 +1605,9 @@ static bool execute_line(ods2_volume_t *vol, char *line)
         printf("  [%s%s]\n", (g_default_dir[0] == '\0') ? "000000" : "", g_default_dir);
         return true;
     }
-    if (matches(tokens[0], "DIR") || matches(tokens[0], "LS")) {
+    if (matches(verb, "DIR") || matches(verb, "LS")) {
         ods2_parsed_path_t p;
+        bool saved_utf8 = g_utf8_names;
         const char *arg = (n > 1) ? tokens[1] : ""; /* "" resolves to the
                                                          current default
                                                          directory, via the
@@ -1506,7 +1630,30 @@ static bool execute_line(ods2_volume_t *vol, char *line)
                 return true;
             }
         }
+        /* qualifiers: /UTF8 shows names as UTF-8 instead of with ^-escapes */
+        if (quals != NULL) {
+            char q[64];
+            const char *s = quals;
+            while (*s == '/') {
+                size_t ql = strcspn(s + 1, "/");
+                if (ql >= sizeof(q)) ql = sizeof(q) - 1;
+                memcpy(q, s + 1, ql);
+                q[ql] = '\0';
+                if (matches(q, "UTF8")) {
+                    g_utf8_names = true;
+                } else if (matches(q, "ESCAPED")) {
+                    g_utf8_names = false;
+                } else {
+                    report_error("%%ODS2-E-BADQUAL, unrecognized DIR qualifier /%s "
+                                 "(use /UTF8 or /ESCAPED)\n", q);
+                    g_utf8_names = saved_utf8;
+                    return true;
+                }
+                s += 1 + strcspn(s + 1, "/");
+            }
+        }
         cmd_dir(vol, &p);
+        g_utf8_names = saved_utf8;
         return true;
     }
     if (matches(tokens[0], "CREATE/DIRECTORY") || matches(tokens[0], "CREATE/DIR") ||
@@ -1621,6 +1768,11 @@ int main(int argc, char **argv)
     /* A structure version 0 volume (e.g. the OpenVMS Alpha V8.4 CD)
        is mounted for reading only, so look before opening for write. */
     r = ods2_mount(argv[1], &vol);
+    if (r.ok) g_ods5 = vol.ods5;
+    {
+        const char *names = getenv("ODS2_NAMES");
+        if (names != NULL && matches(names, "UTF8")) g_utf8_names = true;
+    }
     if (r.ok && vol.ods5) {
         fprintf(stderr, "%%ODS2-W-ODS5RO, %s: ODS-5 volume (structure level 5); "
                         "mounted read-only, writing is not supported yet\n",

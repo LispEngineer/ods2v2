@@ -29,14 +29,20 @@
 #define ODS2_DIRECTORY_H
 
 #include "ods2_ondisk.h"
+#include "ods5_names.h"
 #include <stddef.h>
 
-#define ODS2_DIR_MAX_NAME 80
+/* Longest name an entry holds, in bytes. ODS-2 names are at most 80;
+   on an ODS-5 volume names are held as UTF-8 (see ods5_names.h), which
+   needs up to ODS5_MAX_LITERAL_NAME. */
+#define ODS2_DIR_MAX_NAME ODS5_MAX_LITERAL_NAME
 
 typedef struct {
-    char       name[ODS2_DIR_MAX_NAME + 1]; /* nul-terminated */
+    char       name[ODS2_DIR_MAX_NAME + 1]; /* nul-terminated; UTF-8 on an ODS-5 volume */
     uint16_t   version;
     ods2_fid_t fid;
+    uint8_t    flags;      /* DIR$B_FLAGS of the record (0 on ODS-2) */
+    uint8_t    name_type;  /* ODS5_NAME_ODS2/ISL1/UCS2 as stored (ODS-5 only; else 0) */
 } ods2_dir_entry_t;
 
 /* Upper bound on how many ENTRIES one 512-byte directory block can
@@ -78,5 +84,17 @@ typedef struct {
  * soft empty-directory case). */
 int ods2_parse_directory(const uint8_t *data, size_t len,
                           ods2_dir_entry_t *entries_out, size_t max_entries);
+
+/* The same for a volume of structure `level` (2 or 5). Level 2 is
+   exactly ods2_parse_directory(). At level 5 the record flags are
+   read: the name type (DIR$V_NAMETYPE) says whether the name bytes are
+   ODS-2/ISO Latin-1 (1 byte per character) or UCS-2 (2 bytes, little
+   endian), and the name is stored in the entry as UTF-8 (see
+   ods5_names.h); a record of type DIR$C_LINKNAME is not a file entry
+   and is skipped; a name type this code does not know is read as ISO
+   Latin-1. Also -1 for a UCS-2 name of odd
+   length or a name too long to hold. */
+int ods2_parse_directory_level(const uint8_t *data, size_t len, unsigned level,
+                               ods2_dir_entry_t *entries_out, size_t max_entries);
 
 #endif /* ODS2_DIRECTORY_H */

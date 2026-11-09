@@ -35,7 +35,9 @@
 
 #include <stdbool.h>
 
-#define ODS2_PATH_MAX 256
+/* Long enough for the 512 characters VMS allows in a directory
+   specification even when many of them are written as ^-escapes. */
+#define ODS2_PATH_MAX 2048
 
 typedef struct {
     char dir_path[ODS2_PATH_MAX];  /* dot-separated, no brackets, no

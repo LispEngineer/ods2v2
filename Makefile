@@ -21,7 +21,7 @@ BUILD    = build
 # Shared sources for any tool that mounts/reads/writes a volume
 # through the full ods2_volume.h API - most tools need this complete
 # set even if they don't exercise every piece of it.
-VOLUME_SRCS = src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c \
+VOLUME_SRCS = src/ods5_names.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c \
               src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c \
               src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c \
               src/ods2_text_var.c
@@ -44,7 +44,7 @@ DEV_TOOLS = read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
 $(BUILD)/ods2_make_loop: tests/ods2_make_loop.c $(VOLUME_SRCS) include/ods2_volume.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_make_loop.c $(VOLUME_SRCS) -o $@
 
-TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest
+TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest $(BUILD)/ods5_names_selftest $(BUILD)/ods5_directory_selftest
 
 .PHONY: all test tools dev-tools release clean starter-volume
 
@@ -90,32 +90,38 @@ $(BUILD)/ods2_retrieval_selftest: tests/ods2_retrieval_selftest.c src/ods2_retri
 $(BUILD)/ods2_root_header_selftest: tests/ods2_root_header_selftest.c src/ods2_retrieval.c include/ods2_retrieval.h include/ods2_ondisk.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_root_header_selftest.c src/ods2_retrieval.c -o $@
 
-$(BUILD)/ods2_directory_selftest: tests/ods2_directory_selftest.c src/ods2_directory.c include/ods2_directory.h include/ods2_ondisk.h | $(BUILD)
-	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_directory_selftest.c src/ods2_directory.c -o $@
+$(BUILD)/ods2_directory_selftest: tests/ods2_directory_selftest.c src/ods2_directory.c include/ods2_directory.h include/ods2_ondisk.h src/ods5_names.c include/ods5_names.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_directory_selftest.c src/ods2_directory.c src/ods5_names.c -o $@
 
 samples/synthetic_disk.img: samples/sample.bin samples/indexf_headers.bin samples/root_dir.bin tools/build_synthetic_disk.py
 	python3 tools/build_synthetic_disk.py
 
-$(BUILD)/ods2_volume_selftest: tests/ods2_volume_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c include/ods2_volume.h include/ods2_time.h samples/synthetic_disk.img | $(BUILD)
-	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_volume_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c -o $@
+$(BUILD)/ods2_volume_selftest: tests/ods2_volume_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c include/ods2_volume.h include/ods2_time.h samples/synthetic_disk.img src/ods5_names.c include/ods5_names.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_volume_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c src/ods5_names.c -o $@
 
-$(BUILD)/ods2_wildcard_selftest: tests/ods2_wildcard_selftest.c src/ods2_wildcard.c include/ods2_wildcard.h | $(BUILD)
-	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_wildcard_selftest.c src/ods2_wildcard.c -o $@
+$(BUILD)/ods2_wildcard_selftest: tests/ods2_wildcard_selftest.c src/ods2_wildcard.c include/ods2_wildcard.h src/ods5_names.c include/ods5_names.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_wildcard_selftest.c src/ods2_wildcard.c src/ods5_names.c -o $@
 
-$(BUILD)/ods2_read_file_selftest: tests/ods2_read_file_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c include/ods2_volume.h include/ods2_time.h | $(BUILD)
-	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_read_file_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c -o $@
+$(BUILD)/ods2_read_file_selftest: tests/ods2_read_file_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c include/ods2_volume.h include/ods2_time.h src/ods5_names.c include/ods5_names.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_read_file_selftest.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c src/ods5_names.c -o $@
 
 $(BUILD)/ods2_header_build_selftest: tests/ods2_header_build_selftest.c src/ods2_header_build.c src/ods2_time.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c include/ods2_header_build.h include/ods2_time.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_header_build_selftest.c src/ods2_header_build.c src/ods2_time.c src/ods2_validate.c src/ods2_checksum.c src/ods2_retrieval.c -o $@
 
-$(BUILD)/ods2_directory_write_selftest: tests/ods2_directory_write_selftest.c src/ods2_directory_write.c src/ods2_directory.c include/ods2_directory_write.h include/ods2_directory.h | $(BUILD)
-	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_directory_write_selftest.c src/ods2_directory_write.c src/ods2_directory.c -o $@
+$(BUILD)/ods2_directory_write_selftest: tests/ods2_directory_write_selftest.c src/ods2_directory_write.c src/ods2_directory.c include/ods2_directory_write.h include/ods2_directory.h src/ods5_names.c include/ods5_names.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_directory_write_selftest.c src/ods2_directory_write.c src/ods2_directory.c src/ods5_names.c -o $@
 
-$(BUILD)/ods2_path_selftest: tests/ods2_path_selftest.c src/ods2_path.c src/ods2_wildcard.c include/ods2_path.h include/ods2_wildcard.h | $(BUILD)
-	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_path_selftest.c src/ods2_path.c src/ods2_wildcard.c -o $@
+$(BUILD)/ods2_path_selftest: tests/ods2_path_selftest.c src/ods2_path.c src/ods2_wildcard.c include/ods2_path.h include/ods2_wildcard.h src/ods5_names.c include/ods5_names.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_path_selftest.c src/ods2_path.c src/ods2_wildcard.c src/ods5_names.c -o $@
 
 $(BUILD)/ods2_versions_selftest: tests/ods2_versions_selftest.c $(VOLUME_SRCS) include/ods2_volume.h include/ods2_directory.h samples/synthetic_disk.img | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_versions_selftest.c $(VOLUME_SRCS) -o $@
+
+$(BUILD)/ods5_names_selftest: tests/ods5_names_selftest.c src/ods5_names.c src/ods2_wildcard.c include/ods5_names.h include/ods2_wildcard.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods5_names_selftest.c src/ods5_names.c src/ods2_wildcard.c -o $@
+
+$(BUILD)/ods5_directory_selftest: tests/ods5_directory_selftest.c src/ods2_directory.c src/ods2_wildcard.c src/ods2_path.c src/ods5_names.c include/ods2_directory.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods5_directory_selftest.c src/ods2_directory.c src/ods2_wildcard.c src/ods2_path.c src/ods5_names.c -o $@
 
 $(BUILD)/ods2_time_selftest: tests/ods2_time_selftest.c src/ods2_time.c include/ods2_time.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_time_selftest.c src/ods2_time.c -o $@
@@ -223,6 +229,10 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@$(BUILD)/ods2_indexf_large_selftest
 	@echo "--- ods2_text_var_selftest ---"
 	@$(BUILD)/ods2_text_var_selftest
+	@echo "--- ods5_names_selftest ---"
+	@$(BUILD)/ods5_names_selftest
+	@echo "--- ods5_directory_selftest ---"
+	@$(BUILD)/ods5_directory_selftest
 	@echo "--- CLI file version checks ---"
 	@sh tests/cli_versions_check.sh
 	@echo "--- CLI directory wildcard checks ---"
@@ -239,6 +249,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@sh tests/cli_volume_label_check.sh
 	@echo "--- CLI ODS-5 volume check ---"
 	@sh tests/cli_ods5_volume_check.sh
+	@echo "--- CLI ODS-5 names check ---"
+	@sh tests/cli_ods5_names_check.sh
 	@echo "--- CLI recursive DIR regression check ---"
 	@if command -v timeout >/dev/null 2>&1; then \
 		rm -f samples/cli_regression_disk.img; \

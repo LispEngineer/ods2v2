@@ -164,7 +164,7 @@ int main(void)
 
     /* Overlong input is rejected rather than silently truncated. */
     {
-        char huge[600];
+        char huge[ODS2_PATH_MAX + 100];
         ods2_parsed_path_t p;
         memset(huge, 'A', sizeof(huge) - 1);
         huge[sizeof(huge) - 1] = '\0';

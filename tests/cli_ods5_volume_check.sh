@@ -1,5 +1,5 @@
 #!/bin/sh
-# MIT License - Copyright (c) 2026 Allen Pomeroy (see LICENSE)
+# MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
 #
 # cli_ods5_volume_check.sh - an ODS-5 (structure level 5) volume mounts
 # read-only: SHOW VOLUME names the structure level and the volume
