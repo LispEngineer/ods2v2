@@ -2141,6 +2141,17 @@ static bool below_highwater(const uint8_t *header, unsigned vbn)
     return core->highwater == 0 || vbn < core->highwater;
 }
 
+/* A directory's end-of-file as VMS keeps it: one block past the last block in use, byte 0. ods2v2 used to
+ * write EFBLK 1 / FFBYTE 2 on ODS-2 ("the sentinel only"); OpenVMS VAX V7.3 copies the parent's FFBYTE into
+ * the directory CREATE/DIRECTORY makes in it, so that child got EOF (2,2): a second block of two bytes
+ * that is not a directory block (ANALYZE: BAD_DIRSIZE, BAD_DIRTYPE; SYSTEM-W-BADIRECTORY; batch phvs2-w1).
+ * Writing to such a directory puts its end-of-file right. */
+static bool dir_eof_standard(const uint8_t *dir_header, unsigned used)
+{
+    const ods2_head_core_t *core = (const ods2_head_core_t *) dir_header;
+    return core->recattr.ffbyte == 0 && ods2_word_swap32(core->recattr.efblk) == used + 1u;
+}
+
 static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_number,
                                      uint8_t *dir_header, const uint8_t *blocks,
                                      unsigned used, unsigned old_used, unsigned first_changed)
@@ -2343,7 +2354,7 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
     t = ods2_dir_choose_block(blocks, used, name);
     if (ods2_insert_dir_entry_flags(blocks + (size_t) t * 512, 512, name, version, fid,
                                     vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, extra_flags)) {
-        if (ods2_file_content_length(dir_header) == 0 ||
+        if (ods2_file_content_length(dir_header) == 0 || !dir_eof_standard(dir_header, used) ||
             !below_highwater(dir_header, t + 1)) {
             /* An end-of-file that didn't cover even block 1, or a block
                VMS would read as zeros until the high-water mark moves */
@@ -2479,7 +2490,7 @@ static ods2_result_t remove_directory_entry(ods2_volume_t *vol, unsigned dir_fil
             memmove(block, block + 512, (size_t) (used - v - 1) * 512);
             r = store_directory(vol, dir_file_number, dir_header, blocks, used - 1,
                                 used, v);
-        } else if (!below_highwater(dir_header, v + 1)) {
+        } else if (!below_highwater(dir_header, v + 1) || !dir_eof_standard(dir_header, used)) {
             r = store_directory(vol, dir_file_number, dir_header, blocks, used,
                                 used, v);
         } else {
