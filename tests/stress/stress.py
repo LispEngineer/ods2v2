@@ -387,7 +387,7 @@ class Model:
         return {id(o): o for (_, o) in self.ents.values()}
 
 
-def model_from_volume(vol, ods5, hardlinks):
+def model_from_volume(vol, ods5, hardlinks, skip_dangling=False):
     m = Model(ods5, hardlinks)
     for dp in sorted(vol.dirs, key=len):
         if dp:
@@ -395,6 +395,8 @@ def model_from_volume(vol, ods5, hardlinks):
     fobj = {}
     for (dpath, nm, ver), fid in vol.files.items():
         if fid is None:
+            if skip_dangling:
+                continue
             raise Failure('baseline has a dangling entry %r' % ((dpath, nm, ver),))
         fi = vol.info[fid]
         if fid not in fobj:

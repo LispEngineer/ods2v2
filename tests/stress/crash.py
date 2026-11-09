@@ -335,7 +335,7 @@ def run_seed(seed, nops, nkills, work_root):
 def resync(h):
     """rebuild the model from the (just verified) volume"""
     v = ods5read.read_volume(h.img)
-    h.model = stress.model_from_volume(v, h.ods5, h.hardlinks)
+    h.model = stress.model_from_volume(v, h.ods5, h.hardlinks, skip_dangling=True)
 
 
 def main():
