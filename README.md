@@ -352,7 +352,11 @@ version, which ods2v2 does not make; it creates version 1 only). Also:
   the storage control block records (cylinders = ceil(blocks / (sectors x
   tracks)), as VMS writes them; the default is 32 x 16, and 63 x 255 above
   16 GiB so that the cylinder count stays below 65,536). VMS writes the geometry
-  of the device it initialized.
+  of the device it initialized, and OpenVMS VAX V7.3's ANALYZE/DISK_STRUCTURE
+  accepts only a storage control block that records the geometry of the device the
+  volume is on (measured on an RA82: 57 x 15; the LD driver, 38 x 38; SCSI disks,
+  often 63 x 255), so an image meant for one machine is made with `--geometry`, or
+  fitted afterwards with `SET VOLUME/GEOMETRY=sectors,tracks`.
 
 **Names.** ODS-5 keeps the case of names and allows spaces, many dots,
 ISO Latin-1 and UCS-2 characters. `DIR` shows them the way DCL does,

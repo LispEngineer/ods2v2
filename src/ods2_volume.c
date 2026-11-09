@@ -3120,6 +3120,54 @@ ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file
     return txn_end(vol, r);
 }
 
+/* SET VOLUME/GEOMETRY: the disk geometry the storage control block records (BITMAP.SYS VBN 1: sectors, tracks,
+   cylinders = ceil(VOLSIZE / (sectors * tracks)), BLKSIZE 1, checksum). OpenVMS VAX V7.3 takes an SCB as valid only
+   if it records the geometry of the device the volume is on (measured: scb1, PHVS2), so an image made for one device
+   is fitted to another with this. Nothing else changes. */
+static ods2_result_t set_volume_geometry_impl(ods2_volume_t *vol, uint32_t sectors, uint32_t tracks)
+{
+    uint8_t h[512], scb[512];
+    uint32_t volsize, cyl;
+    uint64_t per_cyl = (uint64_t) sectors * tracks, c;
+    uint16_t ck = 0;
+    unsigned i;
+    ods2_result_t r;
+
+    if (!vol->writable) return not_writable(vol);
+    if (sectors == 0 || tracks == 0 || per_cyl > 0xFFFFFFFFu) return fail("the geometry needs sectors and tracks of at least 1");
+    r = ods2_read_header(vol, 2, h);
+    if (!r.ok) return r;
+    r = header_ok_for_write(h, 2);
+    if (!r.ok) return r;
+    r = ods2_read_file_block(vol, h, 1, scb);
+    if (!r.ok) return r;
+    if ((scb[0] | (scb[1] << 8)) != (vol->ods5 ? 0x0501 : 0x0201)) {
+        return fail("BITMAP.SYS's storage control block is not one (its structure level is not the volume's): not changed");
+    }
+    volsize = (uint32_t) scb[4] | ((uint32_t) scb[5] << 8) | ((uint32_t) scb[6] << 16) | ((uint32_t) scb[7] << 24);
+    c = ((uint64_t) volsize + per_cyl - 1) / per_cyl;
+    if (c == 0 || c > 0xFFFFFFFFu) return fail("the geometry gives no usable cylinder count");
+    cyl = (uint32_t) c;
+    scb[8] = 1; scb[9] = scb[10] = scb[11] = 0;                      /* BLKSIZE 1, as VMS writes it */
+    for (i = 0; i < 4; i++) {
+        scb[12 + i] = (uint8_t) (sectors >> (8 * i));
+        scb[16 + i] = (uint8_t) (tracks >> (8 * i));
+        scb[20 + i] = (uint8_t) (cyl >> (8 * i));
+    }
+    ck = ods2_checksum(scb, 255);
+    scb[510] = (uint8_t) (ck & 0xFF);
+    scb[511] = (uint8_t) (ck >> 8);
+    return ods2_write_file_block(vol, h, 1, scb);
+}
+
+ods2_result_t ods2_set_volume_geometry(ods2_volume_t *vol, uint32_t sectors, uint32_t tracks)
+{
+    ods2_result_t r;
+    TXN_BEGIN_OR_RETURN(vol);
+    r = set_volume_geometry_impl(vol, sectors, tracks);
+    return txn_end(vol, r);
+}
+
 ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_count)
 {
     uint8_t bitmap_header[512];
@@ -3311,7 +3359,7 @@ bool ods2_scb_problem(ods2_volume_t *vol, char *msg, size_t cap)
         snprintf(msg, cap, "the storage control block's blocking factor is 0 (the disk geometry %u x %u x %u "
                  "wrapped its 16-bit cylinder count when the volume was initialized, a SIMH RQ disk above about "
                  "26.7 GiB): OpenVMS VAX V7.3 ANALYZE/DISK_STRUCTURE fails with INTDIV, V8.4 reports "
-                 "%%ANALDISK-W-CHKSCB. The data is not affected", sec, trk, cyl);
+                 "%%ANALDISK-W-CHKSCB. The data is not affected; SET VOLUME/GEOMETRY=sectors,tracks rewrites the geometry", sec, trk, cyl);
         return true;
     }
     product = (uint64_t) sec * trk * cyl / blksize;
@@ -3319,7 +3367,7 @@ bool ods2_scb_problem(ods2_volume_t *vol, char *msg, size_t cap)
     if (diff > (uint64_t) sec * trk) {
         snprintf(msg, cap, "the storage control block's geometry (%u sectors x %u tracks x %u cylinders = %llu "
                  "blocks) is more than one cylinder from the volume size (%u): OpenVMS ANALYZE/DISK_STRUCTURE "
-                 "would report %%ANALDISK-W-CHKSCB. The data is not affected", sec, trk, cyl,
+                 "would report %%ANALDISK-W-CHKSCB. The data is not affected; SET VOLUME/GEOMETRY=sectors,tracks rewrites the geometry", sec, trk, cyl,
                  (unsigned long long) product, volsize);
         return true;
     }
