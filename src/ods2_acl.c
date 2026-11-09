@@ -27,6 +27,7 @@
  */
 #include "ods2_acl.h"
 #include "ods2_ondisk.h"
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -42,6 +43,22 @@
 #define ACE_FLAG_NOPROPAGATE 0x0800u
 #define ACE_FLAG_SUCCESS 0x0001u   /* audit and alarm ACEs */
 #define ACE_FLAG_FAILURE 0x0002u
+
+/* Appends to buf (capacity cap) at offset n and returns the new offset, never beyond cap - 1: the text is
+ * cut when it does not fit (review 4: an ACE of 18 or more identifiers overran a fixed buffer). */
+static size_t appendf(char *buf, size_t cap, size_t n, const char *fmt, ...)
+{
+    va_list ap;
+    int r;
+    if (cap == 0) return 0;
+    if (n >= cap) n = cap - 1;
+    va_start(ap, fmt);
+    r = vsnprintf(buf + n, cap - n, fmt, ap);
+    va_end(ap);
+    if (r < 0) return n;
+    n += (size_t) r;
+    return n >= cap ? cap - 1 : n;
+}
 
 static uint32_t rd32(const uint8_t *p)
 {
@@ -72,12 +89,12 @@ static void format_access(uint32_t a, unsigned flags, int with_sf, char *out, si
     size_t n = 0, i;
     out[0] = '\0';
     for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        if (a & names[i].bit) n += (size_t) snprintf(out + n, cap - n, "%s%s", n ? "+" : "", names[i].name);
+        if (a & names[i].bit) n = appendf(out, cap, n, "%s%s", n ? "+" : "", names[i].name);
     }
-    if (a & ~31u) n += (size_t) snprintf(out + n, cap - n, "%s%%X%X", n ? "+" : "", (unsigned) (a & ~31u));
+    if (a & ~31u) n = appendf(out, cap, n, "%s%%X%X", n ? "+" : "", (unsigned) (a & ~31u));
     if (with_sf) {
-        if (flags & ACE_FLAG_SUCCESS) n += (size_t) snprintf(out + n, cap - n, "%sSUCCESS", n ? "+" : "");
-        if (flags & ACE_FLAG_FAILURE) n += (size_t) snprintf(out + n, cap - n, "%sFAILURE", n ? "+" : "");
+        if (flags & ACE_FLAG_SUCCESS) n = appendf(out, cap, n, "%sSUCCESS", n ? "+" : "");
+        if (flags & ACE_FLAG_FAILURE) n = appendf(out, cap, n, "%sFAILURE", n ? "+" : "");
     }
     if (n == 0) snprintf(out, cap, "NONE");
 }
@@ -100,7 +117,7 @@ size_t ods2_acl_walk(const uint8_t *header, void (*visit)(void *, const char *),
     while (o + 4 <= end && header[o] != 0) {
         unsigned size = header[o], type = header[o + 1];
         unsigned flags = (unsigned) header[o + 2] | (unsigned) header[o + 3] << 8;
-        char text[512];
+        char text[1280];
         bool done = false;
         if (o + size > end || size < 4) {
             snprintf(text, sizeof(text), "(damaged ACE at offset %zu)", o);
@@ -109,11 +126,11 @@ size_t ods2_acl_walk(const uint8_t *header, void (*visit)(void *, const char *),
         }
         if (type == ACE_TYPE_ID && size >= 12 && (size - 8) % 4 == 0 &&
             (flags & ~(ACE_FLAG_DEFAULT | ACE_FLAG_PROTECTED | ACE_FLAG_NOPROPAGATE)) == 0) {
-            char ids[256] = "", acc[128], one[32], opts[64] = "";
+            char ids[1024] = "", acc[128], one[32], opts[64] = "";   /* 61 identifiers of up to 15 characters fit */
             size_t k, n = 0;
             for (k = 8; k < size; k += 4) {
                 ods2_acl_format_id(rd32(header + o + k), one, sizeof(one));
-                n += (size_t) snprintf(ids + n, sizeof(ids) - n, "%s%s", k > 8 ? "+" : "", one);
+                n = appendf(ids, sizeof(ids), n, "%s%s", k > 8 ? "+" : "", one);
             }
             if (flags & (ACE_FLAG_DEFAULT | ACE_FLAG_PROTECTED | ACE_FLAG_NOPROPAGATE)) {
                 snprintf(opts, sizeof(opts), ",OPTIONS=%s%s%s%s%s",
@@ -152,9 +169,9 @@ size_t ods2_acl_walk(const uint8_t *header, void (*visit)(void *, const char *),
             done = true;
         }
         if (!done) {
-            size_t k, n = (size_t) snprintf(text, sizeof(text), "(ACE type %u, flags %%X%04X, data", type, flags);
-            for (k = 4; k < size && n + 4 < sizeof(text); k++) n += (size_t) snprintf(text + n, sizeof(text) - n, " %02X", header[o + k]);
-            snprintf(text + n, sizeof(text) - n, ")");
+            size_t k, n = appendf(text, sizeof(text), 0, "(ACE type %u, flags %%X%04X, data", type, flags);
+            for (k = 4; k < size; k++) n = appendf(text, sizeof(text), n, " %02X", header[o + k]);
+            appendf(text, sizeof(text), n, ")");
         }
         visit(ctx, text);
         count++;

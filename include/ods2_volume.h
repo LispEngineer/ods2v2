@@ -477,6 +477,22 @@ ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const ch
 ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
                                   const char *name, int version, uint16_t *version_out);
 
+/* What ods2_delete_version_info() did besides the usual: on a volume without HARDLINKS an entry that is not the
+ * file's primary one (an alias) is removed and the file stays (kept = 1); an entry whose file no longer exists
+ * (a dangling alias) is removed alone (kept = 2). Otherwise kept = 0. For kept = 1: `name_differs` says whether
+ * the header names another file name (primary_name, primary_version) or only another back link directory
+ * (backlink_dir, a file number). */
+typedef struct {
+    int      kept;
+    bool     name_differs;
+    char     primary_name[ODS5_MAX_LITERAL_NAME + 8];
+    uint16_t primary_version;
+    unsigned backlink_dir;
+} ods2_delete_info_t;
+ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_number,
+                                       const char *name, int version, uint16_t *version_out,
+                                       ods2_delete_info_t *info);
+
 
 /* --- the volume label (issue #13) --- */
 

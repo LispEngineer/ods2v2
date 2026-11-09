@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer)
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the "Software"), to deal in the Software without restriction, under the terms of the MIT
+# licence in the LICENSE file of this repository. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
 """Compare ods2 TYPE with the records VMS TYPE wrote (m2 binary batch log): usage vms_type_compare.py ODS2 IMAGE LOG"""
 import re, struct, subprocess, sys
 ods2, img, log = sys.argv[1:4]

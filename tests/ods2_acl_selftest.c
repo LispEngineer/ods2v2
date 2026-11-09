@@ -30,9 +30,9 @@
 #include <string.h>
 
 static int failures;
-static char got[16][256];
+static char got[16][1400];
 static size_t ngot;
-static void visit(void *ctx, const char *t) { (void) ctx; if (ngot < 16) snprintf(got[ngot++], 256, "%s", t); }
+static void visit(void *ctx, const char *t) { (void) ctx; if (ngot < 16) snprintf(got[ngot++], sizeof(got[0]), "%s", t); }
 
 static void check(const char *name, int ok)
 {
@@ -118,6 +118,28 @@ int main(void)
             check(t[k].name, ods2_acl_walk(h, visit, NULL) == 1 && strcmp(got[0], t[k].vms) == 0);
             if (strcmp(got[0], t[k].vms) != 0) printf("  got %s\n", got[0]);
         }
+    }
+
+    /* the largest identifier ACE (size 252: 61 identifiers; review 4 found a stack overflow from 18 on) */
+    {
+        uint8_t big[252];
+        char want[1400];
+        size_t k, n = 0;
+        memset(big, 0, sizeof(big));
+        big[0] = 252; big[1] = 1; big[4] = 1;
+        for (k = 0; k < 61; k++) {          /* [37776,177776] each: 14 characters */
+            big[8 + 4 * k] = 0xFE; big[9 + 4 * k] = 0xFF; big[10 + 4 * k] = 0xFE; big[11 + 4 * k] = 0x3F;
+        }
+        n += (size_t) snprintf(want + n, sizeof(want) - n, "(IDENTIFIER=");
+        for (k = 0; k < 61; k++) n += (size_t) snprintf(want + n, sizeof(want) - n, "%s[37776,177776]", k ? "+" : "");
+        snprintf(want + n, sizeof(want) - n, ",ACCESS=READ)");
+        ngot = 0;
+        header_with(h, big, sizeof(big));
+        check("an identifier ACE of 61 identifiers is formatted whole, without overrunning anything",
+              ods2_acl_walk(h, visit, NULL) == 1 && strcmp(got[0], want) == 0);
+        /* and with a caller buffer far too small for it: the text is cut, never overrun */
+        ods2_acl_format_id(0x3FFEFFFEu, id, 8);
+        check("an identifier formatted into 8 bytes is cut, not overrun", strlen(id) <= 7);
     }
 
     if (failures) { printf("%d failure(s)\n", failures); return 1; }

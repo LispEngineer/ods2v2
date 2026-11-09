@@ -1241,7 +1241,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         {
             const char *note = NULL;
             r = read_file_content(vol, header, x->records, x->lines ? ODS2_REC_LINES : 0, file_sink, &sink, &bytes, &sink_failed, &note);
-            if (note != NULL && r.ok) report_error("%%ODS2-W-RECORDS, %s: %s\n", shown, note);
+            if (note != NULL && r.ok) fprintf(stderr, "%%ODS2-W-RECORDS, %s: %s\n", shown, note);   /* a note: the exit status stays 0 */
         }
         if (fclose(f) != 0) sink.failed = true;
         if (!r.ok || sink.failed) {
@@ -2470,11 +2470,27 @@ static void cmd_delete(ods2_volume_t *vol, const ods2_parsed_path_t *p)
     /* One version (the one selected, the highest by default), or with
        ";*" every version - highest first, until none remain. */
     do {
-        r = ods2_delete_version(vol, dir_fid.fid_num, name,
-                                p->version_wildcard ? ODS2_VERSION_HIGHEST : version,
-                                &deleted_version);
+        ods2_delete_info_t info;
+        r = ods2_delete_version_info(vol, dir_fid.fid_num, name,
+                                     p->version_wildcard ? ODS2_VERSION_HIGHEST : version,
+                                     &deleted_version, &info);
         if (!r.ok) break;
-        printf("%%ODS2-I-DELETED, deleted %s;%u\n", name, deleted_version);
+        if (info.kept == 1 && info.name_differs) {
+            char shown[ODS2_PATH_MAX];
+            display_name(info.primary_name, shown, sizeof(shown));
+            printf("%%ODS2-I-ALIASREMOVED, removed %s;%u; the file stays: this entry is an alias, "
+                   "its header names %s;%u as the primary entry\n", name, deleted_version, shown,
+                   (unsigned) info.primary_version);
+        } else if (info.kept == 1) {
+            printf("%%ODS2-I-ALIASREMOVED, removed %s;%u; the file stays: its header's back link names "
+                   "another directory (file number %u), so this entry is taken for an alias\n", name,
+                   deleted_version, info.backlink_dir);
+        } else if (info.kept == 2) {
+            printf("%%ODS2-I-DANGLING, removed %s;%u; its file no longer exists (nothing else changed)\n",
+                   name, deleted_version);
+        } else {
+            printf("%%ODS2-I-DELETED, deleted %s;%u\n", name, deleted_version);
+        }
         deleted++;
     } while (p->version_wildcard);
 

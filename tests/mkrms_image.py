@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer)
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the "Software"), to deal in the Software without restriction, under the terms of the MIT
+# licence in the LICENSE file of this repository. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
 """mkrms_image.py ODS2 ODS2_INIT IMAGE OUTDIR -- build an ODS-5 test image of RMS sequential files with chosen
 record formats / attributes (raw bytes copied in with COPY, then the FAT in the file header patched and the
 header checksum redone).  Writes OUTDIR/MANIFEST.txt (name, rfm, rat, vfc, bytes) and the expected-text files

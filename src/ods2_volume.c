@@ -2505,6 +2505,13 @@ bool ods2_header_is_file(const uint8_t *header, ods2_fid_t fid)
 ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
                                   const char *name, int version, uint16_t *version_out)
 {
+    return ods2_delete_version_info(vol, dir_file_number, name, version, version_out, NULL);
+}
+
+ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_number,
+                                       const char *name, int version, uint16_t *version_out,
+                                       ods2_delete_info_t *info)
+{
     uint16_t target_version;
     uint8_t dir_header[512];
     ods2_fid_t target_fid;
@@ -2515,6 +2522,7 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
     int i;
     ods2_result_t r;
 
+    if (info != NULL) memset(info, 0, sizeof(*info));
     if (!vol->writable) {
         return not_writable(vol);
     }
@@ -2534,6 +2542,7 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
         r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
         if (!r.ok) return r;
         if (version_out != NULL) *version_out = target_version;
+        if (info != NULL) info->kept = 2;
         return ok();
     }
 
@@ -2602,6 +2611,13 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
                 r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
                 if (!r.ok) return r;
                 if (version_out != NULL) *version_out = target_version;
+                if (info != NULL) {
+                    info->kept = 1;
+                    info->name_differs = ods2_dir_name_compare(a, strlen(a), b, strlen(b)) != 0;
+                    snprintf(info->primary_name, sizeof(info->primary_name), "%s", id.name);
+                    info->primary_version = id.version;
+                    info->backlink_dir = target_core->backlink.fid_num;
+                }
                 return ok();
             }
         }

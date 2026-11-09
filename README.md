@@ -395,6 +395,16 @@ image assembled from real, VMS-written byte fragments captured during
 development with VMS generated volumes so there was genuine on-disk bytes
 in every structural test.
 
+## Changes of behaviour (the ODS-5 / records work)
+
+- **`TYPE` now decodes records by default**, as VMS `TYPE` does (carriage control applied; a Stream_LF file
+  without a final line feed gets one). It used to print the stored bytes: scripts that extract bytes with
+  `TYPE` must use `TYPE/RAW` (`EXPORT` still copies the stored bytes by default; `EXPORT/RECORDS` gives text).
+- `DIR/FULL` shows the ACL, the record format and attributes and `Link count` as VMS does; ODS-2 directories
+  are now made with the end-of-file VMS uses; directories' revision count rises by 2 per block gained.
+- `LINK` / `SET FILE/ENTER` on a volume without `HARDLINKS` makes a plain alias; `DELETE` of such an entry
+  keeps the file and says so.
+
 ## Known limitations
 
 - `COPY` takes any size of file the volume has room for. Its content
@@ -420,7 +430,8 @@ in every structural test.
   on the order of ten thousand files beyond the headers INITIALIZE
   preallocated (`/HEADERS`). INDEXF.SYS extension headers aren't
   written.
-- File numbers stop at 65,535 (the FID_NMX extension isn't used).
+- File numbers stop at 65,535 (the FID_NMX extension isn't used, also when a directory entry is checked against
+  the file header it names).
 - A directory is limited to 256 blocks (a few thousand entries), the
   most one contiguous extent can map here.
 

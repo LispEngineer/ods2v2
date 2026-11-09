@@ -49,6 +49,12 @@ check "DIR/FULL: fixed length line" "Record format:      Fixed length 20 byte re
 check "DIR/FULL: CR attribute" "Record attributes:  Carriage return carriage control" "$(echo "$full" | sed -n 's/^  Record attributes: */Record attributes:  /p')"
 full=$($ODS2 "$TMP/rms.img" 'DIR/FULL [000000]VAR_BLK.TXT' 2>&1)
 check "DIR/FULL: CR and non-spanned" "Record attributes:  Carriage return carriage control, Non-spanned" "$(echo "$full" | sed -n 's/^  Record attributes: */Record attributes:  /p')"
+# a note (a short last fixed record) is not a failure: EXPORT/RECORDS exits 0, like TYPE
+mkdir "$TMP/note"
+$ODS2 "$TMP/rms.img" "EXPORT/RECORDS [000000]FIX_SHORT.TXT $TMP/note" >/dev/null 2>"$TMP/err"; st=$?
+check "EXPORT/RECORDS with only a %ODS2-W- note exits 0" 0 "$st"
+grep -q "ODS2-W-RECORDS" "$TMP/err" && echo "PASS: ... and prints the note" || { echo "FAIL: the note is missing"; fail=$((fail+1)); }
+$ODS2 "$TMP/rms.img" "TYPE [000000]FIX_SHORT.TXT" >/dev/null 2>&1; check "TYPE with the same note exits 0" 0 "$?"
 # files VMS TYPE refuses (m2b): a damaged VAR file (RMS-F-IRC) and carriage control that cannot apply (RMS-F-RAT)
 for n in BAD_VAR.TXT VAR_PRN.TXT FIX_PRN.TXT FIX_CRFTN.TXT; do
     $ODS2 "$TMP/rms.img" "TYPE [000000]$n" > "$TMP/out" 2> "$TMP/err"; st=$?
