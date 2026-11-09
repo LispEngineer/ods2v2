@@ -533,14 +533,14 @@ class Harness:
         else:
             self.ods5 = cfg.startswith('f5')
             sizes = {'fill': [8192, 8200, 9973, 16384, 20000], 'frag': [8192, 9000, 16384], 'bigdir': [65536, 131072],
-                     'deep': [16384, 32768], 'indexf': [32768, 65536], 'bigfile': [131072, 262144, 400000],
+                     'deep': [16384, 32768], 'indexf': [32768, 65536], 'bigfile': [131072, 262144, 400000], 'shatter': [8192, 9000],
                      }.get(self.profile, [8192, 8200, 9973, 16384, 20000, 32768, 65536, 131072, 262144])
             size = r.choice(sizes)
             size = self.opts.get('size', size)
             args = [ODS2_INIT, self.img, str(size), '--structure=%d' % (5 if self.ods5 else 2),
                     '--label=STRESS%d' % (self.seed % 1000)]
-            cl = r.choice([1, 2, 3, 4, 8, 16]) if self.profile != 'frag' else r.choice([1, 1, 1, 2, 3])
-            use_cl = (r.random() < 0.6) or self.profile == 'frag'
+            cl = r.choice([1, 2, 3, 4, 8, 16]) if self.profile not in ('frag', 'shatter') else r.choice([1, 1, 1, 2, 3])
+            use_cl = (r.random() < 0.6) or self.profile in ('frag', 'shatter')
             if 'cluster' in self.opts:
                 cl, use_cl = self.opts['cluster'], True
             if use_cl:
@@ -1138,6 +1138,8 @@ class Harness:
         if len(outs) != len(items):
             self.fail('batch ran %d of %d commands: %s' % (len(outs), len(items), text[-400:]))
         for (dp, display, data), (c, ok, t) in zip(items, outs):
+            if not ok and len(items) < 5:
+                self.note('copy refused (%s, %d bytes): %s' % (display[:30], len(data), t.strip().replace('\n', ' | ')[:300]))
             if ok:
                 self.model.add_file(dp, display, Obj('file', hashlib.md5(data).hexdigest(), len(data)))
         return [o[1] for o in outs], [o[2] for o in outs]
@@ -1329,6 +1331,39 @@ class Harness:
         if res.ok:
             m.remove_dir(('FRAG',))
         self.verify('everything deleted')
+
+    def scenario_shatter(self):
+        """every cluster of a small volume a file of its own, every other one deleted, then a file needing more pieces
+        than the 1024 extents ods2v2 can map: it must succeed or be refused cleanly, never corrupt"""
+        r, m = self.rng, self.model
+        res = run_ods2(self.img, 'CREATE/DIRECTORY [SH]')
+        m.add_dir((), 'SH')
+        dp = ('SH',)
+        n = 0
+        while True:
+            items = [(dp, 'S%05d.D' % (n + i), gen_content(r, 1 + (n + i) % 400, 'tagged')) for i in range(500)]
+            oks, texts = self.batch_copy(items)
+            n += 500
+            if not all(oks) or n >= 9000:
+                break
+        self.verify('shattered volume full of small files (%d)' % sum(1 for k in m.ents if k[0] == m.fkpath(dp)), export=False)
+        keep = sorted(d for (fp, key, v), (d, o) in m.ents.items() if fp == m.fkpath(dp))
+        gone = keep[::2]
+        self.batch_delete([(dp, g, 1) for g in gone])
+        self.verify('every other file deleted (%d holes)' % len(gone), export=False)
+        free = self.free_blocks
+        for want in (free // self.cluster * self.cluster - 40 * self.cluster, free // self.cluster * self.cluster, 1100 * self.cluster, 1500 * self.cluster):
+            data = gen_content(r, max(want, 1) * 512 - r.randint(0, 100), 'tagged')
+            ok = self.batch_copy([((), 'SHATTER%d.DAT' % want, data)])[0][0]
+            vol = self.vol_stats()
+            self.note('shatter: %d blocks wanted, ok=%s, max extents %d, extension headers %d' % (want, ok, vol.max_extents, vol.nheaders_ext))
+            self.verify('shatter file %d (%s)' % (want, 'ok' if ok else 'refused'), export=True)
+            self.coverage = {'max_extents': vol.max_extents}
+        rest = [(dp, k, 1) for k in keep if k not in gone]
+        self.batch_delete([((), d, 1) for (fp, key, v), (d, o) in list(m.ents.items()) if fp == m.fkpath(()) and d.startswith('SHATTER')])
+        self.verify('shatter files deleted', export=False)
+        self.batch_delete(rest)
+        self.verify('all small files deleted', export=False)
 
     def scenario_bigdir(self):
         r, m = self.rng, self.model
@@ -1535,7 +1570,7 @@ def pick_config(seed, only=None, profile='mix'):
     rng = random.Random(seed)
     if only:
         return only
-    if profile in ('fill', 'frag', 'bigdir', 'deep', 'indexf', 'reserved'):
+    if profile in ('fill', 'frag', 'bigdir', 'deep', 'indexf', 'reserved', 'shatter'):
         return 'f5' if rng.random() < 0.6 else 'f2'    # scenarios need a volume of their own size
     r = rng.random()
     if r < 0.4:
