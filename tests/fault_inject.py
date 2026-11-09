@@ -2,7 +2,7 @@
 # MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
 """fault_inject.py - crash consistency of every write operation (review 6, finding 2).
 
-The test build of ods2 (see ODS2_FAULT_INJECTION in src/ods2_volume.c) ends the process, as a kill or a
+The test build of ods2 (ods2_fault, built with ODS2_FAULT_INJECTION: see src/ods2_volume.c) ends the process, as a kill or a
 power cut would, after the k-th write to the volume when ODS2_FAULT_AFTER_WRITES=k. For each operation
 this script learns n, the number of writes (ODS2_FAULT_COUNT=1), then runs it on a fresh copy of a base
 volume for k = 1..n and checks what is left:
@@ -18,7 +18,7 @@ Exit status 1 if any check failed; the report names the operation, level and k.
 """
 import argparse, hashlib, os, re, shutil, subprocess, sys
 
-ODS2 = os.environ.get('FAULT_ODS2', './ods2')
+ODS2 = os.environ.get('FAULT_ODS2', './ods2_fault')
 INIT = './ods2_init'
 CHECK = ['python3', '-I', 'tests/ods5check.py']
 WORK = os.path.join(os.environ.get('TMPDIR', 'samples'), 'fault_inject_work')
@@ -30,6 +30,7 @@ ALLOWED = [
     r'index bitmap bit \d+ set beyond the index file EOF',
     r'its back link directory \d+ has no entry for it',
     r'is not reachable from the root',
+    r'which is marked for delete \(a half-done delete\)',   # DELETE's first write: the header is marked, the entry goes next
 ]
 
 

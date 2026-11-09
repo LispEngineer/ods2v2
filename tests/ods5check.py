@@ -524,7 +524,9 @@ def main():
             hd = headers.get(fnum)
             if hd is None:
                 if fnum in pending:
-                    fnd.info('dir %d: %r;%d -> file %d, marked for delete' % (dn, nm, ver, fnum))
+                    # VMS removes the entry before it frees anything; on the VMS-made AXP1 system disk none of
+                    # its 9 marked headers is listed. An entry for one is a half-done delete (ours, or damage).
+                    fnd.err('dir %d: %r;%d -> file %d, which is marked for delete (a half-done delete)' % (dn, nm, ver, fnum))
                 elif fnum in deleted or not idx_used(fnum):
                     fnd.warn('dir %d: %r;%d -> file %d is not in use (dangling alias?)' % (dn, nm, ver, fnum))
                 else:
