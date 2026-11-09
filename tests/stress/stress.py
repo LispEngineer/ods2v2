@@ -583,6 +583,8 @@ class Harness:
                 args.append('--access-dates')
             if self.profile == 'indexf':
                 args.append('--maxfiles=%d' % r.choice([300, 600, 1500]))
+            if self.opts.get('target'):
+                args.append('--target=%s' % self.opts['target'])      # device geometry in the SCB (ld = physical VAX96 LD driver, ra = SIMH VAX)
             self.note('init: ' + ' '.join(args[1:]))
             res = subprocess.run(args, capture_output=True, env=ENV, text=True)
             if res.returncode != 0:

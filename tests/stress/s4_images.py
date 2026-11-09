@@ -6,7 +6,7 @@ Builds each image with the stress harness (so every operation was checked: ods5c
 EXPORT = model), then writes the image (mode 444), its SHA-256 and two manifests made from the MODEL, never from
 ods2v2's output: MANIFEST_LINUX (md5 size kind path) and MANIFEST_VMS (md5 size DCL file specification with ^-escapes).
 
-usage: s4_images.py OUTDIR [--only NAME ...]      (from the project root, ods2 and ods2_init built, run inside a memory scope)
+usage: s4_images.py OUTDIR [--only NAME ...] [--target ld|ra|...]      (from the project root, ods2 and ods2_init built, run inside a memory scope)
 """
 import argparse, hashlib, os, shutil, subprocess, sys
 
@@ -33,17 +33,27 @@ SPECS = {
 }
 
 
-def build(name, outdir):
+def build(name, outdir, target=None):
     profile, config, seed, ops, stop, opts, desc = SPECS[name]
     wd = os.path.join(stress.WORK, 's4', name)
     shutil.rmtree(wd, ignore_errors=True)
     os.makedirs(wd)
     h = stress.Harness(seed, profile, config, ops, wd, check_every=1, big=True)
     h.stop = stop
-    h.opts = opts
+    h.opts = dict(opts)
+    if target:
+        h.opts['target'] = target
     h.run()                     # raises Failure if any check fails
     base = os.path.join(outdir, name)
     shutil.copyfile(h.img, base + '.img')
+    if target and config.startswith('vms:'):
+        # a VMS-made image keeps its own geometry unless asked: fit its storage control block to the target device
+        r = subprocess.run([stress.ODS2, base + '.img', 'SET VOLUME/GEOMETRY=%s' % target], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise stress.Failure('SET VOLUME/GEOMETRY=%s on %s: %s' % (target, name, (r.stdout + r.stderr)[-300:]))
+        summ = stress.run_checker(base + '.img')[0]
+        if summ != '0 error(s), 0 warning(s)':
+            raise stress.Failure('%s after SET VOLUME/GEOMETRY: checker %s' % (name, summ))
     h.write_manifests(base)
     os.chmod(base + '.img', 0o444)
     for ext in ('.MANIFEST_LINUX.TXT', '.MANIFEST_VMS.TXT'):
@@ -56,6 +66,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('outdir')
     ap.add_argument('--only', nargs='*')
+    ap.add_argument('--target', help='device the images are for: ld (physical VAX96, LD driver), ra (SIMH VAX), ... passed to ods2_init --target= (default: ods2_init as it is)')
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
     for name in (a.only or SPECS):
@@ -65,7 +76,7 @@ def main():
                 os.chmod(p, 0o644)
                 os.unlink(p)
         try:
-            desc = build(name, a.outdir)
+            desc = build(name, a.outdir, a.target)
             print('%-14s ok   %s' % (name, desc), flush=True)
         except stress.Failure as e:
             print('%-14s FAIL %s' % (name, str(e)[:500]), flush=True)
