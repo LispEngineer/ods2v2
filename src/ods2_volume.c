@@ -403,6 +403,9 @@ static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uin
     if (fflush(vol->fp) != 0) {
         return fail("could not flush written block");
     }
+#ifdef ODS2_FAULT_INJECTION
+    if (getenv("ODS2_FAULT_TRACE") != NULL) fprintf(stderr, "ODS2_FAULT: write %ld = LBN %u\n", fault_writes + 1, (unsigned) lbn);
+#endif
     fault_point();
     return ok();
 }
@@ -2547,7 +2550,7 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
     ods2_extent_t old_extents[ODS2_MAX_EXTENTS];
     int old_count, i;
     unsigned allocated = 0, v;
-    bool moved = false;
+    bool moved = false, in_place_growth = false;
     uint8_t zero[512];
     ods2_result_t r;
 
@@ -2597,6 +2600,17 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
         core->map_inuse = (uint8_t) (ptr_size / 2);
         core->recattr.hiblk = ods2_word_swap32(got);
         moved = true;
+    } else if (used == old_used + 1 && first_changed < old_used) {
+        /* A block that splits, with the next blocks moving down one (F2, found by the stress harness): the
+           blocks are rewritten in an order in which every name stays listed at every write, a name listed
+           twice for a moment being harmless and a name missing not. First the old last block's copy goes into
+           the block just past the end-of-file (invisible there); the header then moves the end-of-file over
+           it (below); then each block takes the place of the one before it, from the end back to the block
+           that split, which is rewritten last: until then its names are all still there, and the new second
+           half is a second copy of the names the old block still holds. */
+        in_place_growth = true;
+        r = ods2_write_file_block(vol, dir_header, used, blocks + (size_t) (used - 1) * 512);
+        if (!r.ok) return r;
     } else {
         for (v = first_changed; v < used; v++) {
             r = ods2_write_file_block(vol, dir_header, v + 1, blocks + (size_t) v * 512);
@@ -2658,6 +2672,13 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
     }
     r = ods2_write_header(vol, dir_file_number, dir_header);
     if (!r.ok) return r;
+
+    if (in_place_growth) {
+        for (v = used - 1; v > first_changed; v--) {     /* blocks[v - 1] .. blocks[first_changed], last first */
+            r = ods2_write_file_block(vol, dir_header, v, blocks + (size_t) (v - 1) * 512);
+            if (!r.ok) return r;
+        }
+    }
 
     if (moved) {
         for (i = 0; i < old_count; i++) {
