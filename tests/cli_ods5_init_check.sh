@@ -52,5 +52,25 @@ check "ods2_init never overwrites an existing image" 1 "$($INIT "$img" 64M >/dev
 check "the refused image is not created" "no" "$([ -e "$TMP/bad.img" ] && echo yes || echo no)"
 check "too small a volume is refused" 1 "$($INIT "$TMP/small.img" 1000 >/dev/null 2>&1; echo $?)"
 
+# a full volume: writes fail with a message, nothing is left half done, deleting gives the space back
+img="$TMP/full.img"
+$INIT "$img" 8192 --label=FULL >/dev/null 2>&1
+head -c 1000000 /dev/zero > "$TMP/mb.bin"
+for i in 1 2 3 4 5 6 7 8; do $ODS2 "$img" "COPY $TMP/mb.bin [000000]F$i.BIN" >/dev/null 2>&1; done
+check "a full volume refuses a file with a message" 1 \
+    "$($ODS2 "$img" "COPY $TMP/mb.bin [000000]ONEMORE.BIN" 2>&1 | grep -c 'not enough free space')"
+check "...and is still consistent" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" | tail -1)"
+for i in 1 2 3 4 5 6 7 8; do $ODS2 "$img" "DELETE [000000]F$i.BIN" >/dev/null 2>&1; done
+check "after deleting everything the space is back" "Free blocks: 8166" \
+    "$($ODS2 "$img" 'SHOW VOLUME' 2>&1 | sed -n 's/^  Free blocks: */Free blocks: /p')"
+
+# writes to damaged volumes (see fuzz_ods5.py --write): errors, never crashes
+mkdir -p "$TMP/fz/sub"
+printf 'hello\n' > "$TMP/fz/hello.txt"; printf 'x\n' > "$TMP/fz/sub/a b.txt"; ln -s hello.txt "$TMP/fz/ln1"
+$INIT "$TMP/fzbase.img" 64M --hardlinks >/dev/null 2>&1
+$ODS2 "$TMP/fzbase.img" "IMPORT $TMP/fz [000000]" >/dev/null 2>&1
+check "60 iterations of writing to a damaged ODS-5 volume: no crash, hang or sanitizer report" 0 \
+    "$(python3 -I tests/fuzz_ods5.py $ODS2 "$TMP/fzbase.img" 60 7 "$TMP/fzwork" --write "$TMP/fz" >/dev/null 2>&1; echo $?)"
+
 rm -rf "$TMP"
 [ "$fails" -eq 0 ] || { echo "$fails INITIALIZE check(s) failed"; exit 1; }

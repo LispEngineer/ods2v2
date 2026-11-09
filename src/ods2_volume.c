@@ -341,6 +341,18 @@ static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_neede
         return fail("BITMAP.SYS is too small to contain both an SCB and bitmap data");
     }
     bits_blocks = total_bitmap_blocks - 1;
+    {
+        /* a damaged BITMAP.SYS header can claim any size: the bitmap of this image
+           needs one bit per cluster, so more than a few blocks over that is damage */
+        long here = ftell(vol->fp);
+        long image_blocks = 0;
+        if (fseek(vol->fp, 0, SEEK_END) == 0) image_blocks = ftell(vol->fp) / 512;
+        (void) fseek(vol->fp, here, SEEK_SET);
+        if (image_blocks > 0 && vol->home.cluster != 0 &&
+            (uint64_t) bits_blocks > (uint64_t) image_blocks / vol->home.cluster / 4096u + vol->home.cluster + 8u) {
+            return fail("BITMAP.SYS claims more blocks than the volume needs for its bitmap: damaged");
+        }
+    }
 
     total_bytes = (size_t) bits_blocks * 512;
     total_bits = total_bytes * 8;
@@ -2189,6 +2201,9 @@ static ods2_result_t load_directory(ods2_volume_t *vol, const uint8_t *dir_heade
     if (allocated == 0) return fail("directory has no blocks allocated");
     used = dir_blocks_in_use(dir_header, allocated);
     if (used == 0) used = 1;
+    if (used > 65536u) {
+        return fail("directory claims more than 65536 blocks: damaged, or too big to change here");
+    }
 
     blocks = calloc((size_t) used + spare, 512);
     if (blocks == NULL) return fail("could not allocate memory for the directory");

@@ -2,7 +2,11 @@
 # MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
 """fuzz_ods5.py - damaged ODS-5 images must give errors, never crashes.
 
-Usage: fuzz_ods5.py ODS2_BINARY BASE_IMAGE ITERATIONS SEED WORKDIR [--quick]
+Usage: fuzz_ods5.py ODS2_BINARY BASE_IMAGE ITERATIONS SEED WORKDIR [--quick] [--write TREE]
+
+With --write TREE the runs are writes instead: on the damaged image ods2 runs a script that makes directories
+(with ^-escapes), imports the Linux directory TREE, makes symbolic and hard links, deletes files and directories
+and relabels the volume. Writing to a damaged volume must fail with a message, never crash, hang or run wild.
 
 Each iteration copies BASE_IMAGE (reflink/sparse copy when the file system has them), damages it - random
 bytes or extreme values in the home block, in file headers (FI5 name length and name type, offsets, map
@@ -157,6 +161,10 @@ def bad(rc, err):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     quick = '--quick' in sys.argv
+    tree = None
+    if '--write' in sys.argv:
+        tree = sys.argv[sys.argv.index('--write') + 1]
+        args = [a for a in args if a != tree]
     binary, base, iters, seed, work = args[0], args[1], int(args[2]), int(args[3]), args[4]
     os.makedirs(work, exist_ok=True)
     rng = random.Random(seed)
@@ -173,6 +181,16 @@ def main():
         out = os.path.join(work, 'out')
         runs = [['SHOW VOLUME'], ['DIR/FULL [...]'], ['EXPORT/VERSIONS [000000...]*.* ' + out]]
         if quick: runs = runs[1:2]
+        if tree:
+            script = os.path.join(work, 'write.cmd')
+            open(script, 'w').write('\n'.join([
+                'CREATE/DIRECTORY [Fuzz^_Dir]', 'CREATE/DIRECTORY [Fuzz^_Dir.Sub^.Dots]',
+                'IMPORT %s [Fuzz^_Dir]' % tree, 'COPY %s/hello.txt [Fuzz^_Dir.Sub^.Dots]' % tree,
+                'SYMLINK [Fuzz^_Dir]sl.lnk target.txt', 'LINK [Fuzz^_Dir]hl.txt [Fuzz^_Dir]hello.txt',
+                'DELETE [Fuzz^_Dir]hl.txt', 'DELETE [Fuzz^_Dir]hello.txt', 'DELETE [Fuzz^_Dir]sl.lnk',
+                'SET VOLUME/LABEL=FUZZED', 'DIR/FULL [...]', 'DELETE [Fuzz^_Dir.Sub^.Dots]hello.txt',
+                'DELETE [Fuzz^_Dir.Sub^.Dots]', 'DELETE [000000]Fuzz^_Dir.DIR', '']))
+            runs = [['@' + script]]
         for a in runs:
             shutil.rmtree(out, ignore_errors=True)
             cmd, rc, err, so = run(binary, img, a)
