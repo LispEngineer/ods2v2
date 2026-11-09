@@ -219,6 +219,32 @@ ods2_result_t ods2_mount_write(const char *path, ods2_volume_t *vol)
     return mount_internal(path, vol, "r+b", true);
 }
 
+#ifdef ODS2_FAULT_INJECTION
+/* Fault injection for the test build (not in `make release`): with ODS2_FAULT_AFTER_WRITES=k in the
+   environment the process ends at once (_Exit(99), as a kill or a power cut would, nothing more written
+   or flushed) after the k-th write to the volume - one write is one ods2_write_block() or one chunk of
+   file content in write_extents(), flushed first. ODS2_FAULT_COUNT=1 makes a mount for write print
+   "ODS2_FAULT: n writes" to stderr when it is dismounted, so a harness can learn how many k there are. */
+static long fault_writes;
+
+static void fault_point(void)
+{
+    static long limit = -2;
+    if (limit == -2) {
+        const char *e = getenv("ODS2_FAULT_AFTER_WRITES");
+        limit = (e != NULL && *e != '\0') ? atol(e) : -1;
+    }
+    fault_writes++;
+    if (limit >= 0 && fault_writes >= limit) {
+        fprintf(stderr, "ODS2_FAULT: ended after %ld writes\n", fault_writes);
+        fflush(stderr);
+        _Exit(99);
+    }
+}
+#else
+#define fault_point() ((void) 0)
+#endif
+
 ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block)
 {
     if (!vol->writable) {
@@ -231,11 +257,17 @@ ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *
     if (fflush(vol->fp) != 0) {
         return fail("could not flush written block");
     }
+    fault_point();
     return ok();
 }
 
 void ods2_dismount(ods2_volume_t *vol)
 {
+#ifdef ODS2_FAULT_INJECTION
+    if (vol->writable && getenv("ODS2_FAULT_COUNT") != NULL) {
+        fprintf(stderr, "ODS2_FAULT: %ld writes\n", fault_writes);
+    }
+#endif
     if (vol->fp != NULL) {
         fclose(vol->fp);
         vol->fp = NULL;
@@ -1566,6 +1598,11 @@ static ods2_result_t write_extents(ods2_volume_t *vol, const ods2_extent_t *exte
                 r = fail("could not write file content blocks");
                 break;
             }
+            if (fflush(vol->fp) != 0) {
+                r = fail("could not flush written file content");
+                break;
+            }
+            fault_point();
             data -= piece;
             offset += piece;
         }
@@ -2560,6 +2597,10 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
     ods2_extent_t extents[ODS2_MAX_EXTENTS];
     int extent_count;
     int i;
+    uint8_t original_header[512];
+    uint8_t ext_headers[ODS2_MAX_HEADER_SEGMENTS][512];
+    unsigned ext_numbers[ODS2_MAX_HEADER_SEGMENTS];
+    int ext_count = 0;
     ods2_result_t r;
 
     if (info != NULL) memset(info, 0, sizeof(*info));
@@ -2687,70 +2728,82 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
         }
     }
 
-    /* Free every content block back to BITMAP.SYS, walking all
-       extents (across any extension headers). */
+    /* Read everything the delete needs before anything is changed, so that a failure here (a damaged
+       map, an extension header that cannot be read) leaves the file as it was. */
     r = ods2_decode_all_extents(vol, target_header, extents, ODS2_MAX_EXTENTS, &extent_count);
     if (!r.ok) return r;
+    {
+        ods2_fid_t next = target_core->ext_fid;
+        while (next.fid_num != 0) {
+            if (ext_count >= ODS2_MAX_HEADER_SEGMENTS) {
+                return fail("extension header chain exceeded maximum segment limit "
+                            "(possibly corrupted or circular ext_fid chain)");
+            }
+            ext_numbers[ext_count] = next.fid_num;
+            r = ods2_read_header(vol, next.fid_num, ext_headers[ext_count]);
+            if (!r.ok) return r;
+            next = ((ods2_head_core_t *) ext_headers[ext_count])->ext_fid;
+            ext_count++;
+        }
+    }
+
+    /* VMS's own order (review 6, finding 2), so that an interruption never leaves a listed file whose
+       clusters are free: (a) mark the header for delete, FID and checksum intact; (b) remove the
+       directory entry; (c) free the blocks; (d) release the extension headers; (e) write the final deleted
+       header and clear the file number's bit. After (a) the file reads as gone (ods2_header_is_file);
+       what an interruption leaves from then on is a leak that ANALYZE/DISK/REPAIR cleans up. */
+    memcpy(original_header, target_header, sizeof(original_header));
+    target_core->filechar |= 0x8000u; /* FH2$M_MARKDEL, confirmed value */
+    {
+        uint16_t checksum = ods2_checksum(target_header, 255);
+        target_header[510] = (uint8_t) (checksum & 0xff);
+        target_header[511] = (uint8_t) (checksum >> 8);
+    }
+    r = ods2_write_header(vol, target_fid.fid_num, target_header);
+    if (!r.ok) return r;
+
+    r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+    if (!r.ok) {
+        /* the entry is still there: give the file its header back (best effort) */
+        (void) ods2_write_header(vol, target_fid.fid_num, original_header);
+        return r;
+    }
+
     for (i = 0; i < extent_count; i++) {
         r = ods2_free_blocks(vol, extents[i].lbn, extents[i].block_count);
         if (!r.ok) return r;
     }
 
-    /* Release any extension headers too (spec 3.3): each has its own
-       file number and header slot, freed and marked deleted exactly
-       like the primary below. Left alone they would stay allocated,
-       owned by nothing. */
-    {
-        ods2_fid_t next = target_core->ext_fid;
-        int segments = 0;
-        while (next.fid_num != 0) {
-            uint8_t ext_header[512];
-            ods2_head_core_t *ext_core = (ods2_head_core_t *) ext_header;
-            unsigned ext_number = next.fid_num;
+    /* Extension headers (spec 3.3): each has its own file number and header slot, released like the
+       primary below. Left alone they would stay allocated, owned by nothing. */
+    for (i = 0; i < ext_count; i++) {
+        ods2_head_core_t *ext_core = (ods2_head_core_t *) ext_headers[i];
 
-            if (++segments > ODS2_MAX_HEADER_SEGMENTS) {
-                return fail("extension header chain exceeded maximum segment limit "
-                            "(possibly corrupted or circular ext_fid chain)");
-            }
-            r = ods2_read_header(vol, ext_number, ext_header);
-            if (!r.ok) return r;
-            next = ext_core->ext_fid;
-            r = mark_index_bitmap(vol, ext_number, false);
-            if (!r.ok) return r;
-            ext_core->filechar |= 0x8000u; /* FH2$M_MARKDEL */
-            ext_core->fid.fid_num = 0;
-            ext_core->fid.fid_nmx = 0;
-            ext_core->fid.fid_rvn = 0;
-            ext_header[510] = 0;
-            ext_header[511] = 0;
-            r = ods2_write_header(vol, ext_number, ext_header);
-            if (!r.ok) return r;
-        }
+        ext_core->filechar |= 0x8000u;
+        ext_core->fid.fid_num = 0;
+        ext_core->fid.fid_nmx = 0;
+        ext_core->fid.fid_rvn = 0;
+        ext_headers[i][510] = 0;
+        ext_headers[i][511] = 0;
+        r = ods2_write_header(vol, ext_numbers[i], ext_headers[i]);
+        if (!r.ok) return r;
+        r = mark_index_bitmap(vol, ext_numbers[i], false);
+        if (!r.ok) return r;
     }
 
-    /* Free the file number in the index file's own bitmap. */
-    r = mark_index_bitmap(vol, target_fid.fid_num, false);
-    if (!r.ok) return r;
-
-    /* Mark the header itself deleted, per spec 3.5.1's exact rules:
-       FH2$V_MARKDEL set, FID_NUM/NMX/RVN zeroed - but FH2$W_FID_SEQ
-       is explicitly NOT touched, since spec 5.1.7 requires it to
-       survive so the next use of this slot gets seq+1, not a fresh
-       seq of 1 (that rule is only for a slot that was never used at
-       all - "garbage" - which this no longer is). Checksum is set to
-       zero, not recomputed - also an explicit spec rule, not an
-       oversight. */
-    target_core->filechar |= 0x8000u; /* FH2$M_MARKDEL, confirmed value */
+    /* The header itself, per spec 3.5.1's exact rules: FH2$V_MARKDEL set, FID_NUM/NMX/RVN zeroed - but
+       FH2$W_FID_SEQ is explicitly NOT touched, since spec 5.1.7 requires it to survive so the next use
+       of this slot gets seq+1, not a fresh seq of 1 (that rule is only for a slot that was never used at
+       all - "garbage" - which this no longer is). Checksum is set to zero, not recomputed - also an
+       explicit spec rule, not an oversight. Then the file number is free in the index file's bitmap. */
     target_core->fid.fid_num = 0;
     target_core->fid.fid_nmx = 0;
     target_core->fid.fid_rvn = 0;
     target_header[510] = 0;
     target_header[511] = 0;
-
     r = ods2_write_header(vol, target_fid.fid_num, target_header);
     if (!r.ok) return r;
-
-    r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+    r = mark_index_bitmap(vol, target_fid.fid_num, false);
     if (!r.ok) return r;
 
     if (version_out != NULL) *version_out = target_version;

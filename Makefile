@@ -14,7 +14,8 @@
 # dependencies everywhere - no separate install step on any platform.
 
 CC       = gcc
-CFLAGS   = -Wall -Wextra -std=c11 -Iinclude -g
+FAULT    = -DODS2_FAULT_INJECTION
+CFLAGS   = -Wall -Wextra -std=c11 -Iinclude -g $(FAULT)
 SANFLAGS = -fsanitize=address,undefined
 BUILD    = build
 
@@ -292,6 +293,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@sh tests/cli_ods5_init_check.sh
 	@echo "--- cli_ods5_integrity_check ---"
 	@sh tests/cli_ods5_integrity_check.sh
+	@echo "--- fault_inject (interrupted writes) ---"
+	@python3 tests/fault_inject.py --quick
 	@echo "--- cli_ods5_review_check ---"
 	@sh tests/cli_ods5_review_check.sh
 	@echo "--- cli_records_check ---"
@@ -329,6 +332,7 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 
 release: CFLAGS += -O2
 release: SANFLAGS =
+release: FAULT =
 release: test
 
 clean:
