@@ -553,6 +553,27 @@ for level in 2 5; do
     check "ODS-$level: and a later process works again, the old leak being a leak" "KEEP.TXT" "$(./ods2 "$img" 'DIR [000000]KEEP.TXT' 2>&1 | grep -o KEEP.TXT | head -1)"
 done
 
+# ---- R10-2: file 10 on an ODS-2 volume is reserved only when it is the SECURITY.SYS of the master file directory
+# (the DELETE rule): a header 10 that names another file can be linked to
+img="$TMP/s10.img"
+$INIT "$img" 8192 --structure=2 --label=FILE10 >/dev/null 2>&1
+python3 -I - "$img" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+pos = (base + 9) * 512                      # file 10
+f.seek(pos); h = bytearray(f.read(512))
+o = h[0] * 2                                # the ident: FI2$T_FILENAME first, 20 characters
+h[o:o + 20] = b'MYFILE.DAT;1'.ljust(20)
+struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+f.seek(pos); f.write(h)
+PY
+check "ODS-2: LINK to file 10 when it is not SECURITY.SYS is allowed (as DELETE's rule)" "ok" \
+    "$($ODS2 "$img" 'LINK [000000]AL.TXT [000000]SECURITY.SYS' >/dev/null 2>&1 && echo ok)"
+img="$TMP/s10b.img"
+$INIT "$img" 8192 --structure=2 --label=FILE10 >/dev/null 2>&1
+check "ODS-2: LINK to file 10 when it is SECURITY.SYS is refused" "1" "$($ODS2 "$img" 'LINK [000000]AL.TXT [000000]SECURITY.SYS' >/dev/null 2>&1; echo $?)"
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"

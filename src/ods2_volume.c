@@ -2171,12 +2171,34 @@ static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_numb
     if (!r.ok) return r;
     /* the volume's own files cannot be given another name or link either (F3): a hard link would count into
        INDEXF.SYS's header, an alias would make the master directory list a second name for it */
-    if (ods2_fid_number(target) >= 1 && ods2_fid_number(target) <= 10) {
+    if (ods2_fid_number(target) >= 1 && ods2_fid_number(target) <= 9) {
         return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
                     "SECURITY.SYS): it cannot be linked");
     }
     r = ods2_read_header(vol, ods2_fid_number(target), target_header);
     if (!r.ok) return r;
+    if (ods2_fid_number(target) == 10) {
+        /* the same rule as DELETE (is_reserved_file): file 10 is SECURITY.SYS on ODS-5; on an ODS-2 volume it
+           is only if it is the SECURITY.SYS of the master file directory (an older volume's user file may
+           hold the number) */
+        ods5_ident_t id;
+        const char *why;
+        bool security = false;
+        if (vol->ods5) {
+            security = true;
+        } else if (ods2_fid_number(core->backlink) == 4 && ods5_read_ident(target_header, &id, &why)) {
+            static const char name[] = "SECURITY.SYS";
+            size_t i;
+            security = strlen(id.name) == sizeof(name) - 1;
+            for (i = 0; security && i < sizeof(name) - 1; i++) {
+                security = toupper((unsigned char) id.name[i]) == name[i];
+            }
+        }
+        if (security) {
+            return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
+                        "SECURITY.SYS): it cannot be linked");
+        }
+    }
     if (ods2_fid_number(core->fid) != ods2_fid_number(target) || core->fid.fid_seq != target.fid_seq ||
         (core->filechar & 0x8000u)) {
         return fail("the file to link to does not exist");

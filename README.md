@@ -576,17 +576,18 @@ in every structural test.
   version 1 of a new name only.
 - `TYPE` and `DELETE` don't take wildcards yet, in file names or
   directories (VMS's do); only `DIR` does.
-- INDEXF.SYS is extended as new files need it, anywhere on a volume
-  of any size (Format 1 retrieval pointers below LBN 4,194,304,
-  Format 2 above it), up to what its own header's map area holds -
-  a few dozen extensions of up to 256 blocks (one header each), so
-  on the order of ten thousand files beyond the headers INITIALIZE
-  preallocated (`/HEADERS`). INDEXF.SYS extension headers aren't
-  written.
-- File numbers stop at 65,535 (the FID_NMX extension isn't used, also when a directory entry is checked against
-  the file header it names).
-- A directory is limited to 256 blocks (a few thousand entries), the
-  most one contiguous extent can map here.
+- INDEXF.SYS is extended as new files need it, anywhere on a volume of any size (Format 1 retrieval pointers
+  below LBN 4,194,304, Format 2 above it): by 256 blocks at a time while it is under 4,096 blocks, then by half
+  its size, at most 16,384 blocks (one Format 2 pointer). Only the pointers its own header's map area holds are
+  available (about 51 Format 2 ones: roughly 510,000 files, more if the early steps were small); past that new
+  files are refused ("no room for another extent") and nothing else is affected. INDEXF.SYS extension headers
+  are read (a VMS volume that has them mounts) but not yet written.
+- File numbers are 24 bits (up to 16,777,215, FID_NMX << 16 | FID_NUM), bounded by the volume's MAXIMUM_FILES
+  and its index bitmap; an entry naming a file by a relative volume number (a volume set) is refused.
+- A directory is limited to 65,536 blocks (32 MiB of records), the most one
+  contiguous extent is allowed here (it is held in memory while it changes), and directories nest at most 255
+  levels. A file with more than 1,024 extents, or a header chain with more than 64 segments, is refused
+  (read and delete) rather than handled partly.
 
 ## Dependencies
 
