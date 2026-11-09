@@ -960,7 +960,46 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         x->errors++;
         return;
     }
-    if (core->filechar & 0x2000u) { x->dirs_skipped++; return; }
+    if (core->filechar & 0x2000u) {
+        if (x->tree) {
+            /* tree mode: every directory is recreated, empty ones too */
+            size_t nl = strlen(e->name);
+            char dname[ODS2_DIR_MAX_NAME + 8], dcomp[ODS2_DIR_MAX_NAME * 3 + 16], dpath[ODS2_PATH_MAX * 3];
+            const char *rel = dir_spelling + strlen(x->start);
+            if (*rel == '.' && x->start[0] != '\0') rel++;
+            if (nl > 4 && ods2_dir_name_compare(e->name + nl - 4, 4, ".DIR", 4) == 0) {
+                snprintf(dname, sizeof(dname), "%.*s", (int) (nl - 4), e->name);
+                linux_component(dname, dcomp, sizeof(dcomp));
+                {
+                    /* the Linux path of the directory it sits in, as for a file below */
+                    char parent[ODS2_PATH_MAX * 2];
+                    snprintf(parent, sizeof(parent), "%s", x->local);
+                    while (*rel) {
+                        const char *end = rel;
+                        char lit[ODS2_PATH_MAX], comp2[ODS2_DIR_MAX_NAME * 3 + 16];
+                        size_t ul;
+                        while (*end && *end != '.') { if (*end == '^' && end[1]) end++; end++; }
+                        ul = ods5_unescape(rel, (size_t) (end - rel), lit, sizeof(lit));
+                        if (ul == (size_t) -1) snprintf(lit, sizeof(lit), "%.*s", (int) (end - rel), rel);
+                        linux_component(lit, comp2, sizeof(comp2));
+                        if (strlen(parent) + strlen(comp2) + 2 < sizeof(parent)) {
+                            strcat(parent, "/");
+                            strcat(parent, comp2);
+                        }
+                        rel = end;
+                        if (*rel == '.') rel++;
+                    }
+                    snprintf(dpath, sizeof(dpath), "%s/%s", parent, dcomp);
+                }
+                if (strlen(dpath) < 4000 && make_local_dirs(dpath, strlen(x->local))) return;
+                report_error("%%ODS2-E-MKDIR, cannot create %s: %s\n", dpath, strerror(errno));
+                x->errors++;
+                return;
+            }
+        }
+        x->dirs_skipped++;
+        return;
+    }
     special = ods5_special_type(header);
     if (special != 0 && special != ODS5_FAT_SYMBOLIC_LINK && special != ODS5_FAT_SYMLINK) {
         fprintf(stderr, "%%ODS2-W-SPECIAL, %s: special file (type %u) skipped\n", shown, special);
@@ -998,6 +1037,13 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
     }
     /* the Linux file name */
     snprintf(name, sizeof(name), "%s", e->name);
+    {
+        /* a name stored as "README." (no type; VMS always stores the dot) is "README" on Linux:
+           the one trailing dot that is the name's only dot is dropped, so that IMPORT and EXPORT
+           give back the same names (documented: a Linux "x." comes back as "x") */
+        size_t nl = strlen(name);
+        if (nl > 1 && name[nl - 1] == '.' && strchr(name, '.') == name + nl - 1) name[nl - 1] = '\0';
+    }
     linux_component(name, comp, sizeof(comp));
     if (x->versions) {
         size_t l = strlen(comp);
@@ -1595,6 +1641,8 @@ static bool convert_scan(host_input_t *in, ods2_text_var_scan_t *scan)
     return true;
 }
 
+static void import_decode_name(const char *linux_name, char *out, size_t cap);
+
 static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_parsed_path_t *p,
                      const ods2_record_attrs_t *attrs_in, const copy_options_t *opts)
 {
@@ -1642,7 +1690,7 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
                 report_error("%%ODS2-E-BADPATH, no destination filename given\n");
                 return;
             }
-            strcpy(literal_name, base);
+            import_decode_name(base, literal_name, sizeof(literal_name)); /* %XX as IMPORT reads it */
         }
         name = literal_name;
     }
@@ -1889,7 +1937,14 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             char dirname[ODS2_PATH_MAX + 8];
             snprintf(dirname, sizeof(dirname), "%s.DIR", literal);
             if (ods2_lookup_name(st->vol, dir_header, dirname, &fid).ok) {
-                /* already there: put the files into it */
+                /* already there: put the files into it, if it is a directory */
+                uint8_t existing[512];
+                if (!ods2_read_header(st->vol, fid.fid_num, existing).ok ||
+                    !(((const ods2_head_core_t *) existing)->filechar & 0x2000u)) {
+                    report_error("%%ODS2-E-NOTDIR, %s: a file of that name exists and is not a directory\n", shown);
+                    st->errors++;
+                    continue;
+                }
             } else {
                 r = ods2_create_directory(st->vol, dir_header, literal, &fid);
                 if (!r.ok) {

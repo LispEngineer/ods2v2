@@ -20,7 +20,11 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""ods5check.py - an independent structure check of an ODS-2/ODS-5 disk image
+"""RULE: every expectation in this checker comes from VMS-made images or the VSI definitions, never from
+what ods2v2 writes. After any change run it on all the VMS-made images (it must report 0 errors and 0
+warnings on each) before trusting it on ours.
+
+ods5check.py - an independent structure check of an ODS-2/ODS-5 disk image
 (a poor man's ANALYZE/DISK_STRUCTURE), written from the VSI definitions and the
 VMS-made images, sharing no code with ods2v2. Prints one line per finding and a
 summary; exit status 1 if there is any error.
@@ -373,9 +377,14 @@ def main():
                     fnd.err('%s: cluster %d (LBN %d) also owned by file %d' % (where, cl, cl * v.cluster, owner[cl]))
                 owner[cl] = n
         if b[7] == 5:
+            # FH2$W_LINKCOUNT as VMS V8.4 writes it (measured on VMS-made images only: ODS5T/ODS5T6 with
+            # HARDLINKS: 1 or more; ASIM8ODS5, AXP2ODS5 and the archive images without: 0)
             lc = u16(b, 74)
-            if lc != 1 and not (v.volchar & 0x40):
-                fnd.warn('%s: link count %d on a volume without HARDLINKS' % (where, lc))
+            if (v.volchar & 0x40):
+                if lc < 1:
+                    fnd.warn('%s: link count %d on a volume with HARDLINKS' % (where, lc))
+            elif lc != 0:
+                fnd.warn('%s: link count %d on a volume without HARDLINKS (VMS writes 0)' % (where, lc))
         # fixed-part sanity
         if u32(b, 52) & 0x2000:  # directory
             if b[20] & 0xF != 2:

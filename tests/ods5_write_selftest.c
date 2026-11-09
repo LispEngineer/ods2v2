@@ -54,6 +54,7 @@
 #include "ods2_header_build.h"
 #include "ods5_names.h"
 #include "ods5_ondisk.h"
+#include "ods2_init.h"
 
 #define SOURCE_DISK_PATH "samples/synthetic_disk.img"
 #define DISK_PATH        "samples/ods5_write_disk.img"
@@ -471,6 +472,112 @@ static void test_fragmented(void)
     remove(DISK_PATH);
 }
 
+/* A volume without HARDLINKS keeps link count 0 (as VMS V8.4 writes there); with it, 1. A write that
+   cannot finish (the parent directory cannot grow on a full volume) leaves nothing behind. */
+static void test_linkcount_and_failures(void)
+{
+    ods2_init_options_t opt;
+    ods2_volume_t vol;
+    uint8_t h[512], root[512];
+    unsigned pass, i;
+    ods2_fid_t fid, target;
+    uint32_t grab_lbn[9000];
+    unsigned grab_n[9000], grabbed = 0;
+
+    for (pass = 0; pass < 2; pass++) {
+        memset(&opt, 0, sizeof(opt));
+        opt.blocks = 8192; opt.label = "LINKS"; opt.level = 5;
+        opt.volchar = pass ? ODS5_VC_HARDLINKS : 0;
+        remove(DISK_PATH);
+        assert(ods2_initialize(DISK_PATH, &opt).ok);
+        assert(ods2_mount_write(DISK_PATH, &vol).ok);
+        /* the reserved headers (level 2) and new ones */
+        assert(ods2_read_header(&vol, 1, h).ok && rd16(h + 74) == pass);
+        assert(ods2_read_header(&vol, 4, h).ok && rd16(h + 74) == pass);
+        fid = make_file(&vol, 4, "one.txt", "1", 1);
+        assert(ods2_read_header(&vol, fid.fid_num, h).ok && rd16(h + 74) == pass);
+        root_header(&vol, root);
+        assert(ods2_create_directory(&vol, root, "sub", &target).ok);
+        assert(ods2_read_header(&vol, target.fid_num, h).ok && rd16(h + 74) == pass);
+        {
+            ods2_fid_t sl;
+            root_header(&vol, root);
+            if (pass == 0) {
+                assert(ods2_create_symlink(&vol, root, "sl", "one.txt", &sl).ok);
+                assert(ods2_read_header(&vol, sl.fid_num, h).ok && rd16(h + 74) == 0);
+            }
+        }
+        if (pass == 0) {
+            assert(!ods2_create_link(&vol, 4, "two.txt", fid).ok);      /* no links without the characteristic */
+            ods2_dismount(&vol);
+            continue;
+        }
+
+        /* --- pass 1 (HARDLINKS): fill the root directory (names sorting last) until every block of its
+               allocation is in use, so that the next record that does not fit needs a bigger allocation --- */
+        for (i = 0; i < 400; i++) {
+            char name[200];
+            ods2_result_t r;
+            uint8_t dh[512];
+            size_t used, allocated;
+            assert(ods2_read_header(&vol, 4, dh).ok);
+            used = (ods2_file_content_length(dh) + 511) / 512;
+            allocated = ods2_file_allocated_bytes(dh) / 512;
+            if (i > 0 && used == allocated) break;
+            snprintf(name, sizeof(name), "zzz-fill-%03u-%0120u.dat", i, i);
+            root_header(&vol, root);
+            r = ods2_create_file(&vol, root, name, (const uint8_t *) "x", 1, 5, &fid);
+            assert(r.ok);
+        }
+        assert(i < 400);
+        {   /* take every free cluster except the last one: the content of a new file fits, the directory cannot grow */
+            for (;;) {
+                uint32_t lbn;
+                unsigned got;
+                if (!ods2_allocate_blocks(&vol, vol.home.cluster, &lbn, &got).ok) break;
+                assert(grabbed < 9000);
+                grab_lbn[grabbed] = lbn; grab_n[grabbed] = got; grabbed++;
+            }
+            assert(grabbed >= 2);
+            grabbed--;
+            assert(ods2_free_blocks(&vol, grab_lbn[grabbed], grab_n[grabbed]).ok);   /* exactly one cluster free */
+        }
+        {
+            size_t free_before = free_clusters(&vol);
+            unsigned files_before = used_file_numbers(&vol);
+            ods2_fid_t hl_target;
+            ods2_result_t r;
+            root_header(&vol, root);
+            r = ods2_create_file(&vol, root, "zzz-new-file-that-needs-the-directory-to-grow-and-cannot-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901.dat", (const uint8_t *) "n", 1, 5, &fid);
+            assert(!r.ok);
+            assert(free_clusters(&vol) == free_before);              /* the content cluster is back */
+            assert(used_file_numbers(&vol) == files_before);          /* so is the file number */
+            r = ods2_create_directory(&vol, root, "zzz-new-directory-that-needs-the-parent-to-grow-and-cannot-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345", &fid);
+            assert(!r.ok);
+            assert(free_clusters(&vol) == free_before && used_file_numbers(&vol) == files_before);
+            r = ods2_create_symlink(&vol, root, "zzz-new-symlink-that-needs-the-directory-to-grow-and-cannot-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901", "x", &fid);
+            assert(!r.ok);
+            assert(free_clusters(&vol) == free_before && used_file_numbers(&vol) == files_before);
+            /* a link that cannot be entered leaves the count where it was */
+            root_header(&vol, root);
+            {
+                char fname[200];
+                snprintf(fname, sizeof(fname), "zzz-fill-%03u-%0120u.dat", 0u, 0u);
+                assert(ods2_lookup_name(&vol, root, fname, &hl_target).ok);
+            }
+            assert(ods2_read_header(&vol, hl_target.fid_num, h).ok && rd16(h + 74) == 1);
+            r = ods2_create_link(&vol, 4, "zzz-new-link-that-needs-the-directory-to-grow-and-cannot-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901", hl_target);
+            assert(!r.ok);
+            assert(ods2_read_header(&vol, hl_target.fid_num, h).ok && rd16(h + 74) == 1);
+            assert(free_clusters(&vol) == free_before && used_file_numbers(&vol) == files_before);
+        }
+        ods2_dismount(&vol);
+    }
+    remove(DISK_PATH);
+    printf("PASS: link count 0 on a volume without HARDLINKS, 1 with; a file, directory, symlink or link whose "
+           "directory entry cannot be made leaves no allocation, file number or count behind\n");
+}
+
 int main(void)
 {
     ods2_volume_t vol;
@@ -826,6 +933,7 @@ int main(void)
     (void) r; (void) h;
     remove(DISK_PATH);
     test_fragmented();
+    test_linkcount_and_failures();
     printf("\nods5_write_selftest: all checks passed\n");
     return 0;
 }

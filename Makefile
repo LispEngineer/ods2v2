@@ -129,8 +129,8 @@ $(BUILD)/ods5_header_selftest: tests/ods5_header_selftest.c src/ods5_header.c sr
 $(BUILD)/ods5_indexf_chain_selftest: tests/ods5_indexf_chain_selftest.c $(VOLUME_SRCS) include/ods2_volume.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods5_indexf_chain_selftest.c $(VOLUME_SRCS) -o $@
 
-$(BUILD)/ods5_write_selftest: tests/ods5_write_selftest.c $(VOLUME_SRCS) include/ods2_volume.h include/ods5_names.h samples/synthetic_disk.img | $(BUILD)
-	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods5_write_selftest.c $(VOLUME_SRCS) -o $@
+$(BUILD)/ods5_write_selftest: tests/ods5_write_selftest.c src/ods2_init.c include/ods2_init.h $(VOLUME_SRCS) include/ods2_volume.h include/ods5_names.h samples/synthetic_disk.img | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods5_write_selftest.c src/ods2_init.c $(VOLUME_SRCS) -o $@
 
 $(BUILD)/ods5_review_selftest: tests/ods5_review_selftest.c src/ods2_init.c include/ods2_init.h $(VOLUME_SRCS) include/ods2_volume.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods5_review_selftest.c src/ods2_init.c $(VOLUME_SRCS) -o $@

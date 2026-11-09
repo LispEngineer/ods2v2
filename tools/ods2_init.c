@@ -61,7 +61,7 @@ int main(int argc, char **argv)
     if (argc < 3) {
         fprintf(stderr, "usage: %s <new-image> <size> [--label=NAME] [--structure=2|5] [--hardlinks] "
                         "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N]\n"
-                        "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB)\n", argv[0]);
+                        "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 256\n", argv[0]);
         return 2;
     }
     memset(&opt, 0, sizeof(opt));

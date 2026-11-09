@@ -161,11 +161,12 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
         /* What VMS V8.4 writes for a file made on a level 5 volume
            (headers dumped from the ODS5T corpus image): the record
            protection word is zero, a directory is not deletable by
-           group or world (S:RWE,O:RWE,G:RE,W:E), the link count (the
-           word at byte 74) is 1. */
+           group or world (S:RWE,O:RWE,G:RE,W:E); the link count (the word at
+           byte 74) is 1 on a volume with HARDLINKS and 0 on one without. */
         if (spec->filechar & 0x2000u) core->fileprot = 0xba88;
         core->recprot = 0;
-        header_out[ODS5_FH2_LINKCOUNT] = 1;
+        header_out[ODS5_FH2_LINKCOUNT] = (uint8_t) (spec->link_count & 0xff);
+        header_out[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (spec->link_count >> 8);
     }
     core->highwater = spec->highwater;
     core->backlink = spec->backlink;

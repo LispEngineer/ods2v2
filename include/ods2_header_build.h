@@ -80,6 +80,8 @@ typedef struct {
     uint32_t       highwater;  /* FH2$L_HIGHWATER: 0 = not set (the ODS-2 convention here);
                                    at level 5 VMS writes HIBLK + 1 when every allocated
                                    block has been written */
+    uint16_t       link_count; /* level 5: FH2$W_LINKCOUNT. VMS V8.4 writes 1 on a volume with
+                                   HM2$M_HARDLINKS and 0 on one without (measured, ODS5_FORMAT_NOTES.md 12.1) */
     bool           no_access_date; /* level 5: leave FI5$Q_ACCDATE zero, as VMS
                                    does for a symbolic link */
     unsigned       level;      /* 0 or 2: a level 2 header with an FI2

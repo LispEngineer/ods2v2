@@ -93,7 +93,8 @@ static bool extension_header_ok(const uint8_t *h, ods2_fid_t expect, uint16_t pr
     unsigned level = core->struclev >> 8;
     return (level == ODS5_LEVEL_2 || level == ODS5_LEVEL_5) &&
            ods2_validate_head(h).ok &&
-           core->fid.fid_num == expect.fid_num && core->seg_num == segment &&
+           core->fid.fid_num == expect.fid_num && core->fid.fid_seq == expect.fid_seq &&
+           core->seg_num == segment &&
            core->backlink.fid_num == primary_num;
 }
 
@@ -1352,6 +1353,16 @@ ods2_result_t ods2_lookup_path(ods2_volume_t *vol, const char *path, ods2_fid_t 
         strcat(component, ".DIR");
         r = ods2_lookup_name(vol, header, component, &current);
         if (!r.ok) return r;
+        {
+            /* a file named X.DIR is not a directory: never walk into it (a writer would
+               rewrite its data as directory blocks) */
+            uint8_t next_header[512];
+            r = ods2_read_header(vol, current.fid_num, next_header);
+            if (!r.ok) return r;
+            if (!(((const ods2_head_core_t *) next_header)->filechar & 0x2000u)) {
+                return fail("a directory name in the path is a file that is not a directory");
+            }
+        }
     }
 
     *fid_out = current;
@@ -1460,6 +1471,7 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
         snprintf(ident, sizeof(ident), "%s;1", dirname);
         spec.ident_name = ident;
         spec.level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
+        spec.link_count = (vol->home.volchar & ODS5_VC_HARDLINKS) ? 1 : 0;
 
         if (!ods2_build_file_header(new_header, &spec)) {
             return fail("could not construct new directory's header");
@@ -1492,7 +1504,21 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
        growing the parent's own allocation automatically if none of
        its existing content blocks have room. */
     r = ods2_insert_into_directory(vol, parent_core->fid.fid_num, dirname, 1, spec.fid);
-    if (!r.ok) return r;
+    if (!r.ok) {
+        /* no entry in the parent: the new directory must not stay behind unreachable
+           (header marked deleted as ods2_delete_version does, blocks and file number given back) */
+        ods2_head_core_t *dc = (ods2_head_core_t *) new_header;
+        dc->filechar |= 0x8000u; /* FH2$M_MARKDEL */
+        dc->fid.fid_num = 0;
+        dc->fid.fid_nmx = 0;
+        dc->fid.fid_rvn = 0;
+        new_header[510] = 0;
+        new_header[511] = 0;
+        ods2_write_header(vol, file_number, new_header);
+        ods2_free_blocks(vol, content_lbn, content_blocks);
+        mark_index_bitmap(vol, file_number, false);
+        return r;
+    }
 
     *new_fid_out = spec.fid;
     return ok();
@@ -1728,9 +1754,8 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
     r = ods2_lookup_name(vol, dir_header, link_name, &existing);
     if (r.ok) return fail("a file or directory with this name already exists in the directory");
 
-    /* the entry first (it is what can fail for lack of room), then the count */
-    r = insert_into_directory(vol, dir_file_number, link_name, 1, target, 0);
-    if (!r.ok) return r;
+    /* the count first, then the entry: interrupted in between, the count is one too high
+       (a leaked header at worst), never one too low (a file freed while an entry names it) */
     count++;
     target_header[ODS5_FH2_LINKCOUNT] = (uint8_t) (count & 0xff);
     target_header[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (count >> 8);
@@ -1740,11 +1765,31 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
         ods2_store_vms_time(ident + ODS5_FI5_ATTDATE, ods2_vms_time_now());
     }
     {
+        uint8_t counted[512];
         uint16_t checksum = ods2_checksum(target_header, 255);
         target_header[510] = (uint8_t) (checksum & 0xff);
         target_header[511] = (uint8_t) (checksum >> 8);
+        memcpy(counted, target_header, sizeof(counted));
+        r = ods2_write_header(vol, target.fid_num, counted);
+        if (!r.ok) return r;
     }
-    return ods2_write_header(vol, target.fid_num, target_header);
+    r = insert_into_directory(vol, dir_file_number, link_name, 1, target, 0);
+    if (!r.ok) {
+        /* put the count back (the header as it was read, with the count it had) */
+        uint8_t back[512];
+        if (ods2_read_header(vol, target.fid_num, back).ok) {
+            back[ODS5_FH2_LINKCOUNT] = (uint8_t) ((count - 1) & 0xff);
+            back[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) ((count - 1) >> 8);
+            {
+                uint16_t checksum = ods2_checksum(back, 255);
+                back[510] = (uint8_t) (checksum & 0xff);
+                back[511] = (uint8_t) (checksum >> 8);
+            }
+            ods2_write_header(vol, target.fid_num, back);
+        }
+        return r;
+    }
+    return ok();
 }
 
 ods2_result_t ods2_create_symlink(ods2_volume_t *vol, const uint8_t *parent_header,
@@ -1965,6 +2010,7 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
 
     memset(&spec, 0, sizeof(spec));
     spec.level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
+    spec.link_count = (vol->home.volchar & ODS5_VC_HARDLINKS) ? 1 : 0;
     spec.rtype = attrs->rtype;
     spec.rattrib = attrs->rattrib;
     spec.rsize = attrs->rsize;
@@ -2028,7 +2074,7 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
        content blocks have room. */
     r = insert_into_directory(vol, parent_core->fid.fid_num, name, 1, spec.fid,
                               special != 0 ? ODS5_DIR_SPECIAL : 0);
-    if (!r.ok) return r;
+    if (!r.ok) goto undo;   /* no directory entry: give the headers, blocks and file numbers back */
 
     *new_fid_out = spec.fid;
     return ok();

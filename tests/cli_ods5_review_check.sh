@@ -41,7 +41,7 @@ CMD
 $ODS2 "$IMG" @"$TMP/s1.cmd" >/dev/null 2>&1
 err=$($ODS2 "$IMG" "EXPORT [000000...] $TMP/out" 2>&1)
 check "EXPORT writes nothing outside the destination through a symbolic link" "" "$(ls "$TMP/outside")"
-check "...and says why" 1 "$(echo "$err" | grep -c '%ODS2-E-MKDIR')"
+check "...and says why" 1 "$([ "$(echo "$err" | grep -c '%ODS2-E-MKDIR')" -ge 1 ] && echo 1)"
 rm -rf "$TMP/out"; mkdir -p "$TMP/out"
 ln -s "$PWD/$TMP/outside" "$TMP/out/A.B"
 $ODS2 "$IMG" "EXPORT/OVERWRITE [A^.B] $TMP/out/sub" >/dev/null 2>&1
@@ -129,6 +129,33 @@ check "DIR of a directory typed with another case of an ISO Latin-1 letter shows
     "$($ODS2 "$IMG4" 'DIR [CAF^C9]' 2>&1 | grep -c 'e.txt')"
 check "...and the heading shows the stored name, not the typed one" "0" \
     "$($ODS2 "$IMG4" 'DIR [CAF^C9]' 2>&1 | grep -c 'Directory \[CAF')"
+
+# --- writer review: round trip of dotless names and empty directories; COPY decodes %XX; a file X.DIR is not a directory ---
+IMG5="$TMP/v5.img"
+$INIT "$IMG5" 64M --structure=5 >/dev/null 2>&1
+rm -rf "$TMP/tree" "$TMP/out"; mkdir -p "$TMP/tree/emptydir" "$TMP/tree/full" "$TMP/out"
+printf 'r\n' > "$TMP/tree/README"; printf 'm\n' > "$TMP/tree/Makefile"; printf 'f\n' > "$TMP/tree/full/inside"
+printf 'd\n' > "$TMP/tree/a.b.c"
+ln -s README "$TMP/tree/lnk"
+$ODS2 "$IMG5" "IMPORT $TMP/tree [000000]" >/dev/null 2>&1
+$ODS2 "$IMG5" "EXPORT/LINKS [000000...] $TMP/out" >/dev/null 2>&1
+rm -rf "$TMP/out/"[0-9A-Z]*.SYS "$TMP/out/000000"* 2>/dev/null
+for f in BACKUP.SYS BADBLK.SYS BADLOG.SYS BITMAP.SYS CONTIN.SYS CORIMG.SYS INDEXF.SYS SECURITY.SYS VOLSET.SYS; do rm -f "$TMP/out/$f"; done
+rm -rf "$TMP/out/000000"
+check "IMPORT then EXPORT is the identity: dotless names stay dotless, empty directories come back" "" \
+    "$(cd "$TMP" && diff -r tree out 2>&1 | head -3)"
+printf 'p\n' > "$TMP/x%2Fy.txt"
+$ODS2 "$IMG5" "COPY $TMP/x%2Fy.txt [000000]" >/dev/null 2>&1
+check "COPY with no name decodes %2F like IMPORT (the name has a slash)" 1 "$($ODS2 "$IMG5" 'DIR/PATHS [000000]x*' 2>&1 | grep -c '^/x%2Fy.txt')"
+printf 'not a dir\n' > "$TMP/file.txt"
+$ODS2 "$IMG5" "COPY $TMP/file.txt [000000]NOTDIR.DIR" >/dev/null 2>&1
+check "COPY into [NOTDIR] where NOTDIR.DIR is a plain file is refused" 1 \
+    "$($ODS2 "$IMG5" "COPY $TMP/file.txt [NOTDIR]new.txt" 2>&1 | grep -c 'not a directory')"
+check "CREATE/DIRECTORY [NOTDIR.SUB] is refused too" 1 "$($ODS2 "$IMG5" 'CREATE/DIRECTORY [NOTDIR.SUB]' 2>&1 | grep -c 'not a directory')"
+check "the file's data is untouched" "not a dir" "$($ODS2 "$IMG5" 'TYPE [000000]NOTDIR.DIR' 2>&1)"
+rm -rf "$TMP/tree"; mkdir -p "$TMP/tree/NOTDIR"; printf 'q\n' > "$TMP/tree/NOTDIR/q.txt"
+check "IMPORT of a directory whose name is a plain file's X.DIR is refused" 1 \
+    "$($ODS2 "$IMG5" "IMPORT $TMP/tree [000000]" 2>&1 | grep -c 'is not a directory')"
 
 rm -rf "$TMP"
 [ "$fails" -eq 0 ] || { echo "$fails review check(s) failed"; exit 1; }

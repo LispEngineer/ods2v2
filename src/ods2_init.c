@@ -48,18 +48,6 @@ static bool put_block(image_t *img, uint64_t lbn, const uint8_t *data)
            fwrite(data, 1, 512, img->f) == 512;
 }
 
-/* a run of consecutive blocks, zeros where data is NULL */
-static bool put_zero_blocks(image_t *img, uint64_t lbn, uint64_t count)
-{
-    static const uint8_t zero[512];
-    uint64_t i;
-    (void) zero;
-    /* the image is sparse: blocks never written read as zeros, so there is
-       nothing to do unless the file would end before them */
-    (void) img; (void) lbn; (void) count; (void) i;
-    return true;
-}
-
 static void put16(uint8_t *p, unsigned v) { p[0] = (uint8_t) v; p[1] = (uint8_t) (v >> 8); }
 static void put32(uint8_t *p, uint32_t v) { put16(p, v & 0xffff); put16(p + 2, v >> 16); }
 
@@ -247,7 +235,8 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
             }
             if (!ods2_build_file_header(hdr, &spec)) { fclose(img.f); remove(path); return fail("could not build a reserved file header"); }
             ((ods2_head_core_t *) hdr)->fileprot = files[n - 1].fileprot;
-            if (level == ODS5_LEVEL_5) hdr[ODS5_FH2_LINKCOUNT] = 1; /* V8.4: link count 1 on ODS-5 volumes */
+            /* V8.4: link count 1 in the reserved headers of an ODS-5 volume with HARDLINKS, 0 without */
+            if (level == ODS5_LEVEL_5 && (opt->volchar & ODS5_VC_HARDLINKS)) hdr[ODS5_FH2_LINKCOUNT] = 1;
             if (n == 10) {
                 /* VMS writes the volume's security profile into SECURITY.SYS right after creating
                    it: revision 2, revised 0.06 s after it was created (corpus header dump) */
@@ -374,7 +363,6 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
     /* the file is as long as the volume (the last block is written so that it is) */
     if (ftruncate(fileno(img.f), (off_t) N * 512) != 0) goto io_error;
     if (fclose(img.f) != 0) { remove(path); return fail("could not close the image file"); }
-    (void) put_zero_blocks;
     return ok();
 
 io_error:
