@@ -433,6 +433,9 @@ def main():
         prevkey = None
         for bi in range(used_blocks):
             blk = data[bi * 512:(bi + 1) * 512]
+            if len(blk) < 512:
+                fnd.err('%s: end-of-file (block %d) lies beyond its %d allocated blocks' % (where, used_blocks, len(data) // 512))
+                break
             pos = 0
             nrec = 0
             while pos + 6 <= 512:
