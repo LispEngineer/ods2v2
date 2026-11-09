@@ -81,7 +81,7 @@ implements basic command recall to ease repetitive command sequences.
 | `COPY <local-file> <path>` | `COPY readme.txt [DECUS]README.TXT` |
 | `COPY/ATTRIBUTES=(...) <local-file> <path>` | `COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) kit.pcsi [KITS]KIT.PCSI` |
 | `COPY/CONVERT <local-file> <path>` | `COPY/CONVERT notes.txt [DOC]NOTES.TXT` — text as VAR records |
-| `TYPE path` | `TYPE [DECUS]README.TXT;2` |
+| `TYPE[/RAW] path` | `TYPE [DECUS]README.TXT;2` — sequential files as text, one line per record; `/RAW` the stored bytes |
 | `DELETE path` | `DELETE [DECUS]OLDFILE.TXT;1` |
 | `SET DEFAULT path` | `SET DEFAULT [DECUS.NETLIB020]` |
 | `SHOW DEFAULT` | |
@@ -183,8 +183,9 @@ COPY/ATTRIBUTES=(RFM:VAR,RAT:CR)/CONVERT notes.txt [DOC]NOTES.TXT   ! the same
 - `RAT:` defaults to `CR`; `RAT:NONE`, `FTN` or `PRN` can be given
   instead. `RAT:BLK` isn't supported (the records run on across
   blocks, as VMS FTP writes them).
-- `TYPE` of such a file shows the records as they are on disk, byte
-  counts included.
+- `TYPE` of such a file shows its records as text, one line each, as VMS
+  `TYPE` does; `TYPE/RAW` shows the bytes as they are on disk, byte counts
+  included.
 
 The qualifier goes on `COPY` itself, not after the file names (a host
 path has `/` in it too). `ods2_put` takes the same as numbers:
@@ -249,10 +250,14 @@ version, which ods2v2 does not make). Also:
   `%2F` in a name is a `/`, Linux symbolic links become VMS ones).
 * `SYMLINK <link-path> <target>` (or `CREATE/SYMLINK=target link`) makes a
   symbolic link; `LINK <new-path> <existing-path>` (or `SET FILE/ENTER=new
-  existing`) makes another directory entry for a file on a `HARDLINKS`
-  volume and counts it; deleting one link takes the entry and one off the
-  count, the file goes with the last. (The primary link of a file that has
-  others is not deleted.)
+  existing`) makes another directory entry for a file. On a `HARDLINKS`
+  volume it is a hard link and counted; deleting one link takes the entry
+  and one off the count, the file goes with the last (the primary link of
+  a file that has others may go first, as on VMS). On any other volume
+  (ODS-2, or ODS-5 without `HARDLINKS`) it is a plain alias, as VMS
+  `SET FILE/ENTER` makes there: nothing in the file's header changes, and
+  deleting such an entry (one that is not the file's primary link) takes
+  only the entry.
 * `ods2_init <new-image> <size> [--structure=2|5] [--label=NAME]
   [--hardlinks] [--access-dates] ...` makes an empty ODS-2 or ODS-5 volume
   of any size from 8192 blocks, laid out as VMS V8.4's INITIALIZE does; the
@@ -282,8 +287,11 @@ per file, UTF-8, for scripts.
 
 **Copying files out.** `EXPORT <path> <linux-path>` (alias `GET`) copies
 files off the volume to Linux files: the bytes of the file up to its
-end-of-file mark, exactly what `TYPE` prints (RMS record structure is
-not interpreted), under the file's UTF-8 name. The destination is a
+end-of-file mark, exactly what `TYPE/RAW` prints (RMS record structure
+is not interpreted), under the file's UTF-8 name. `/RECORDS` writes
+sequential files as text instead, one line per record, as `TYPE` does
+(VAR, VFC, FIX, STM, STMLF, STMCR; relative and indexed files are copied
+as stored, with a warning). The destination is a
 directory (made if it does not exist) when the specification has
 wildcards, `;*` or an ellipsis; a specification naming one file may
 instead give the new file's name. An ellipsis (`[000000...]*.*`) recreates
