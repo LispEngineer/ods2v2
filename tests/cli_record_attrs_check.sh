@@ -115,6 +115,19 @@ check "text with 700-byte lines: Stream_LF, LRL 700 (not limited to 512)" "rtype
 $ODS2 $DISK "COPY $TMP/empty.dat [000000]EMPTY.DAT" >/dev/null 2>&1
 n=$((n + 1))
 check "plain COPY of an empty file: Stream_LF, RAT CR, LRL 0" "rtype=0x05 rattrib=0x02 rsize=0 maxrec=0" "$(hdr $n)"
+printf 'one\r\ntwo\nthree\r\n' > "$TMP/mixed.txt"
+$ODS2 $DISK "COPY $TMP/mixed.txt [000000]MIXED.TXT" >/dev/null 2>&1
+n=$((n + 1))
+check "mixed LF and CR LF line ends: Stream_LF (a CR before an LF stays in the line), LRL 6" "rtype=0x05 rattrib=0x02 rsize=6 maxrec=0" "$(hdr $n)"
+printf 'one\rtwo two\rthree\r' > "$TMP/mac.txt"
+$ODS2 $DISK "COPY $TMP/mac.txt [000000]MAC.TXT" >/dev/null 2>&1
+n=$((n + 1))
+check "CR-only line ends: Stream_CR, LRL 7" "rtype=0x06 rattrib=0x02 rsize=7 maxrec=0" "$(hdr $n)"
+$ODS2 $DISK "TYPE [000000]MAC.TXT" > "$TMP/mac.out" 2>/dev/null
+check "... and TYPE shows three lines" 3 "$(wc -l < "$TMP/mac.out" | tr -d ' ')"
+$ODS2 $DISK "COPY/FORMAT=STMCR $TMP/notes.txt [000000]FSTMCR.TXT" >/dev/null 2>&1
+n=$((n + 1))
+check "/FORMAT=STMCR on text without CR: Stream_CR, the whole file is one line (18 bytes + ...)" "rtype=0x06 rattrib=0x02" "$(hdr $n | sed 's/ rsize.*//')"
 printf 'text\n\000with a NUL\n' > "$TMP/nul.txt"
 $ODS2 $DISK "COPY $TMP/nul.txt [000000]NUL.TXT" >/dev/null 2>&1
 n=$((n + 1))

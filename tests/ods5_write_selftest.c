@@ -673,6 +673,47 @@ static void test_directory_eof(void)
     printf("PASS: a directory with the old EOF (block 1, byte 2) gets EOF block 2, byte 0 when written to; new directories have it\n");
 }
 
+/* The shape OpenVMS VAX V7.3 left in a directory it made inside an old ods2v2 one (batch phvs2-w1): EOF block 2 / byte 2, block 1 a
+   valid empty block, block 2 all zeros. A write must put it right (EOF 2,0; block 2 zeros dropped) and a delete must leave block 1 with its
+   end-of-records marker, never a zero block as the only block. */
+static void test_directory_eof_vax_damage(void)
+{
+    ods2_init_options_t opt;
+    ods2_volume_t vol;
+    uint8_t root[512], d[512], blk[512];
+    ods2_fid_t sub;
+    uint16_t sum;
+    unsigned level;
+
+    for (level = 2; level <= 5; level += 3) {
+        memset(&opt, 0, sizeof(opt));
+        opt.blocks = 1048576; opt.label = "VAXDMG"; opt.level = level;
+        remove(DISK_PATH);
+        assert(ods2_initialize(DISK_PATH, &opt).ok);
+        assert(ods2_mount_write(DISK_PATH, &vol).ok);
+        root_header(&vol, root);
+        assert(ods2_create_directory(&vol, root, "sub", &sub).ok);
+        assert(ods2_read_header(&vol, sub.fid_num, d).ok);
+        d[28] = 0; d[29] = 0; d[30] = 2; d[31] = 0; d[32] = 2; d[33] = 0;       /* EFBLK 2, FFBYTE 2 */
+        sum = ods2_checksum(d, 255); d[510] = (uint8_t) (sum & 0xff); d[511] = (uint8_t) (sum >> 8);
+        assert(ods2_write_header(&vol, sub.fid_num, d).ok);
+        assert(ods2_file_content_length(d) == 514 && rd16(d + 24 + 2) >= 2);   /* HIBLK (word swapped): at least two blocks allocated */
+        make_file(&vol, sub.fid_num, "one.txt", "x", 1);
+        assert(ods2_read_header(&vol, sub.fid_num, d).ok);
+        assert(rd16(d + 28) == 0 && rd16(d + 30) == 2 && rd16(d + 32) == 0);   /* EOF 2,0 after the first write */
+        assert(ods2_file_content_length(d) == 512);
+        assert(ods2_read_file_block(&vol, d, 1, blk).ok && rd16(blk) != 0 && rd16(blk) != 0xFFFF);   /* the entry */
+        assert(ods2_delete_version(&vol, sub.fid_num, "one.txt", 0, NULL).ok);
+        assert(ods2_read_header(&vol, sub.fid_num, d).ok);
+        assert(rd16(d + 30) == 2 && rd16(d + 32) == 0 && ods2_file_content_length(d) == 512);
+        assert(ods2_read_file_block(&vol, d, 1, blk).ok && rd16(blk) == 0xFFFF);   /* the empty block carries the marker */
+        make_file(&vol, sub.fid_num, "two.txt", "y", 1);
+        ods2_dismount(&vol);
+        remove(DISK_PATH);
+    }
+    printf("PASS: a directory the VAX left with EOF (2,2) and a zero second block is put right by the first write, and a delete leaves block 1 with its end marker\n");
+}
+
 int main(void)
 {
     ods2_volume_t vol;
@@ -1043,6 +1084,7 @@ int main(void)
     test_linkcount_and_failures();
     test_directory_revision();
     test_directory_eof();
+    test_directory_eof_vax_damage();
     printf("\nods5_write_selftest: all checks passed\n");
     return 0;
 }

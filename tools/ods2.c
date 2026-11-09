@@ -52,8 +52,12 @@
  *                                 (e.g. [*], [*.SRC], [...SALES],
  *                                 [DECUS...SRC]) - as VMS DIRECTORY
  *   CREATE/DIRECTORY path         create a directory
- *   COPY <local-file> <path>      write a local file onto the disk,
- *                                 as a Stream_LF file
+ *   COPY <local-file> <path>      write a local file onto the disk; the
+ *                                 record format is chosen per file: text
+ *                                 as Stream_LF (Stream for CR LF, Stream_CR
+ *                                 for CR-only), anything else as fixed
+ *                                 512-byte records (see choose_format());
+ *                                 /FORMAT= overrides
  *   COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) <local-file> <path>
  *                                 ... with chosen RMS record attributes,
  *                                 in SET FILE/ATTRIBUTES syntax (see
@@ -1518,7 +1522,7 @@ static bool keyword(const char *word, size_t len, const char *name, size_t min)
 }
 
 /* COPY's options beyond the record attributes themselves. */
-typedef enum { FMT_AUTO = 0, FMT_STMLF, FMT_STM, FMT_FIX512, FMT_UDF } host_format_t;
+typedef enum { FMT_AUTO = 0, FMT_STMLF, FMT_STM, FMT_STMCR, FMT_FIX512, FMT_UDF } host_format_t;
 
 typedef struct {
     bool convert;   /* /CONVERT: host text lines -> VAR records */
@@ -1551,9 +1555,11 @@ typedef struct {
  * the longest record length comes from the file, and MRS is 0 (no
  * limit) unless given.
  *
- * With no qualifier the file is Stream_LF, as always. A fixed format
- * with no size given is 512-byte records. Returns false after
- * reporting the problem. */
+ * /FORMAT=AUTO|STMLF|STM|STMCR|FIX512|UDF|VAR chooses the record format
+ * by name (AUTO, the default: see choose_format(); VAR is /CONVERT) and
+ * cannot be combined with /ATTRIBUTES or /CONVERT. With /ATTRIBUTES the
+ * attributes are the user's. A fixed format with no size given is
+ * 512-byte records. Returns false after reporting the problem. */
 static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
                                   copy_options_t *opts)
 {
@@ -1579,7 +1585,7 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
             const char *v;
             size_t vl;
             if (*q != '=') {
-                report_error("%%ODS2-E-VALREQ, /FORMAT needs a value: AUTO, STMLF, STM, FIX512 (or BINARY), UDF or VAR\n");
+                report_error("%%ODS2-E-VALREQ, /FORMAT needs a value: AUTO, STMLF, STM, STMCR, FIX512 (or BINARY), UDF or VAR\n");
                 return false;
             }
             v = ++q;
@@ -1587,12 +1593,13 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
             vl = (size_t) (q - v);
             if (keyword(v, vl, "AUTO", 2)) opts->format = FMT_AUTO;
             else if (keyword(v, vl, "STMLF", 5) || keyword(v, vl, "TEXT", 4)) opts->format = FMT_STMLF;
+            else if (keyword(v, vl, "STMCR", 5)) opts->format = FMT_STMCR;
             else if (keyword(v, vl, "STM", 3)) opts->format = FMT_STM;
             else if (keyword(v, vl, "FIX512", 3) || keyword(v, vl, "BINARY", 3)) opts->format = FMT_FIX512;
             else if (keyword(v, vl, "UDF", 3)) opts->format = FMT_UDF;
             else if (keyword(v, vl, "VAR", 3)) opts->convert = true;
             else {
-                report_error("%%ODS2-E-BADVALUE, /FORMAT=%.*s: use AUTO, STMLF (TEXT), STM, FIX512 (BINARY), UDF or VAR\n", (int) vl, v);
+                report_error("%%ODS2-E-BADVALUE, /FORMAT=%.*s: use AUTO, STMLF (TEXT), STM, STMCR, FIX512 (BINARY), UDF or VAR\n", (int) vl, v);
                 return false;
             }
             continue;
@@ -1752,19 +1759,20 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
 
 /* Which record format a host file gets when COPY/IMPORT is not told (no /ATTRIBUTES, /CONVERT or /FORMAT):
  * text (no NUL byte, at most 1 percent control bytes other than TAB LF CR FF VT BS ESC, lines of at most
- * 32767 bytes, LF line ends or CR LF line ends throughout) becomes Stream_LF (Stream for CR LF) with
- * carriage-return carriage control, LRL the longest line and MRS 0, as VMS's own text files are; anything
- * else becomes fixed 512-byte records with no carriage control and an exact end-of-file byte, as VMS binary
- * FTP makes it. (Before, every file was Stream_LF with MRS 512, which VMS V7.3-2 cannot read when a "line"
- * of a binary file is longer than 512 bytes: %RMS-W-RTB.) */
+ * 32767 bytes) becomes a stream file with carriage-return carriage control, LRL the longest line and MRS 0, as
+ * VMS's own text files are: Stream_LF for LF line ends (a CR before an LF stays part of the line, so mixed
+ * LF and CR LF ends are Stream_LF too: the bytes are kept as they are), Stream for CR LF throughout, Stream_CR
+ * for CR-only line ends (no LF at all); anything else becomes fixed 512-byte records with no carriage control
+ * and an exact end-of-file byte, as VMS binary FTP makes it. (Before, every file was Stream_LF with MRS 512,
+ * which VMS V7.3-2 cannot read when a "line" of a binary file is longer than 512 bytes: %RMS-W-RTB.) */
 typedef struct {
-    size_t total, nul, badctl, lf, crlf, longest_lf, longest_crlf;
+    size_t total, nul, badctl, lf, crlf, cr, longest_lf, longest_crlf, longest_cr;
 } host_stats_t;
 
 static bool scan_host_file(FILE *f, host_stats_t *s)
 {
     uint8_t buf[65536];
-    size_t n, i, cur = 0;
+    size_t n, i, cur = 0, cur_cr = 0;
     bool prev_cr = false;
 
     memset(s, 0, sizeof(*s));
@@ -1775,6 +1783,13 @@ static bool scan_host_file(FILE *f, host_stats_t *s)
             if (c == 0) s->nul++;
             else if ((c < 0x20 && c != '\t' && c != '\n' && c != '\r' && c != '\f' && c != '\v' && c != 0x1b && c != '\b') ||
                      c == 0x7f) s->badctl++;
+            if (c == '\r') {
+                s->cr++;
+                if (cur_cr > s->longest_cr) s->longest_cr = cur_cr;
+                cur_cr = 0;
+            } else {
+                cur_cr++;
+            }
             if (c == '\n') {
                 s->lf++;
                 if (prev_cr) s->crlf++;
@@ -1791,6 +1806,7 @@ static bool scan_host_file(FILE *f, host_stats_t *s)
     if (ferror(f)) return false;
     if (cur > s->longest_lf) s->longest_lf = cur;
     if (cur > s->longest_crlf) s->longest_crlf = cur;
+    if (cur_cr > s->longest_cr) s->longest_cr = cur_cr;
     return fseek(f, 0, SEEK_SET) == 0;
 }
 
@@ -1800,7 +1816,6 @@ static bool choose_format(const copy_options_t *opts, FILE *f, size_t length, od
 {
     host_stats_t s;
     host_format_t fmt = opts->format;
-    bool crlf_file;
     size_t longest;
 
     *partial_fix = false;
@@ -1808,22 +1823,25 @@ static bool choose_format(const copy_options_t *opts, FILE *f, size_t length, od
         report_error("%%ODS2-E-READERR, error reading %s\n", path);
         return false;
     }
-    crlf_file = s.crlf > 0 && s.crlf == s.lf;
-    longest = crlf_file ? s.longest_crlf : s.longest_lf;
     if (fmt == FMT_AUTO) {
-        bool text = s.nul == 0 && s.badctl * 100 <= s.total && longest <= 32767 && (s.crlf == 0 || crlf_file);
-        fmt = !text ? FMT_FIX512 : (crlf_file ? FMT_STM : FMT_STMLF);
+        bool crlf_file = s.lf > 0 && s.crlf == s.lf;
+        bool cr_file = s.lf == 0 && s.cr > 0;
+        size_t l = cr_file ? s.longest_cr : (crlf_file ? s.longest_crlf : s.longest_lf);
+        bool text = s.nul == 0 && s.badctl * 100 <= s.total && l <= 32767;
+        fmt = !text ? FMT_FIX512 : (cr_file ? FMT_STMCR : (crlf_file ? FMT_STM : FMT_STMLF));
     }
+    longest = (fmt == FMT_STMCR) ? s.longest_cr : (fmt == FMT_STM ? s.longest_crlf : s.longest_lf);
     memset(attrs, 0, sizeof(*attrs));
     switch (fmt) {
     case FMT_STM:
     case FMT_STMLF:
+    case FMT_STMCR:
         if (longest > 32767) {
             report_error("%%ODS2-E-LINETOOLONG, %s: a line of %zu bytes is longer than a stream record can be (32767)\n",
                          path, longest);
             return false;
         }
-        attrs->rtype = (fmt == FMT_STM) ? ODS2_RFM_STM : ODS2_RFM_STMLF;
+        attrs->rtype = (fmt == FMT_STM) ? ODS2_RFM_STM : (fmt == FMT_STMCR ? ODS2_RFM_STMCR : ODS2_RFM_STMLF);
         attrs->rattrib = ODS2_RAT_CR;
         attrs->rsize = (uint16_t) longest;
         attrs->maxrec = 0;
@@ -2138,7 +2156,8 @@ static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods
 
 /* IMPORT <linux-directory> <path>: copies a Linux directory tree onto the
    volume as EXPORT writes one: UTF-8 names (a "%2F" in a Linux name is a '/'
-   in the VMS name), directories made as needed, regular files as Stream_LF,
+   in the VMS name), directories made as needed, regular files in the record format
+   choose_format() picks for each (text as Stream_LF, anything else as fixed 512-byte records),
    Linux symbolic links as VMS symbolic links (ODS-5). Names VMS would refuse
    and files that already exist are reported and skipped. */
 typedef struct {
@@ -2665,7 +2684,11 @@ static void print_help(void)
            "                             the bytes as stored, or with /RECORDS sequential files as\n"
            "                             text as TYPE shows them (/LINES: one line per record)\n"
            "  CREATE/DIRECTORY path      create a directory\n"
-           "  COPY <local-file> <path>   write a local file onto the disk (Stream_LF)\n"
+           "  COPY <local-file> <path>   write a local file onto the disk: text as Stream_LF (CR LF: Stream,\n"
+           "                             CR only: Stream_CR), anything else as fixed 512-byte records\n"
+           "  COPY/FORMAT=fmt <local-file> <path>\n"
+           "                             choose the record format: AUTO (the default), STMLF (TEXT), STM,\n"
+           "                             STMCR, FIX512 (BINARY), UDF or VAR (= /CONVERT)\n"
            "  COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) <local-file> <path>\n"
            "                             ... with chosen record attributes: RFM: FIX,\n"
            "                             STMLF, STM, STMCR or UDF; MRS: record size;\n"
@@ -2675,7 +2698,8 @@ static void print_help(void)
            "                             CR carriage control (VMS's native text), one\n"
            "                             per line; with /ATTRIBUTES for other RAT/MRS\n"
            "  IMPORT <linux-dir> <path>  copy a Linux directory tree onto the disk (UTF-8 names,\n"
-           "                             directories made, symbolic links kept, ODS-5)\n"
+           "                             directories made, symbolic links kept, ODS-5; record format per\n"
+           "                             file as COPY; /FORMAT= and /ATTRIBUTES apply to every file)\n"
            "  SYMLINK <link-path> <target>   make a symbolic link (ODS-5; as CREATE/SYMLINK=target)\n"
            "  LINK <new-path> <existing-path> another directory entry for a file (as SET\n"
            "                             FILE/ENTER=new existing): a hard link with a link count on\n"

@@ -2312,6 +2312,11 @@ static ods2_result_t load_directory(ods2_volume_t *vol, const uint8_t *dir_heade
             return r;
         }
     }
+    /* Trailing blocks that are all zeros (not even an end-of-records marker) are not directory blocks: OpenVMS
+       VAX V7.3 makes a directory with end-of-file (2,2) inside one with the old FFBYTE 2, i.e. a zero second
+       block inside its EOF. They are dropped from `used`, so that a write puts the end-of-file right (the
+       directory's own block 1 stays, and carries the marker) instead of keeping or moving a zero block. */
+    while (used > 1 && blocks[(size_t) (used - 1) * 512] == 0 && blocks[(size_t) (used - 1) * 512 + 1] == 0) used--;
     *blocks_out = blocks;
     *used_out = used;
     return ok();
