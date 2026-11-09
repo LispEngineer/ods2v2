@@ -205,7 +205,12 @@ ods2_rm: tools/ods2_rm.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c incl
 ods2: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c include/ods2_volume.h include/ods2_text_var.h include/ods2_records.h include/ods2_acl.h include/ods2_path.h include/ods2_wildcard.h third_party/linenoise/linenoise.h
 	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Ithird_party/linenoise $(SANFLAGS) tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c -o $@
 
-test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
+# The same CLI with the fault-injection hook (ODS2_FAULT_AFTER_WRITES, see src/ods2_volume.c), for
+# tests/fault_inject.py only: the ods2 people run has no hook.
+ods2_fault: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c include/ods2_volume.h include/ods2_text_var.h include/ods2_records.h include/ods2_acl.h include/ods2_path.h include/ods2_wildcard.h third_party/linenoise/linenoise.h
+	$(CC) $(CFLAGS) -DODS2_FAULT_INJECTION -D_DEFAULT_SOURCE -Ithird_party/linenoise $(SANFLAGS) tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c -o $@
+
+test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_fault
 	@echo "--- ods2_ondisk_selftest ---"
 	@$(BUILD)/ods2_ondisk_selftest
 	@echo "--- ods2_checksum_selftest ---"
@@ -223,7 +228,7 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@echo "--- ods2_directory_selftest ---"
 	@$(BUILD)/ods2_directory_selftest
 	@echo "--- ods2_volume_selftest ---"
-	@$(BUILD)/ods2_volume_selftest
+	@ODS2_NOLOCK=1 $(BUILD)/ods2_volume_selftest   # it holds one read-only mount while it mounts the same image for write
 	@echo "--- ods2_wildcard_selftest ---"
 	@$(BUILD)/ods2_wildcard_selftest
 	@echo "--- ods2_read_file_selftest ---"
@@ -290,6 +295,10 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@sh tests/cli_ods5_write_check.sh
 	@echo "--- cli_ods5_init_check ---"
 	@sh tests/cli_ods5_init_check.sh
+	@echo "--- cli_ods5_integrity_check ---"
+	@sh tests/cli_ods5_integrity_check.sh
+	@echo "--- fault_inject (interrupted writes) ---"
+	@python3 tests/fault_inject.py --quick
 	@echo "--- cli_ods5_review_check ---"
 	@sh tests/cli_ods5_review_check.sh
 	@echo "--- cli_records_check ---"
@@ -333,4 +342,4 @@ clean:
 	rm -rf $(BUILD)
 	rm -f samples/synthetic_disk.img samples/synthetic_disk_working.img samples/synthetic_disk_v0.img
 	rm -f samples/versions_disk.img samples/versions_cli_disk.img samples/cli_wildcard_disk.img samples/cli_loop_disk.img samples/file_alloc_disk.img samples/dir_order_disk.img samples/large_file_disk.img samples/cli_status_disk.img samples/cli_attrs_disk.img samples/record_attrs_disk.img samples/indexf_large_disk.img samples/text_var_disk.img samples/cli_label_disk.img samples/cli_label_orig.img
-	rm -f $(TOOLS)
+	rm -f $(TOOLS) ods2_fault

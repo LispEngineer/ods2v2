@@ -293,6 +293,8 @@ def main():
     # --- all headers ---
     headers = {}   # fid number -> bytes (valid ones)
     deleted = set()
+    pending = set()   # marked for delete, FID intact
+    headers_pending = {}
     for n in range(1, nheaders + 1):
         b = read_header(n)
         if b is None:
@@ -302,7 +304,14 @@ def main():
         struct_ok = lev in (2, 5) and b[0] >= 40 and b[0] <= b[1] <= b[2] <= b[3]
         fn = u16(b, 8) | (b[13] << 16)
         used = idx_used(n)
-        if struct_ok and fn != 0 and checksum(b) == u16(b, 510):
+        if struct_ok and fn != 0 and checksum(b) == u16(b, 510) and (u32(b, 52) & 0x8000):
+            # FH2$M_MARKDEL with the FID and checksum intact: a delete that was interrupted (VMS's own order:
+            # mark the header, remove the entry, free the blocks, then clear the FID). Its blocks may be free
+            # already; ANALYZE/REPAIR finishes it. Not a live file.
+            pending.add(n)
+            headers_pending[n] = b
+            fnd.info('header %d is marked for delete (an interrupted delete, or a file deleted while open)' % n)
+        elif struct_ok and fn != 0 and checksum(b) == u16(b, 510):
             if fn != n:
                 fnd.err('header %d holds file number %d' % (n, fn))
             headers[n] = b
@@ -327,6 +336,11 @@ def main():
 
     # --- per header: map, ident, fat ---
     owner = {}  # lbn cluster -> fid (for double allocation)
+    pend_owned = set()   # clusters mapped by a header marked for delete: may be allocated or free, not 'lost'
+    for n in sorted(pending):
+        for l, c in decode_map(headers_pending[n], fnd, 'file %d (marked for delete)' % n):
+            for cl in range(l // v.cluster, (l + c - 1) // v.cluster + 1):
+                pend_owned.add(cl)
     file_extents = {}
     prim = {}   # primary file number -> (header, ident)
     for n, b in sorted(headers.items()):
@@ -414,7 +428,7 @@ def main():
                     fnd.warn(msg)   # the starter volume marks its own middle-of-disk reserved files free
                 else:
                     fnd.err(msg)
-            if not isfree and cl not in owner:
+            if not isfree and cl not in owner and cl not in pend_owned:
                 if starter_quirk and cl < 1100: continue
                 fnd.warn('cluster %d (LBN %d) is allocated but owned by no file (lost)' % (cl, cl * v.cluster))
         print('storage: %d clusters, %d free' % (nclusters, free))
@@ -433,6 +447,9 @@ def main():
         prevkey = None
         for bi in range(used_blocks):
             blk = data[bi * 512:(bi + 1) * 512]
+            if len(blk) < 512:
+                fnd.err('%s: end-of-file (block %d) lies beyond its %d allocated blocks' % (where, used_blocks, len(data) // 512))
+                break
             pos = 0
             nrec = 0
             while pos + 6 <= 512:
@@ -496,6 +513,12 @@ def main():
                 nrec += 1
             if nrec == 0 and used_blocks > 1 and False:
                 fnd.err('%s block %d: empty block inside the EOF' % (where, bi + 1))
+        seen_nv = set()
+        for ent in lst:
+            key = (ent[0], ent[2])   # exact: the VMS-made asim8 ODS-5 disk has lp.COM and LP.COM in one directory
+            if key in seen_nv:
+                fnd.err('%s: two entries for %r;%d' % (where, ent[0], ent[2]))
+            seen_nv.add(key)
         entries[n] = lst
     # --- cross checks: entries -> headers, backlinks ---
     referenced = set()
@@ -506,7 +529,11 @@ def main():
             referenced.add(fnum)
             hd = headers.get(fnum)
             if hd is None:
-                if fnum in deleted or not idx_used(fnum):
+                if fnum in pending:
+                    # VMS removes the entry before it frees anything; on the VMS-made AXP1 system disk none of
+                    # its 9 marked headers is listed. An entry for one is a half-done delete (ours, or damage).
+                    fnd.err('dir %d: %r;%d -> file %d, which is marked for delete (a half-done delete)' % (dn, nm, ver, fnum))
+                elif fnum in deleted or not idx_used(fnum):
                     fnd.warn('dir %d: %r;%d -> file %d is not in use (dangling alias?)' % (dn, nm, ver, fnum))
                 else:
                     fnd.err('dir %d: %r;%d -> file %d has no valid header' % (dn, nm, ver, fnum))

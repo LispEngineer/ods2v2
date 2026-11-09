@@ -546,6 +546,13 @@ in every structural test.
   `/ATTRIBUTES` override it (see Record formats). An ODS-2 volume is treated the same.
 - `LINK` / `SET FILE/ENTER` on a volume without `HARDLINKS` makes a plain alias; `DELETE` of such an entry
   keeps the file and says so.
+- **The writer protects the volume.** `DELETE` refuses the volume's own files (`INDEXF.SYS`, `BITMAP.SYS`,
+  ... file numbers 1-9, and `SECURITY.SYS`), and deletes in VMS's order (header marked, entry removed, blocks
+  freed), so an interrupted `DELETE` leaves a leak that `ANALYZE/DISK_STRUCTURE/REPAIR` cleans up, never a
+  listed file on free space. A damaged directory block or file header, or a directory with an extension
+  header, is refused ("not changed") instead of being written around. `ods2` locks the image: one process
+  writes, or many read; a second writer is refused (a reader finding the lock mounts read-only). It
+  `fdatasync`s a written image when it finishes (`ODS2_NOSYNC=1` skips that).
 
 ## Known limitations
 

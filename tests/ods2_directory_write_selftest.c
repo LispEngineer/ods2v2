@@ -24,6 +24,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <assert.h>
 #include "ods2_directory_write.h"
 #include "ods2_directory.h"
@@ -189,7 +190,7 @@ int main(void)
                "read back correctly sorted (APPLE, MANGO, ZEBRA)\n");
     }
 
-    /* --- ods2_remove_dir_entry() tests --- */
+    /* --- removing a record with one version (ods2_remove_dir_version) --- */
 
     /* Test 6: basic insert-then-remove round trip. */
     {
@@ -202,7 +203,7 @@ int main(void)
         fid.fid_num = 3;
         assert(ods2_insert_dir_entry(rblock, sizeof(rblock), "ZEBRA.TXT", 1, fid));
 
-        assert(ods2_remove_dir_entry(rblock, sizeof(rblock), "MANGO.TXT"));
+        assert(ods2_remove_dir_version(rblock, 512, "MANGO.TXT", 1));
         n = ods2_parse_directory(rblock, sizeof(rblock), entries, 32);
         assert(n == 2);
         assert(strcmp(entries[0].name, "APPLE.TXT") == 0);
@@ -212,15 +213,15 @@ int main(void)
 
         /* Removing something not present returns false, doesn't
            disturb anything. */
-        assert(!ods2_remove_dir_entry(rblock, sizeof(rblock), "NOTTHERE.TXT"));
+        assert(!ods2_remove_dir_version(rblock, 512, "NOTTHERE.TXT", 1));
         n = ods2_parse_directory(rblock, sizeof(rblock), entries, 32);
         assert(n == 2);
         printf("PASS: removing a non-existent name returns false and leaves "
                "the block unchanged\n");
 
         /* Remove the remaining two, block should end up empty. */
-        assert(ods2_remove_dir_entry(rblock, sizeof(rblock), "APPLE.TXT"));
-        assert(ods2_remove_dir_entry(rblock, sizeof(rblock), "ZEBRA.TXT"));
+        assert(ods2_remove_dir_version(rblock, 512, "APPLE.TXT", 1));
+        assert(ods2_remove_dir_version(rblock, 512, "ZEBRA.TXT", 1));
         n = ods2_parse_directory(rblock, sizeof(rblock), entries, 32);
         assert(n == 0);
         printf("PASS: removing all entries leaves a correctly empty block\n");
@@ -258,7 +259,7 @@ int main(void)
         memset(rblock2, 0, sizeof(rblock2));
         memcpy(rblock2, real_root_dir, sizeof(real_root_dir));
 
-        assert(ods2_remove_dir_entry(rblock2, sizeof(rblock2), "DECUS.DIR"));
+        assert(ods2_remove_dir_version(rblock2, 512, "DECUS.DIR", 1));
         n = ods2_parse_directory(rblock2, sizeof(rblock2), entries, 32);
         assert(n == 10); /* 11 real entries minus DECUS.DIR */
         {
@@ -444,6 +445,85 @@ int main(void)
         }
         printf("PASS: a full block splits into two halves (%d + %d records), in "
                "order within and across them\n", na, nb);
+    }
+
+
+    /* --- damaged blocks (review 6, finding 3): the write-side parsers trust nothing in the block ---
+       Each block is a 512-byte heap allocation, so ASan sees any read or write past it. A record whose name
+       count runs past the end of the block, or whose size word does, is refused: insert and remove return
+       false and leave the block exactly as it was, and choosing a block does not read past it. */
+    {
+        static const struct { const char *what; unsigned pos; unsigned size; unsigned namecount; } cases[] = {
+            { "a last record whose name count runs past the block", 478, 30, 255 },
+            { "a record whose name count is more than its size holds", 102, 30, 200 },
+            { "a size word that runs past the block", 494, 100, 4 },
+            { "a size word of 508 near the end", 502, 508, 4 },
+            { "a record with no version entry", 102, 8, 2 },
+            { "a record whose versions are not a whole number of 8 bytes", 102, 26, 4 },
+        };
+        size_t c;
+        for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+            uint8_t *b = malloc(512), *copy = malloc(512);
+            uint16_t v1[64];
+            size_t end, nver = (cases[c].pos - 14) / 8, k;
+            assert(b != NULL && copy != NULL && cases[c].pos % 8 == 6 && nver <= 64);
+            for (k = 0; k < nver; k++) v1[k] = (uint16_t) (nver - k);
+            memset(b, 0, 512);
+            end = put_record(b, 0, "AAA.TXT", v1, (int) nver, 100);   /* ends where the damaged record starts */
+            assert(end == cases[c].pos);
+            b[cases[c].pos] = (uint8_t) (cases[c].size & 0xff);
+            b[cases[c].pos + 1] = (uint8_t) (cases[c].size >> 8);
+            b[cases[c].pos + 5] = (uint8_t) cases[c].namecount;
+            if (cases[c].pos + 6 < 512) memset(b + cases[c].pos + 6, 'B', 512 - (cases[c].pos + 6) > 20 ? 20 : 512 - (cases[c].pos + 6));
+            memcpy(copy, b, 512);
+            fid.fid_num = 9; fid.fid_seq = 1; fid.fid_rvn = 0; fid.fid_nmx = 0;
+            assert(!ods2_insert_dir_entry(b, 512, "ZZZ.TXT", 1, fid));
+            assert(memcmp(b, copy, 512) == 0);
+            assert(!ods2_insert_dir_entry(b, 512, "AAB.TXT", 1, fid));
+            assert(memcmp(b, copy, 512) == 0);
+            assert(!ods2_remove_dir_version(b, 512, "AAA.TXT", 1));
+            assert(memcmp(b, copy, 512) == 0);
+            assert(!ods2_remove_dir_version(b, 512, "NOTTHERE.TXT", 1));
+            assert(memcmp(b, copy, 512) == 0);
+            assert(ods2_dir_choose_block(b, 1, "ZZZ.TXT") == 0);
+            assert(!ods2_dir_block_ok(b, 512));
+            free(b);
+            free(copy);
+            printf("PASS: %s: insert and remove refuse and leave the block unchanged\n", cases[c].what);
+        }
+        /* choosing a block never reads a damaged first record's name past the block */
+        {
+            uint8_t *b = malloc(512);
+            assert(b != NULL);
+            memset(b, 0, 512);
+            b[0] = 30; b[5] = 255;                       /* first record: name count 255 in a 32-byte record */
+            assert(ods2_dir_choose_block(b, 1, "ZZZ.TXT") == 0);
+            assert(!ods2_dir_block_ok(b, 512));
+            free(b);
+        }
+        /* and good blocks are good: a VMS-style block, an empty one, a zero one, a full one without an end marker */
+        {
+            uint8_t b[512];
+            size_t end;
+            uint16_t vs[2] = { 2, 1 };
+            int i;
+            memset(b, 0, sizeof(b));
+            assert(ods2_dir_block_ok(b, 512));                                  /* all zeros (the VAX's second block) */
+            b[0] = b[1] = 0xff;
+            assert(ods2_dir_block_ok(b, 512));                                  /* empty, end marker */
+            end = put_record(b, 0, "AAA.TXT", vs, 2, 100);
+            b[end] = b[end + 1] = 0xff;
+            assert(ods2_dir_block_ok(b, 512));
+            memset(b, 0, sizeof(b));
+            end = 0;
+            for (i = 0; end + 22 <= 512; i++) {       /* 22 bytes: a 8-character name and one version */
+                char nm[32];
+                snprintf(nm, sizeof(nm), "F%03d.TXT", i);
+                end = put_record(b, end, nm, vs, 1, 100);
+            }
+            assert(ods2_dir_block_ok(b, 512));                                  /* filled to the end, no marker */
+        }
+        printf("PASS: good blocks (zero, empty, one record, full without an end marker) are accepted\n");
     }
 
     printf("\nods2_directory_write_selftest: all checks passed\n");
