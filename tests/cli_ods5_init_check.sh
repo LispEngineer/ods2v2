@@ -137,5 +137,116 @@ check "deleting the dangling alias says that it was dangling" "yes" \
 check "deleting the dangling alias takes only its entry" "alias test" "$($ODS2 "$TMP/dg.img" 'TYPE [000000]NEW.TXT' 2>&1)"
 check "... and leaves a checker-clean volume" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/dg.img" 2>&1 | tail -1)"
 
+# ---- the storage control block (R1, physical VAX96: %ANALDISK-W-CHKSCB). VMS writes the geometry of the device,
+# cylinders = ceil(blocks / (sectors * tracks)), BLKSIZE 1; VAX V7.3 ANALYZE takes an SCB as invalid when
+# |VOLSIZE - sectors*tracks*cylinders/BLKSIZE| > sectors*tracks and divides by BLKSIZE (0: INTDIV).
+cat > "$TMP/scb.py" <<'PY'
+import struct, subprocess, sys, os
+ods2, img, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+if mode == 'show':
+    out = img + '.bm'
+    if os.path.exists(out): os.remove(out)
+    subprocess.run([ods2, img, 'EXPORT [000000]BITMAP.SYS;1 ' + out], capture_output=True)
+    s = open(out, 'rb').read(512)
+    lev, cl, vs, bs, sec, trk, cyl = struct.unpack_from('<HHIIIII', s, 0)
+    print(lev, vs, bs, sec, trk, cyl)
+else:
+    # patch the SCB in place: mode = 'blksize0' or 'wrap'
+    f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+    base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+    f.seek((base + 1) * 512); h = f.read(512)
+    w0, w1 = struct.unpack_from('<HH', h, h[1] * 2)
+    lbn = (((w0 >> 8) & 0x3f) << 16) | w1
+    f.seek(lbn * 512); scb = bytearray(f.read(512))
+    if mode == 'blksize0': struct.pack_into('<I', scb, 8, 0)
+    elif mode == 'wrap': struct.pack_into('<I', scb, 20, struct.unpack_from('<I', scb, 20)[0] // 2)
+    struct.pack_into('<H', scb, 510, sum(struct.unpack_from('<255H', scb, 0)) & 0xFFFF)
+    f.seek(lbn * 512); f.write(scb)
+PY
+for spec in "2 8192" "5 8192" "5 16G" "2 20G"; do
+    set -- $spec
+    $INIT "$TMP/g.img" $2 --structure=$1 --label=GEO >/dev/null 2>&1
+    got=$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/g.img" show)
+    set -- $got
+    # level volsize blksize sectors tracks cylinders
+    ok=no
+    [ "$3" = 1 ] && [ $(( ($2 + $4 * $5 - 1) / ($4 * $5) )) = "$6" ] && [ "$6" -le 65535 ] && ok=yes
+    check "ODS-$1 SCB of a $2-block volume: BLKSIZE 1, cylinders = ceil(blocks/(sectors*tracks)) <= 65535 (got $4 x $5 x $6)" yes "$ok"
+    warn=$($ODS2 "$TMP/g.img" 'DIR [000000]' 2>&1 >/dev/null | grep -c CHKSCB)
+    check "ODS-$1 $2: a fresh volume draws no CHKSCB warning" 0 "$warn"
+    rm -f "$TMP/g.img" "$TMP/g.img.bm"
+done
+$INIT "$TMP/g.img" 1G --structure=2 --label=GEO --geometry=38,38 >/dev/null 2>&1
+check "--geometry=38,38 on 1 GiB: SCB 38 x 38 x 1453 (the LD driver's), BLKSIZE 1" "513 2097152 1 38 38 1453" \
+    "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/g.img" show | sed 's/^513 /513 /')"
+check "... no CHKSCB warning" 0 "$($ODS2 "$TMP/g.img" 'DIR [000000]' 2>&1 >/dev/null | grep -c CHKSCB)"
+$INIT "$TMP/g.img.2" 1G --structure=2 --label=GEO --geometry=0,5 >/dev/null 2>&1; check "--geometry=0,5 is refused" 2 $?
+rm -f "$TMP/g.img.2" "$TMP/g.img.bm"
+python3 -I "$TMP/scb.py" $ODS2 "$TMP/g.img" blksize0
+out=$($ODS2 "$TMP/g.img" 'DIR [000000]' 2>&1 >/dev/null | grep CHKSCB)
+case "$out" in *"blocking factor is 0"*"INTDIV"*) msg=ok ;; *) msg="$out" ;; esac
+check "an SCB with BLKSIZE 0 (a wrapped SIMH RQ geometry): a read-only warning naming INTDIV; the volume is still read" ok "$msg"
+check "... DIR still lists the volume" 1 "$($ODS2 "$TMP/g.img" 'DIR [000000]' 2>/dev/null | grep -c BITMAP.SYS)"
+$INIT "$TMP/g2.img" 1G --structure=2 --label=GEO --geometry=32,16 >/dev/null 2>&1
+python3 -I "$TMP/scb.py" $ODS2 "$TMP/g2.img" wrap
+out=$($ODS2 "$TMP/g2.img" 'DIR [000000]' 2>&1 >/dev/null | grep CHKSCB)
+case "$out" in *"more than one cylinder from the volume size"*) msg=ok ;; *) msg="$out" ;; esac
+check "an SCB whose geometry is more than a cylinder from the volume size: warns" ok "$msg"
+
+# ---- a SIMH container footer (simh/simh appends 512 bytes, "simh" signature, to a raw container it opens for
+# write; on an image of 4 GiB or more a 32-bit overflow can put it into the last data block). After the volume: noted,
+# never read or written. Inside the volume: warned, mounted read-only.
+cat > "$TMP/foot.py" <<'PY'
+import struct, sys, zlib
+mode, img, blocks = sys.argv[1], sys.argv[2], int(sys.argv[3])
+f = bytearray(512)
+f[0:4] = b'simh'; f[4:13] = b'Open SIMH'; f[68:72] = b'RA81'
+struct.pack_into('>III', f, 84, 512, blocks, 2)
+f[96:120] = b'Mon Nov  9 12:00:00 2026'
+f[124] = 0; f[125] = 2
+struct.pack_into('>I', f, 508, zlib.crc32(bytes(f[:508])) & 0xffffffff)
+fh = open(img, 'r+b')
+fh.seek(blocks * 512 if mode == 'append' else (blocks - 1) * 512); fh.write(bytes(f))
+PY
+$INIT "$TMP/s0.img" 8192 --structure=2 --label=SIMHFT >/dev/null 2>&1
+echo hi > "$TMP/hi.txt"
+cp "$TMP/s0.img" "$TMP/s1.img"; python3 -I "$TMP/foot.py" append "$TMP/s1.img" 8192
+foot1=$(tail -c 512 "$TMP/s1.img" | md5sum)
+out=$($ODS2 "$TMP/s1.img" "COPY $TMP/hi.txt [000000]HI.TXT" 2>&1); rc=$?
+case "$out" in *"I-SIMHFOOTER"*"not volume data (the volume is 8192 blocks)"*"%ODS2-I-COPIED"*) msg=ok ;; *) msg="$out" ;; esac
+check "footer after the volume: noted, and the volume is written normally" "ok 0" "$msg $rc"
+check "... the footer is untouched and the image is no longer" "$foot1 8193" "$(tail -c 512 "$TMP/s1.img" | md5sum) $(( $(stat -c %s "$TMP/s1.img") / 512 ))"
+check "... ods5check (the volume, not the footer): clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/s1.img" 2>&1 | tail -1)"
+cp "$TMP/s0.img" "$TMP/s2.img"; python3 -I "$TMP/foot.py" inside "$TMP/s2.img" 8192
+before=$(md5sum < "$TMP/s2.img")
+out=$($ODS2 "$TMP/s2.img" "COPY $TMP/hi.txt [000000]HI.TXT" 2>&1); rc=$?
+case "$out" in *"W-SIMHFOOTER"*"inside the volume (8192 blocks)"*"last block of the volume may be lost"*"read-only"*) msg=warned ;; *) msg="$out" ;; esac
+check "footer inside the volume (the last block): warned, and the write is refused (exit 1)" "warned 1" "$msg $rc"
+check "... the image is unchanged" "$before" "$(md5sum < "$TMP/s2.img")"
+check "... it can still be read" 1 "$($ODS2 "$TMP/s2.img" 'DIR [000000]' 2>/dev/null | grep -c BITMAP.SYS)"
+check "no footer: no SIMHFOOTER message" 0 "$($ODS2 "$TMP/s0.img" 'DIR [000000]' 2>&1 | grep -c SIMHFOOTER)"
+# nothing is written at or past the end of the volume (the storage control block's VOLSIZE), even if the bitmap
+# offers it: an SCB that says 2000 blocks on an 8192-block image whose first 2000 blocks the bitmap calls used
+cat > "$TMP/bound.py" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+f.seek((base + 1) * 512); h = f.read(512)
+w0, w1 = struct.unpack_from('<HH', h, h[1] * 2); lbn = (((w0 >> 8) & 0x3f) << 16) | w1
+cl = struct.unpack_from('<H', home, 14)[0]
+f.seek(lbn * 512); scb = bytearray(f.read(512))
+struct.pack_into('<I', scb, 4, 2000)
+struct.pack_into('<H', scb, 510, sum(struct.unpack_from('<255H', scb, 0)) & 0xFFFF)
+f.seek(lbn * 512); f.write(scb)
+f.seek((lbn + 1) * 512); bm = bytearray(f.read(512))
+for c in range(2000 // cl): bm[c // 8] &= ~(1 << (c % 8))
+f.seek((lbn + 1) * 512); f.write(bm)
+PY
+cp "$TMP/s0.img" "$TMP/s3.img"; python3 -I "$TMP/bound.py" "$TMP/s3.img"; before=$(md5sum < "$TMP/s3.img")
+out=$($ODS2 "$TMP/s3.img" "COPY $TMP/hi.txt [000000]HI.TXT" 2>&1); rc=$?
+case "$out" in *"lie at or past the end of the volume"*) msg=refused ;; *) msg="$out" ;; esac
+check "a file whose blocks would lie past VOLSIZE is refused (exit 1) ..." "refused 1" "$msg $rc"
+check "... and nothing is written" "$before" "$(md5sum < "$TMP/s3.img")"
+
 rm -rf "$TMP"
 [ "$fails" -eq 0 ] || { echo "$fails INITIALIZE check(s) failed"; exit 1; }

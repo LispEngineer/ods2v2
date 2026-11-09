@@ -35,6 +35,7 @@
  *     --nohighwater           HM2$M_NOHIGHWATER
  *     --cluster=N             cluster factor (default by size)
  *     --maxfiles=N            maximum number of files
+ *     --geometry=SECTORS,TRACKS       the disk geometry the storage control block records (default 32,16; 63,255 above 16 GiB)
  *     --security=profile|empty|zero   what SECURITY.SYS holds (default: the profile record VMS writes)
  *
  * The image file must not exist yet; nothing is ever written to an existing file.
@@ -60,7 +61,7 @@ int main(int argc, char **argv)
 
     if (argc < 3) {
         fprintf(stderr, "usage: %s <new-image> <size> [--label=NAME] [--structure=2|5] [--hardlinks] "
-                        "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N]\n"
+                        "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N] [--geometry=SECTORS,TRACKS]\n"
                         "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 256\n", argv[0]);
         return 2;
     }
@@ -90,6 +91,15 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--access-dates") == 0) opt.volchar |= ODS5_VC_ACCESSTIMES;
         else if (strcmp(argv[i], "--no-special-files") == 0) opt.volchar |= ODS5_VC_NO_SPECIAL_FILES;
         else if (strcmp(argv[i], "--nohighwater") == 0) opt.volchar |= ODS5_VC_NOHIGHWATER;
+        else if (starts(argv[i], "--geometry=")) {
+            /* --geometry=SECTORS,TRACKS: the geometry the SCB records (cylinders follow from the size) */
+            unsigned se = 0, tr = 0;
+            if (sscanf(argv[i] + 11, "%u,%u", &se, &tr) != 2 || se == 0 || tr == 0 || se > 65535 || tr > 65535) {
+                fprintf(stderr, "bad geometry: %s (use --geometry=SECTORS,TRACKS)\n", argv[i] + 11);
+                return 2;
+            }
+            opt.sectors = se; opt.tracks = tr;
+        }
         else if (starts(argv[i], "--cluster=")) opt.cluster = (unsigned) atoi(argv[i] + 10);
         else if (strcmp(argv[i], "--security=profile") == 0) opt.security = ODS2_INIT_SECURITY_PROFILE;
         else if (strcmp(argv[i], "--security=empty") == 0) opt.security = ODS2_INIT_SECURITY_EMPTY;

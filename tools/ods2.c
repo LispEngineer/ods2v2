@@ -3187,6 +3187,7 @@ int main(int argc, char **argv)
     ods2_volume_t vol;
     ods2_result_t r;
     int exit_code = 0;
+    int footer_state = 0;
 
     if (argc < 2) {
         fprintf(stderr, "usage: %s <disk-image> [command...]\n", argv[0]);
@@ -3198,12 +3199,21 @@ int main(int argc, char **argv)
     /* A structure version 0 volume (e.g. the OpenVMS Alpha V8.4 CD)
        is mounted for reading only, so look before opening for write. */
     r = ods2_mount(argv[1], &vol);
-    if (r.ok) g_ods5 = vol.ods5;
+    if (r.ok) {
+        char scb_msg[512];
+        g_ods5 = vol.ods5;
+        if (ods2_scb_problem(&vol, scb_msg, sizeof(scb_msg))) fprintf(stderr, "%%ODS2-W-CHKSCB, %s\n", scb_msg);
+        footer_state = ods2_image_footer(&vol, scb_msg, sizeof(scb_msg));
+        if (footer_state == 1) fprintf(stderr, "%%ODS2-I-SIMHFOOTER, %s\n", scb_msg);
+        else if (footer_state == 2) fprintf(stderr, "%%ODS2-W-SIMHFOOTER, %s\n", scb_msg);
+    }
     {
         const char *names = getenv("ODS2_NAMES");
         if (names != NULL && matches(names, "UTF8")) g_utf8_names = true;
     }
-    if (r.ok && vol.version0) {
+    if (r.ok && footer_state == 2) {
+        /* already told: read-only */
+    } else if (r.ok && vol.version0) {
         fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version is 0; "
                         "mounted read-only\n", argv[1]);
     } else if (r.ok && access(argv[1], W_OK) != 0) {

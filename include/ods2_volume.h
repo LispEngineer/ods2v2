@@ -63,6 +63,7 @@ typedef struct {
        Not for callers to touch. */
     struct ods2_txn *txn;
     int            txn_depth;
+    uint32_t       volsize;      /* SCB$L_VOLSIZE of BITMAP.SYS (0 if it could not be read): no write goes at or past it */
     bool           write_failed; /* sticky: a change failed part way through its write; no more writes on this mount */
 } ods2_volume_t;
 
@@ -357,6 +358,17 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
  * on a volume without HARDLINKS; VMS keeps no count there) is dangling, and its slot may since have
  * been reused by another file: VMS then says "no such file" (measured, ODS5_FORMAT_NOTES 15.7). */
 bool ods2_header_is_file(const uint8_t *header, ods2_fid_t fid);
+
+/* SIMH disk container footer: simh/simh appends 512 bytes ("simh" signature, then simulator, drive type, sizes, a CRC)
+   to a raw disk container it opens for write. 0: none. 1: the image is the volume plus the footer (the footer is not
+   volume data and is never read or written). 2: the footer lies inside the volume (on an image of 4 GiB or more a
+   32-bit overflow puts it into the last data block): the last block may be lost, and the volume is not mounted for
+   write. msg describes it. */
+int ods2_image_footer(ods2_volume_t *vol, char *msg, size_t cap);
+
+/* True, with a message in msg, when the storage control block (BITMAP.SYS VBN 1) is one OpenVMS ANALYZE would
+   call invalid (%ANALDISK-W-CHKSCB); read only. */
+bool ods2_scb_problem(ods2_volume_t *vol, char *msg, size_t cap);
 
 /* RMS record attributes for a new file (FH2$W_RECATTR, spec 3.5.2.9).
    Record formats (FAT$B_RTYPE, sequential organization): */

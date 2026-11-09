@@ -51,9 +51,14 @@ typedef struct {
     uint32_t    maxfiles;    /* 0 = the default, blocks / (2 * cluster + 2) */
     bool        security_lw1_given;  /* longword 1 of the security record: security_lw1 instead of 0x220 */
     uint32_t    security_lw1;
+    uint32_t    sectors, tracks;  /* the SCB geometry (SCB$L_SECTORS, _TRACKS); cylinders = ceil(blocks / (sectors * tracks)),
+                                as VMS writes them. 0, 0 = the default: see ods2_init_geometry() */
     unsigned    security;    /* SECURITY.SYS (file 10) content: ODS2_INIT_SECURITY_PROFILE (the default),
                                 _EMPTY (EFBLK 1: nothing written) or _ZERO (one block of zeros) */
 } ods2_init_options_t;
+
+/* The SCB geometry for a volume of this many blocks: the given non-zero values, else the default. */
+void ods2_init_geometry(uint64_t blocks, uint32_t *sectors, uint32_t *tracks);
 
 /* Creates the file `path` (which must not exist) as an empty volume. The
  * file is made sparse: only the blocks that hold structures are written.

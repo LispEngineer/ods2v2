@@ -148,6 +148,8 @@ static unsigned max_dir_depth(void)
 #define ODS2_MAX_DIR_DEPTH max_dir_depth()
 #define ODS2_MAX_HEADER_SEGMENTS_MOUNT 64
 
+static void load_scb_volsize(ods2_volume_t *vol);
+
 static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
                                      const char *fopen_mode, bool writable)
 {
@@ -244,6 +246,15 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
         }
     }
 
+    load_scb_volsize(vol);
+    if (writable) {
+        char fmsg[256];
+        if (ods2_image_footer(vol, fmsg, sizeof(fmsg)) == 2) {
+            ods2_dismount(vol);
+            return fail("a SIMH container footer lies inside the volume (the last block may be lost): the "
+                        "volume can be read, not written");
+        }
+    }
     r = ok();
     return r;
 }
@@ -369,6 +380,70 @@ static ods2_result_t read_block(ods2_volume_t *vol, uint32_t lbn, uint8_t *out, 
     return ok();
 }
 
+/* The SIMH container footer (simh/simh, sim_disk.c: MIT-licensed): the last 512 bytes of a raw container, "simh",
+   the simulator's name (64 bytes), the drive type (16), SectorSize, SectorCount, TransferElementSize (32-bit,
+   big-endian), the creation time (28), FooterVersion (0), AccessFormat (1 SIMH, 2 RAW), ... and a CRC-32 of the
+   first 508 bytes in the last four. The signature and version 0 identify it here. */
+static bool simh_footer_at_end(ods2_volume_t *vol, uint64_t *image_blocks, uint8_t foot[512])
+{
+    long here = ftell(vol->fp), size;
+
+    if (fseek(vol->fp, 0, SEEK_END) != 0) return false;
+    size = ftell(vol->fp);
+    (void) fseek(vol->fp, here, SEEK_SET);
+    if (size < 1024) return false;
+    *image_blocks = (uint64_t) size / 512;
+    if (fseek(vol->fp, size - 512, SEEK_SET) != 0 || fread(foot, 1, 512, vol->fp) != 512) {
+        (void) fseek(vol->fp, here, SEEK_SET);
+        return false;
+    }
+    (void) fseek(vol->fp, here, SEEK_SET);
+    return memcmp(foot, "simh", 4) == 0 && foot[124] == 0 && (foot[125] == 1 || foot[125] == 2);
+}
+
+int ods2_image_footer(ods2_volume_t *vol, char *msg, size_t cap)
+{
+    uint8_t foot[512];
+    uint64_t image_blocks = 0;
+    char sim[65], dtype[17];
+
+    if (msg != NULL && cap > 0) msg[0] = '\0';
+    if (vol->volsize == 0 || !simh_footer_at_end(vol, &image_blocks, foot)) return 0;
+    memcpy(sim, foot + 4, 64); sim[64] = '\0';
+    memcpy(dtype, foot + 68, 16); dtype[16] = '\0';
+    if (image_blocks > vol->volsize) {
+        if (msg != NULL) {
+            snprintf(msg, cap, "the image ends with a 512-byte SIMH container footer (made by \"%s\", drive type \"%s\"): "
+                     "it is not volume data (the volume is %u blocks) and is never read or written", sim, dtype,
+                     (unsigned) vol->volsize);
+        }
+        return 1;
+    }
+    if (msg != NULL) {
+        snprintf(msg, cap, "the last block of the image (block %llu) is a SIMH container footer (made by \"%s\", drive "
+                 "type \"%s\"), inside the volume (%u blocks): a 32-bit overflow in the simulator put it there, and the "
+                 "last block of the volume may be lost; the volume is read-only", (unsigned long long) (image_blocks - 1),
+                 sim, dtype, (unsigned) vol->volsize);
+    }
+    return 2;
+}
+
+/* SCB$L_VOLSIZE, read once at mount: the end of the volume for the write bound (a write at or past it is refused). */
+static void load_scb_volsize(ods2_volume_t *vol)
+{
+    uint8_t h[512], b[512];
+    ods2_extent_t ex[ODS2_MAX_EXTENTS];
+    int n = 0;
+
+    vol->volsize = 0;
+    if (!ods2_read_header(vol, 2, h).ok || !ods2_decode_all_extents(vol, h, ex, ODS2_MAX_EXTENTS, &n).ok || n <= 0 ||
+        !read_block(vol, ex[0].lbn, b, "could not read BITMAP.SYS").ok) {
+        return;
+    }
+    vol->volsize = (uint32_t) b[4] | ((uint32_t) b[5] << 8) | ((uint32_t) b[6] << 16) | ((uint32_t) b[7] << 24);
+}
+
+
 /* Opens a change. It fails, and the operation with it, if the buffer cannot be had (R9-1: running unbuffered
    would be the old, unsafe way) or if an earlier write to this image failed (R9-2). */
 static ods2_result_t txn_begin(ods2_volume_t *vol)
@@ -441,6 +516,10 @@ static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uin
         if (error_at > 0 && ++attempts == error_at) return fail("could not write block (injected I/O error)");
     }
 #endif
+    if (vol->volsize != 0 && lbn >= vol->volsize) {
+        return fail("a block at or past the end of the volume (the storage control block's volume size) is never "
+                    "written: nothing there belongs to the volume");
+    }
     if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
         fwrite(block, 1, 512, vol->fp) != 512) {
         return fail("could not write block");
@@ -1994,6 +2073,15 @@ static ods2_result_t write_extents(ods2_volume_t *vol, const ods2_extent_t *exte
         chunk = malloc(chunk_cap);
         if (chunk == NULL) return fail("could not allocate a write buffer");
     }
+    /* nothing at or past the end of the volume is written (the footer of a simulator's container, or whatever
+       follows, is not the volume's): checked for every extent before the first byte goes out */
+    for (i = 0; i < extent_count; i++) {
+        if (vol->volsize != 0 && (uint64_t) extents[i].lbn + extents[i].block_count > vol->volsize) {
+            free(chunk);
+            return fail("a file's blocks lie at or past the end of the volume (the storage control block's volume "
+                        "size): nothing is written there");
+        }
+    }
     for (i = 0; i < extent_count && r.ok; i++) {
         size_t run_bytes = (size_t) extents[i].block_count * 512u;
         size_t data = (offset < content_len) ? content_len - offset : 0;
@@ -3096,6 +3184,65 @@ static ods2_result_t remove_directory_entry(ods2_volume_t *vol, unsigned dir_fil
 ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const char *name)
 {
     return ods2_delete_version(vol, dir_file_number, name, ODS2_VERSION_HIGHEST, NULL);
+}
+
+/* The storage control block (BITMAP.SYS, VBN 1) as OpenVMS reads it. VAX V7.3's ANALYZE/DISK_STRUCTURE (VERIFY X-17)
+   takes the SCB as invalid when its structure level or cluster factor is not the volume's, or when
+   |VOLSIZE - sectors*tracks*cylinders/BLKSIZE| is more than one cylinder (sectors*tracks); it divides by BLKSIZE
+   without looking at it, so BLKSIZE 0 (a SIMH RQ disk of more than about 26.7 GiB: the 16-bit cylinder count wraps)
+   makes it trap with INTDIV, and V8.4 reports %ANALDISK-W-CHKSCB. Returns true, with a message, for such an SCB.
+   Read only: nothing is changed, the volume stays usable. */
+bool ods2_scb_problem(ods2_volume_t *vol, char *msg, size_t cap)
+{
+    uint8_t bitmap_header[512], scb[512];
+    uint16_t level;
+    uint32_t volsize, blksize, sec, trk, cyl;
+    uint64_t product, diff;
+    char scratch[2];
+
+    if (msg != NULL && cap > 0) msg[0] = '\0';
+    if (!ods2_read_header(vol, 2, bitmap_header).ok ||
+        !ods2_read_file_block(vol, bitmap_header, 1, scb).ok) {
+        return false;     /* a damaged BITMAP.SYS is reported where it is used */
+    }
+    level = (uint16_t) (scb[0] | (scb[1] << 8));
+    volsize = (uint32_t) scb[4] | ((uint32_t) scb[5] << 8) | ((uint32_t) scb[6] << 16) | ((uint32_t) scb[7] << 24);
+    blksize = (uint32_t) scb[8] | ((uint32_t) scb[9] << 8) | ((uint32_t) scb[10] << 16) | ((uint32_t) scb[11] << 24);
+    sec = (uint32_t) scb[12] | ((uint32_t) scb[13] << 8) | ((uint32_t) scb[14] << 16) | ((uint32_t) scb[15] << 24);
+    trk = (uint32_t) scb[16] | ((uint32_t) scb[17] << 8) | ((uint32_t) scb[18] << 16) | ((uint32_t) scb[19] << 24);
+    cyl = (uint32_t) scb[20] | ((uint32_t) scb[21] << 8) | ((uint32_t) scb[22] << 16) | ((uint32_t) scb[23] << 24);
+    if (msg == NULL || cap == 0) { msg = scratch; cap = sizeof(scratch); }
+
+    /* a block that is no SCB at all (the starter volume's all-ones or 0xAAAA placeholder) is not judged */
+    if (level != 0x0201u && level != 0x0501u) return false;
+    if (level != (vol->ods5 ? 0x0501u : 0x0201u)) {
+        snprintf(msg, cap, "the storage control block says structure level 0x%04X; OpenVMS ANALYZE/DISK_STRUCTURE "
+                 "would report %%ANALDISK-W-CHKSCB", level);
+        return true;
+    }
+    if (scb[2] != (vol->home.cluster & 0xFFu) || scb[3] != (vol->home.cluster >> 8)) {
+        snprintf(msg, cap, "the storage control block's cluster factor (%u) is not the volume's (%u); OpenVMS "
+                 "ANALYZE/DISK_STRUCTURE would report %%ANALDISK-W-CHKSCB", (unsigned) (scb[2] | (scb[3] << 8)),
+                 (unsigned) vol->home.cluster);
+        return true;
+    }
+    if (blksize == 0) {
+        snprintf(msg, cap, "the storage control block's blocking factor is 0 (the disk geometry %u x %u x %u "
+                 "wrapped its 16-bit cylinder count when the volume was initialized, a SIMH RQ disk above about "
+                 "26.7 GiB): OpenVMS VAX V7.3 ANALYZE/DISK_STRUCTURE fails with INTDIV, V8.4 reports "
+                 "%%ANALDISK-W-CHKSCB. The data is not affected", sec, trk, cyl);
+        return true;
+    }
+    product = (uint64_t) sec * trk * cyl / blksize;
+    diff = product > volsize ? product - volsize : (uint64_t) volsize - product;
+    if (diff > (uint64_t) sec * trk) {
+        snprintf(msg, cap, "the storage control block's geometry (%u sectors x %u tracks x %u cylinders = %llu "
+                 "blocks) is more than one cylinder from the volume size (%u): OpenVMS ANALYZE/DISK_STRUCTURE "
+                 "would report %%ANALDISK-W-CHKSCB. The data is not affected", sec, trk, cyl,
+                 (unsigned long long) product, volsize);
+        return true;
+    }
+    return false;
 }
 
 bool ods2_header_is_file(const uint8_t *header, ods2_fid_t fid)

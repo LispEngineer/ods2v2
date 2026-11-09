@@ -51,6 +51,17 @@ static bool put_block(image_t *img, uint64_t lbn, const uint8_t *data)
 static void put16(uint8_t *p, unsigned v) { p[0] = (uint8_t) v; p[1] = (uint8_t) (v >> 8); }
 static void put32(uint8_t *p, uint32_t v) { put16(p, v & 0xffff); put16(p + 2, v >> 16); }
 
+/* The default SCB geometry. 32 x 16 is what V8.4's virtual disks gave (and what the first volumes were made with);
+   a volume of more than 65,535 x 512 blocks would need more than 65,535 cylinders there, which a 16-bit
+   cylinder count (SIMH RQ, V7.3's drivers) wraps, so the SCSI geometry 63 x 255 is used from there on. A given
+   non-zero sectors and tracks are kept. */
+void ods2_init_geometry(uint64_t blocks, uint32_t *sectors, uint32_t *tracks)
+{
+    if (*sectors != 0 && *tracks != 0) return;
+    if ((blocks + 511) / 512 <= 65535) { *sectors = 32; *tracks = 16; }
+    else { *sectors = 63; *tracks = 255; }
+}
+
 static void set_checksum(uint8_t *b, size_t words, size_t at)
 {
     uint16_t c = ods2_checksum(b, words);
@@ -349,9 +360,17 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
         put16(scb + 2, c);
         put32(scb + 4, (uint32_t) N);                              /* SCB$L_VOLSIZE */
         put32(scb + 8, 1);                                         /* SCB$L_BLKSIZE */
-        put32(scb + 12, 32);                                       /* sectors, tracks, cylinders: the geometry V8.4 gave its virtual disks */
-        put32(scb + 16, 16);
-        put32(scb + 20, (uint32_t) ((N + 511) / 512));
+        {
+            /* sectors, tracks, cylinders: what VMS writes is the geometry of the device it initialized, with
+               cylinders = ceil(blocks / (sectors * tracks)) (every VMS-made volume checked: SIMH RQ 57 x 15, AXPbox
+               SCSI 96 x 96, V8.4 virtual disks 32 x 16, a physical SCSI disk 63 x 255) */
+            uint32_t sec = opt->sectors, trk = opt->tracks, cyl;
+            ods2_init_geometry(N, &sec, &trk);
+            cyl = (uint32_t) ((N + (uint64_t) sec * trk - 1) / ((uint64_t) sec * trk));
+            put32(scb + 12, sec);
+            put32(scb + 16, trk);
+            put32(scb + 20, cyl);
+        }
         memcpy(scb + 34, label, 12);                               /* SCB$T_VOLOCKNAME */
         ods2_store_vms_time(scb + 46, now);                        /* SCB$Q_MOUNTTIME */
         set_checksum(scb, 255, 510);
