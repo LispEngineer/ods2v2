@@ -54,7 +54,7 @@ check "COPY from a pipe (no file size to go by)" \
 for pair in ten.bin:TEN.BIN thirteen.bin:THIRTEEN.BIN odd.bin:ODD.BIN thirteen.bin:PIPED.BIN; do
     src=${pair%%:*}
     vms=${pair##*:}
-    $ODS2 $DISK "TYPE [000000]$vms" > "$TMP/out.bin" 2>/dev/null
+    $ODS2 $DISK "TYPE/RAW [000000]$vms" > "$TMP/out.bin" 2>/dev/null
     if cmp -s "$TMP/$src" "$TMP/out.bin"; then same=identical; else same=different; fi
     check "TYPE $vms reads back byte for byte" identical "$same"
 done
@@ -80,13 +80,13 @@ head -c 100663296 /dev/zero | tr '\0' 'z' > "$TMP/big.bin"
 check "COPY of a 96 MiB file stays under 64 MiB of memory (issue #16)" yes \
     "$(under_limit "$(peak_mib $ODS2 $DISK COPY $TMP/big.bin '[000000]BIG.BIN')")"
 check "TYPE of it stays under 64 MiB of memory" yes \
-    "$(under_limit "$(peak_mib $ODS2 $DISK 'TYPE [000000]BIG.BIN')")"
-$ODS2 $DISK "TYPE [000000]BIG.BIN" > "$TMP/out.bin" 2>/dev/null
+    "$(under_limit "$(peak_mib $ODS2 $DISK 'TYPE/RAW [000000]BIG.BIN')")"
+$ODS2 $DISK "TYPE/RAW [000000]BIG.BIN" > "$TMP/out.bin" 2>/dev/null
 if cmp -s "$TMP/big.bin" "$TMP/out.bin"; then same=identical; else same=different; fi
 check "TYPE BIG.BIN reads back byte for byte" identical "$same"
 check "COPY of it from a pipe stays under 64 MiB too" yes \
     "$(under_limit "$(peak_mib sh -c "cat $TMP/big.bin | $ODS2 $DISK COPY /dev/stdin '[000000]BIGPIPE.BIN'")")"
-$ODS2 $DISK "TYPE [000000]BIGPIPE.BIN" > "$TMP/out.bin" 2>/dev/null
+$ODS2 $DISK "TYPE/RAW [000000]BIGPIPE.BIN" > "$TMP/out.bin" 2>/dev/null
 if cmp -s "$TMP/big.bin" "$TMP/out.bin"; then same=identical; else same=different; fi
 check "TYPE BIGPIPE.BIN reads back byte for byte" identical "$same"
 $ODS2 $DISK 'DELETE [000000]BIG.BIN;1' > /dev/null 2>&1

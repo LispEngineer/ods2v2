@@ -71,7 +71,7 @@ check "COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) succeeds" \
 n=$((n + 1))
 check "...with fixed 8192-byte records in the header" \
     "rtype=0x01 rattrib=0x00 rsize=8192 maxrec=8192" "$(hdr $n)"
-$ODS2 $DISK "TYPE [000000]KIT.PCSI" > "$TMP/out.bin" 2>/dev/null
+$ODS2 $DISK "TYPE/RAW [000000]KIT.PCSI" > "$TMP/out.bin" 2>/dev/null
 if cmp -s "$TMP/kit.pcsi" "$TMP/out.bin"; then same=identical; else same=different; fi
 check "...and reads back byte for byte" identical "$same"
 
@@ -105,7 +105,7 @@ check "COPY/CONVERT succeeds" \
 n=$((n + 1))
 check "...VAR, RAT:CR, LRL the longest line, MRS 0" \
     "rtype=0x02 rattrib=0x02 rsize=10 maxrec=0" "$(hdr $n)"
-$ODS2 $DISK "TYPE [000000]CRLF.TXT" > "$TMP/out.bin" 2>/dev/null
+$ODS2 $DISK "TYPE/RAW [000000]CRLF.TXT" > "$TMP/out.bin" 2>/dev/null
 if cmp -s "$TMP/crlf.var" "$TMP/out.bin"; then same=identical; else same=different; fi
 check "...holding exactly the records expected" identical "$same"
 $ODS2 $DISK "COPY/ATTRIBUTES=(RFM:VAR,RAT:CR)/CONVERT $TMP/crlf.txt [000000]ISSUE.TXT" >/dev/null 2>&1
@@ -120,7 +120,7 @@ check "COPY/CONVERT from a pipe" \
     "%ODS2-I-COPIED, 28 bytes to PIPED.TXT;1 as 5 variable-length records (longest 10)" \
     "$(cat $TMP/crlf.txt | $ODS2 $DISK "COPY/CONVERT /dev/stdin [000000]PIPED.TXT" 2>&1)"
 n=$((n + 1))
-$ODS2 $DISK "TYPE [000000]PIPED.TXT" > "$TMP/out.bin" 2>/dev/null
+$ODS2 $DISK "TYPE/RAW [000000]PIPED.TXT" > "$TMP/out.bin" 2>/dev/null
 if cmp -s "$TMP/crlf.var" "$TMP/out.bin"; then same=identical; else same=different; fi
 check "...holding the same records" identical "$same"
 : > "$TMP/empty.txt"

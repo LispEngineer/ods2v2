@@ -24,7 +24,7 @@ BUILD    = build
 VOLUME_SRCS = src/ods5_names.c src/ods5_header.c src/ods2_volume.c src/ods2_validate.c src/ods2_checksum.c \
               src/ods2_retrieval.c src/ods2_directory.c src/ods2_bitmap.c \
               src/ods2_header_build.c src/ods2_directory_write.c src/ods2_time.c \
-              src/ods2_text_var.c
+              src/ods2_text_var.c src/ods2_records.c
 
 TOOLS = ods2 ods2_init read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
         ods2_put ods2_check_headers ods2_dump_root ods2_dump_header ods2_rm
@@ -44,7 +44,7 @@ DEV_TOOLS = read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
 $(BUILD)/ods2_make_loop: tests/ods2_make_loop.c $(VOLUME_SRCS) include/ods2_volume.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_make_loop.c $(VOLUME_SRCS) -o $@
 
-TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest $(BUILD)/ods5_names_selftest $(BUILD)/ods5_directory_selftest $(BUILD)/ods5_header_selftest $(BUILD)/ods5_indexf_chain_selftest $(BUILD)/ods5_write_selftest $(BUILD)/ods5_review_selftest
+TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest $(BUILD)/ods5_names_selftest $(BUILD)/ods5_directory_selftest $(BUILD)/ods5_header_selftest $(BUILD)/ods5_indexf_chain_selftest $(BUILD)/ods5_write_selftest $(BUILD)/ods5_review_selftest $(BUILD)/ods2_records_selftest
 
 .PHONY: all test tools dev-tools release clean starter-volume
 
@@ -153,6 +153,9 @@ $(BUILD)/ods2_record_attrs_selftest: tests/ods2_record_attrs_selftest.c $(VOLUME
 $(BUILD)/ods2_indexf_large_selftest: tests/ods2_indexf_large_selftest.c $(VOLUME_SRCS) include/ods2_volume.h samples/synthetic_disk.img | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) -D_DEFAULT_SOURCE tests/ods2_indexf_large_selftest.c $(VOLUME_SRCS) -o $@
 
+$(BUILD)/ods2_records_selftest: tests/ods2_records_selftest.c src/ods2_records.c include/ods2_records.h include/ods2_volume.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_records_selftest.c src/ods2_records.c -o $@
+
 $(BUILD)/ods2_text_var_selftest: tests/ods2_text_var_selftest.c $(VOLUME_SRCS) include/ods2_text_var.h include/ods2_volume.h samples/synthetic_disk.img | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_text_var_selftest.c $(VOLUME_SRCS) -o $@
 
@@ -196,7 +199,7 @@ ods2_dump_header: tools/ods2_dump_header.c $(VOLUME_SRCS) include/ods2_volume.h
 ods2_rm: tools/ods2_rm.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c include/ods2_volume.h include/ods2_path.h
 	$(CC) $(CFLAGS) $(SANFLAGS) tools/ods2_rm.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c -o $@
 
-ods2: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c include/ods2_volume.h include/ods2_text_var.h include/ods2_path.h include/ods2_wildcard.h third_party/linenoise/linenoise.h
+ods2: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c include/ods2_volume.h include/ods2_text_var.h include/ods2_records.h include/ods2_path.h include/ods2_wildcard.h third_party/linenoise/linenoise.h
 	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Ithird_party/linenoise $(SANFLAGS) tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c -o $@
 
 test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
@@ -242,6 +245,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@$(BUILD)/ods2_record_attrs_selftest
 	@echo "--- ods2_indexf_large_selftest ---"
 	@$(BUILD)/ods2_indexf_large_selftest
+	@echo "--- ods2_records_selftest ---"
+	@$(BUILD)/ods2_records_selftest
 	@echo "--- ods2_text_var_selftest ---"
 	@$(BUILD)/ods2_text_var_selftest
 	@echo "--- ods5_names_selftest ---"
@@ -282,6 +287,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@sh tests/cli_ods5_init_check.sh
 	@echo "--- cli_ods5_review_check ---"
 	@sh tests/cli_ods5_review_check.sh
+	@echo "--- cli_records_check ---"
+	@sh tests/cli_records_check.sh
 	@echo "--- CLI recursive DIR regression check ---"
 	@if command -v timeout >/dev/null 2>&1; then \
 		rm -f samples/cli_regression_disk.img; \

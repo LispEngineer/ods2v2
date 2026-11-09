@@ -121,6 +121,7 @@
 #include "ods2_wildcard.h"
 #include "ods2_directory_write.h"
 #include "ods2_text_var.h"
+#include "ods2_records.h"
 #include "ods2_validate.h"
 #include "ods5_ondisk.h"
 #include "ods5_names.h"
@@ -874,6 +875,7 @@ typedef struct {
     bool versions;            /* name ends ";N" */
     bool overwrite;
     bool links;               /* repeat FIDs become hard links */
+    bool records;             /* /RECORDS: sequential files as text, one line per record */
     const char *start;        /* the start directory's spelling (tree mode) */
     int files, symlinks, dirs_skipped, specials_skipped, errors;
     struct seen_fid { uint16_t num, seq; char *path; } *seen;
@@ -929,6 +931,59 @@ static bool make_local_dirs(const char *path, size_t rootlen)
         return mkdir(buf, 0777) == 0;
     }
     return stat(buf, &st) == 0 ? S_ISDIR(st.st_mode) : mkdir(buf, 0777) == 0;
+}
+
+/* A file's content for output: as the bytes it holds (records == false), or as Linux text, one
+ * line per record, as VMS TYPE shows a sequential RMS file (records == true; relative and indexed
+ * files, and special files, are still given as bytes: their records are not decoded). `note` gets
+ * a non-fatal remark (or NULL). */
+static bool rec_feed_sink(void *ctx, const uint8_t *data, size_t n)
+{
+    return ods2_rec_feed((ods2_rec_decoder_t *) ctx, data, n);
+}
+
+static ods2_result_t read_file_content(ods2_volume_t *vol, const uint8_t *header, bool records,
+                                       unsigned rec_options,
+                                       bool (*sink)(void *ctx, const uint8_t *data, size_t n), void *ctx,
+                                       size_t *bytes_out, bool *sink_failed_out, const char **note)
+{
+    const ods2_head_core_t *core = (const ods2_head_core_t *) header;
+    ods2_rec_decoder_t *d;
+    ods2_rec_attrs_t a;
+    ods2_result_t r;
+
+    *note = NULL;
+    if (!records || ods5_special_type(header) != 0 || !ods2_rec_decodable(core->recattr.rtype)) {
+        if (records && ods5_special_type(header) == 0 && (core->recattr.rtype >> 4) != 0) {
+            *note = "relative and indexed files are given as stored (their records are not decoded)";
+        }
+        return ods2_read_file_stream(vol, header, sink, ctx, bytes_out, sink_failed_out);
+    }
+    a.rfm = core->recattr.rtype & 15u;
+    a.rat = core->recattr.rattrib;
+    a.rsize = core->recattr.rsize;
+    a.maxrec = core->recattr.maxrec;
+    a.vfcsize = core->recattr.vfcsize;
+    d = ods2_rec_new(&a, rec_options, sink, ctx);
+    if (d == NULL) {
+        if (sink_failed_out) *sink_failed_out = false;
+        if (bytes_out) *bytes_out = 0;
+        return (ods2_result_t) { .ok = false, .problem = "out of memory" };
+    }
+    r = ods2_read_file_stream(vol, header, rec_feed_sink, d, bytes_out, sink_failed_out);
+    if (r.ok && !ods2_rec_bad_data(d) && !(sink_failed_out && *sink_failed_out)) {
+        if (!ods2_rec_finish(d) && !ods2_rec_bad_data(d) && sink_failed_out) *sink_failed_out = true;
+    }
+    if (ods2_rec_bad_data(d)) {
+        /* the decoder refused the data (the sink did not fail) */
+        if (sink_failed_out) *sink_failed_out = false;
+        r.ok = false;
+        r.problem = ods2_rec_problem(d); /* a string constant */
+    } else {
+        *note = ods2_rec_problem(d);
+    }
+    ods2_rec_free(d);
+    return r;
 }
 
 typedef struct { FILE *f; bool failed; } file_sink_t;
@@ -1115,7 +1170,11 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         }
         sink.f = f;
         sink.failed = false;
-        r = ods2_read_file_stream(vol, header, file_sink, &sink, &bytes, &sink_failed);
+        {
+            const char *note = NULL;
+            r = read_file_content(vol, header, x->records, 0, file_sink, &sink, &bytes, &sink_failed, &note);
+            if (note != NULL && r.ok) report_error("%%ODS2-W-RECORDS, %s: %s\n", shown, note);
+        }
         if (fclose(f) != 0) sink.failed = true;
         if (!r.ok || sink.failed) {
             report_error("%%ODS2-E-READERR, %s: %s\n", shown,
@@ -1172,9 +1231,11 @@ static void cmd_export(ods2_volume_t *vol, const ods2_parsed_path_t *p, const ch
         if (matches(q, "VERSIONS")) x.versions = true;
         else if (matches(q, "OVERWRITE")) x.overwrite = true;
         else if (matches(q, "LINKS")) x.links = true;
+        else if (matches(q, "RECORDS")) x.records = true;
+        else if (matches(q, "RAW")) x.records = false;
         else {
             report_error("%%ODS2-E-BADQUAL, unrecognized EXPORT qualifier /%s "
-                         "(use /VERSIONS, /OVERWRITE or /LINKS)\n", q);
+                         "(use /VERSIONS, /OVERWRITE, /LINKS, /RECORDS or /RAW)\n", q);
             return;
         }
         quals += 1 + strcspn(quals + 1, "/");
@@ -2210,7 +2271,7 @@ static bool stdout_sink(void *ctx, const uint8_t *data, size_t n)
     return fwrite(data, 1, n, stdout) == n;
 }
 
-static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p)
+static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw)
 {
     uint8_t dir_header[512], file_header[512];
     ods2_fid_t dir_fid, file_fid;
@@ -2261,8 +2322,10 @@ static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p)
     {
         bool sink_failed = false;
         size_t bytes = 0;
-        r = ods2_read_file_stream(vol, file_header, stdout_sink, NULL, &bytes, &sink_failed);
+        const char *note = NULL;
+        r = read_file_content(vol, file_header, !raw, 0, stdout_sink, NULL, &bytes, &sink_failed, &note);
         if (r.ok && fflush(stdout) != 0) sink_failed = true;
+        if (note != NULL && r.ok && !sink_failed) fprintf(stderr, "%%ODS2-W-RECORDS, %s: %s\n", spec, note);
         if (sink_failed) {
             report_error("%%ODS2-E-WRITEERR, %s: could not write all %zu bytes to output\n",
                          spec, ods2_file_content_length(file_header));
@@ -2364,10 +2427,12 @@ static void print_help(void)
            "  DIR/FULL ...               per file: id, size, owner, protection, dates (also\n"
            "                             access and attribute dates on ODS-5), record format\n"
            "  SET NAMES UTF8|ESCAPED     the same for every command that shows names\n"
-           "  EXPORT[/VERSIONS][/OVERWRITE][/LINKS] <path> <linux-path>\n"
+           "  EXPORT[/VERSIONS][/OVERWRITE][/LINKS][/RECORDS] <path> <linux-path>\n"
            "                             copy files off the volume to Linux files (UTF-8 names;\n"
            "                             wildcards, [dir...] recreates the tree; symbolic links\n"
-           "                             become Linux symbolic links); \"quotes\" keep a space\n"
+           "                             become Linux symbolic links); \"quotes\" keep a space;\n"
+           "                             the bytes as stored, or with /RECORDS sequential files as\n"
+           "                             text, one line per record\n"
            "  CREATE/DIRECTORY path      create a directory\n"
            "  COPY <local-file> <path>   write a local file onto the disk (Stream_LF)\n"
            "  COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) <local-file> <path>\n"
@@ -2383,7 +2448,8 @@ static void print_help(void)
            "  SYMLINK <link-path> <target>   make a symbolic link (ODS-5; as CREATE/SYMLINK=target)\n"
            "  LINK <new-path> <existing-path> another directory entry for a file, with its link\n"
            "                             count (HARDLINKS volume; as SET FILE/ENTER=new existing)\n"
-           "  TYPE path                  print a file's content\n"
+           "  TYPE[/RAW] path            print a file as text, one line per record (VAR, VFC, FIX,\n"
+           "                             STM*) as VMS TYPE does; /RAW: the stored bytes\n"
            "  DELETE path                delete a file (one version) or empty directory\n"
            "  SET DEFAULT path           set the current default directory\n"
            "  SHOW DEFAULT               show the current default directory\n"
@@ -2715,7 +2781,7 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
         cmd_copy(vol, tokens[1], &p, &attrs, &opts);
         return true;
     }
-    if (matches(tokens[0], "TYPE") || matches(tokens[0], "CAT")) {
+    if (matches(verb, "TYPE") || matches(verb, "CAT")) {
         ods2_parsed_path_t p;
         if (n < 2) {
             report_error("%%ODS2-E-NOPARM, usage: TYPE <path>\n");
@@ -2726,7 +2792,24 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
             return true;
         }
         if (refuse_wild_dir(&p, "TYPE", tokens[1])) return true;
-        cmd_type(vol, &p);
+        {
+            bool raw = false;
+            const char *s = quals;
+            while (s != NULL && *s == '/') {
+                char q[32];
+                size_t ql = strcspn(s + 1, "/");
+                if (ql >= sizeof(q)) ql = sizeof(q) - 1;
+                memcpy(q, s + 1, ql);
+                q[ql] = '\0';
+                if (matches(q, "RAW")) raw = true;
+                else {
+                    report_error("%%ODS2-E-BADQUAL, unrecognized TYPE qualifier /%s (use /RAW)\n", q);
+                    return true;
+                }
+                s += 1 + strcspn(s + 1, "/");
+            }
+            cmd_type(vol, &p, raw);
+        }
         return true;
     }
     if (matches(tokens[0], "DELETE") || matches(tokens[0], "RM")) {

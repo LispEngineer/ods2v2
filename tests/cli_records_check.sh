@@ -1,0 +1,47 @@
+#!/bin/sh
+# MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer)
+#
+# cli_records_check.sh - TYPE and EXPORT/RECORDS give RMS sequential files as text, one line per
+# record (VAR, VFC, FIX, STM, STMLF, STMCR, UDF); TYPE/RAW and EXPORT give the stored bytes.
+# The files come from tests/mkrms_image.py (raw bytes copied in, record attributes patched
+# into the headers). Expected text is written by that script from the record layouts.
+ODS2=${ODS2:-./ods2}
+INIT=${INIT:-./ods2_init}
+TMP=${TMPDIR:-/tmp}/rec_check.$$
+mkdir -p "$TMP" || exit 1
+trap 'rm -rf "$TMP"' EXIT
+fail=0
+check() { # name expected actual
+    if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1 (expected [$2] got [$3])"; fail=$((fail+1)); fi
+}
+python3 -I tests/mkrms_image.py "$ODS2" "$INIT" "$TMP/rms.img" "$TMP/src" >/dev/null || { echo "FAIL: building the test image"; exit 1; }
+python3 -I tests/ods5check.py "$TMP/rms.img" | tail -1 | grep -q '^0 error(s), 0 warning(s)' && echo "PASS: record test image passes ods5check.py" || { echo "FAIL: record test image"; fail=$((fail+1)); }
+for f in "$TMP"/src/expect/*; do
+    n=$(basename "$f")
+    $ODS2 "$TMP/rms.img" "TYPE [000000]$n" > "$TMP/out" 2>/dev/null
+    if cmp -s "$f" "$TMP/out"; then echo "PASS: TYPE $n as text"; else echo "FAIL: TYPE $n as text"; fail=$((fail+1)); fi
+done
+mkdir "$TMP/exp"
+$ODS2 "$TMP/rms.img" "EXPORT/RECORDS [000000]*.* $TMP/exp" >/dev/null 2>&1
+for f in "$TMP"/src/expect/*; do
+    n=$(basename "$f")
+    if cmp -s "$f" "$TMP/exp/$n"; then echo "PASS: EXPORT/RECORDS $n"; else echo "FAIL: EXPORT/RECORDS $n"; fail=$((fail+1)); fi
+done
+mkdir "$TMP/raw"
+$ODS2 "$TMP/rms.img" "EXPORT [000000]*.* $TMP/raw" >/dev/null 2>&1
+for f in "$TMP"/src/*; do
+    [ -f "$f" ] || continue
+    n=$(basename "$f")
+    [ "$n" = MANIFEST.txt ] && continue
+    if cmp -s "$f" "$TMP/raw/$n"; then echo "PASS: EXPORT $n keeps the stored bytes"; else echo "FAIL: EXPORT $n keeps the stored bytes"; fail=$((fail+1)); fi
+    $ODS2 "$TMP/rms.img" "TYPE/RAW [000000]$n" > "$TMP/out" 2>/dev/null
+    cmp -s "$f" "$TMP/out" && echo "PASS: TYPE/RAW $n" || { echo "FAIL: TYPE/RAW $n"; fail=$((fail+1)); }
+done
+# a damaged VAR file (a record length over 32767) is reported, not decoded into garbage
+$ODS2 "$TMP/rms.img" "TYPE [000000]BAD_VAR.TXT" > "$TMP/out" 2> "$TMP/err"; st=$?
+check "TYPE of a damaged VAR file exits 1" 1 "$st"
+grep -q "READERR" "$TMP/err" && echo "PASS: ... and says so" || { echo "FAIL: damaged VAR file not reported"; fail=$((fail+1)); }
+$ODS2 "$TMP/rms.img" "TYPE/RAW [000000]BAD_VAR.TXT" > "$TMP/out" 2>/dev/null
+check "TYPE/RAW of it still gives the bytes" 5 "$(wc -c < "$TMP/out" | tr -d ' ')"
+if [ $fail -ne 0 ]; then echo "$fail records check(s) failed"; exit 1; fi
+echo "all records checks passed"
