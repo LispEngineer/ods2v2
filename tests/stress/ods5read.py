@@ -227,6 +227,9 @@ def read_volume(path, want_md5=True):
             if fi.special == 5:
                 fi.target = d
     out.free_clusters = None
+    out.indexf_blocks = sum(c for _, c in idx)
+    out.ext_files = sum(1 for n, (b, fi) in prim.items() if len(fi.extents) > 0 and (u16(b, 14) | (b[19] << 16)) != 0)
+    out.max_extents = max((len(fi.extents) for (b, fi) in prim.values()), default=0)
     # storage bitmap free count (independent of the checker's loop)
     bm = prim.get(2)
     if bm:

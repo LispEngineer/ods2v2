@@ -522,11 +522,15 @@ class Harness:
             self.note('baseline copy of %s' % name)
         else:
             self.ods5 = cfg.startswith('f5')
-            sizes = [8192, 8200, 9973, 16384, 20000, 32768, 65536, 131072, 262144]
+            sizes = {'fill': [8192, 8200, 9973, 16384, 20000], 'frag': [8192, 9000, 16384], 'bigdir': [65536, 131072],
+                     'deep': [16384, 32768], 'indexf': [32768, 65536], 'bigfile': [131072, 262144, 400000],
+                     }.get(self.profile, [8192, 8200, 9973, 16384, 20000, 32768, 65536, 131072, 262144])
             size = r.choice(sizes)
             args = [ODS2_INIT, self.img, str(size), '--structure=%d' % (5 if self.ods5 else 2),
                     '--label=STRESS%d' % (self.seed % 1000)]
-            if r.random() < 0.6:
+            if self.profile == 'frag':
+                args.append('--cluster=%d' % r.choice([1, 1, 1, 2, 3]))
+            elif r.random() < 0.6:
                 args.append('--cluster=%d' % r.choice([1, 2, 3, 4, 8, 16]))
             if self.ods5 and r.random() < 0.5:
                 args.append('--hardlinks')
@@ -544,6 +548,8 @@ class Harness:
         self.hardlinks = bool(vol.volchar & 0x40)
         self.cluster = vol.cluster
         self.model = model_from_volume(vol, self.ods5, self.hardlinks)
+        self.baseline_keys = set(self.model.ents)
+        self.baseline_dirs = set(self.model.dirs.values())
         self.names = NameGen(r, self.ods5)
         self.note('volume: ODS-%d cluster %d blocks %d hardlinks %s files %d dirs %d'
                   % (5 if self.ods5 else 2, vol.cluster, vol.size_blocks, self.hardlinks, len(vol.files), len(vol.dirs)))
@@ -1068,6 +1074,10 @@ class Harness:
             self.fail('script copy refused: ' + text[-400:])
 
     OPS = {
+        'names': [('copy', 45), ('mkdir', 12), ('delete', 10), ('rmdir', 3), ('bad_name', 10), ('case', 8), ('import', 10),
+                  ('link', 4), ('symlink', 4), ('type', 2)],
+        'links': [('copy', 15), ('link', 30), ('delete', 30), ('symlink', 10), ('mkdir', 8), ('rmdir', 6), ('type', 3)],
+        'bigfile': [('copy', 50), ('delete', 20), ('type', 10), ('mkdir', 5), ('link', 5), ('import', 5)],
         'mix': [('copy', 40), ('mkdir', 8), ('delete', 14), ('rmdir', 4), ('link', 4), ('symlink', 3), ('label', 1),
                 ('import', 5), ('bad_name', 4), ('case', 3), ('type', 6), ('set_default', 3)],
     }
@@ -1075,12 +1085,366 @@ class Harness:
     def do_op(self, name):
         getattr(self, 'op_' + {'case': 'case_collision'}.get(name, name))()
 
+    # ---- scenarios
+    def batch_copy(self, items, fmt=''):
+        """items: [(dirpath, display, data)] copied in one ods2 process; returns the list of results (True/False)"""
+        r = self.rng
+        cmds = []
+        want = []
+        for dp, display, data in items:
+            src = self.write_src(data)
+            cmds.append('COPY%s %s %s%s' % (fmt, src, spec_dir(dp, r, self.ods5), spec_file_name(display, r, self.ods5)))
+        outs, crash, text, rc = run_batch(self.img, cmds, self.dir)
+        self.note('batch of %d copies: %d ok' % (len(items), sum(1 for o in outs if o[1])))
+        if crash:
+            self.fail('batch crashed: ' + text[-800:])
+        if len(outs) != len(items):
+            self.fail('batch ran %d of %d commands: %s' % (len(outs), len(items), text[-400:]))
+        for (dp, display, data), (c, ok, t) in zip(items, outs):
+            if ok:
+                self.model.add_file(dp, display, Obj('file', hashlib.md5(data).hexdigest(), len(data)))
+        return [o[1] for o in outs], [o[2] for o in outs]
+
+    def batch_delete(self, specs):
+        """specs: [(dirpath, display, ver)] deleted in one process; model updated for the successful ones"""
+        r, m = self.rng, self.model
+        cmds = ['DELETE %s%s;%d' % (spec_dir(dp, r, self.ods5), spec_file_name(d, r, self.ods5), v) for dp, d, v in specs]
+        outs, crash, text, rc = run_batch(self.img, cmds, self.dir)
+        self.note('batch of %d deletes: %d ok' % (len(specs), sum(1 for o in outs if o[1])))
+        if crash:
+            self.fail('delete batch crashed: ' + text[-800:])
+        if len(outs) != len(specs):
+            self.fail('delete batch ran %d of %d: %s' % (len(outs), len(specs), text[-400:]))
+        for (dp, d, v), (c, ok, t) in zip(specs, outs):
+            if ok:
+                m.ents.pop((m.fkpath(dp), key_of(d), v), None)
+        return [o[1] for o in outs]
+
+    def vol_stats(self):
+        return ods5read.read_volume(self.img, want_md5=False)
+
+    def scenario_fill(self):
+        r, m = self.rng, self.model
+        base = ods5read.read_volume(self.img, want_md5=False)
+        free0 = self.free_blocks
+        idx0 = base.indexf_blocks
+        d0 = ods5read.read_volume(self.img, want_md5=False)
+        dp = ()
+        made = []
+        phase = 0
+        # 1. big files until one is refused; each refusal must leave everything as it was
+        refusals = 0
+        k = 0
+        while refusals < 6 and k < 400:
+            k += 1
+            free = self.free_blocks
+            if free < 8 * self.cluster:
+                bsz = r.choice([1, 100, 511, 512, 513, 2000])
+            else:
+                bsz = r.choice([free * 512 // 3, free * 512 // 2, free * 512 // 8, free * 512 - r.randint(0, 5000), free * 512 + r.randint(1, 5000), 100000, 3000])
+            nm, strict = self.names.file_name('plain' if k % 2 else None)
+            if not self.ods5:
+                nm = nm.upper()
+            if m.name_taken(dp, nm):
+                continue
+            data = gen_content(r, max(bsz, 1), r.choice(['bin', 'tagged', 'lf', 'zero']))
+            cmd_before = free
+            ok = self.batch_copy([(dp, nm, data)])[0][0]
+            if not ok:
+                refusals += 1
+            self.verify('fill step %d (%s, %d bytes, free %d->)' % (k, 'ok' if ok else 'refused', len(data), cmd_before), export=(k % 4 == 0 or not ok))
+            if self.free_blocks == 0:
+                break
+        # 2. 1-byte files until nothing more fits (the directory or header space runs out)
+        for j in range(60):
+            nm, _ = self.names.file_name('plain')
+            nm = nm.upper() if not self.ods5 else nm
+            if m.name_taken(dp, nm):
+                continue
+            ok = self.batch_copy([(dp, nm, b'x' * r.randint(1, 3))])[0][0]
+            if not ok:
+                break
+        self.verify('volume full', export=True)
+        # other commands on a full volume must fail cleanly (or succeed) and leave it consistent
+        sfx = self.names.dir_name()
+        for what in range(3):
+            if what == 0:
+                # KNOWN (review 6 #6, ods5-wr2 is fixing): CREATE/DIRECTORY with no room leaks a file number.
+                # Run it on a throwaway copy, report what the checker says, keep the main volume clean.
+                cp = self.img + '.fullmkdir'
+                shutil.copyfile(self.img, cp)
+                res = run_ods2(cp, 'CREATE/DIRECTORY [%s]' % spec_dir_name(sfx, r, self.ods5))
+                if res.crash:
+                    self.fail('mkdir on a full volume crashed: ' + res.text[-500:])
+                summ = run_checker(cp)[0]
+                self.note('XFAIL-KNOWN review6#6: mkdir on full volume ok=%s, checker on the copy: %s' % (res.ok, summ))
+                os.unlink(cp)
+            elif what == 1 and self.ods5:
+                res = run_ods2(self.img, 'SYMLINK [000000]full^_link. target')
+                if res.crash:
+                    self.fail('symlink on a full volume crashed: ' + res.text[-500:])
+                if res.ok:
+                    m.add_file((), 'full link.', Obj('symlink', target=b'target'))
+            elif what == 2:
+                res = run_ods2(self.img, 'SET VOLUME/LABEL=FULLVOL')
+                if res.crash or not res.ok:
+                    self.fail('label on a full volume: ' + res.text[-300:])
+            self.verify('full volume op %d' % what)
+        # 3. delete a random half, verify, refill, delete all, check nothing leaked
+        ents = [(m.dirs[fp], d, v) for (fp, key, v), (d, o) in m.ents.items() if not o.volatile and o.kind == 'file' and self.group_size(o) == 1 and (fp, key, v) not in self.baseline_keys]
+        r.shuffle(ents)
+        self.batch_delete(ents[:len(ents) // 2])
+        self.verify('half deleted')
+        items = []
+        for j in range(20):
+            nm, _ = self.names.file_name('plain')
+            nm = nm.upper() if not self.ods5 else nm
+            if m.name_taken(dp, nm) or any(nm == i[1] for i in items):
+                continue
+            items.append((dp, nm, gen_content(r, r.randint(1, 20000), 'tagged')))
+        self.batch_copy(items)
+        self.verify('refilled')
+        ents = [(m.dirs[fp], d, v) for (fp, key, v), (d, o) in m.ents.items() if not o.volatile and o.kind == 'file' and self.group_size(o) == 1 and (fp, key, v) not in self.baseline_keys]
+        self.batch_delete(ents)
+        for (fp, key, v), (d, o) in list(m.ents.items()):
+            if o.kind == 'symlink' and (fp, key, v) not in self.baseline_keys:
+                self.batch_delete([(m.dirs[fp], d, v)])
+        for p in sorted([p for p in m.dirs.values() if p and p not in self.baseline_dirs], key=len, reverse=True):
+            res = run_ods2(self.img, 'DELETE %s%s.DIR' % (spec_dir(p[:-1], r, self.ods5), spec_dir_name(p[-1], r, self.ods5)))
+            if res.crash or not res.ok:
+                self.fail('rmdir %r at the end: %s' % (p, res.text[-300:]))
+            m.remove_dir(p)
+        self.verify('all deleted')
+        end = self.vol_stats()
+        # free space must come back, but for what INDEXF.SYS and the root directory grew by
+        lost = free0 - self.free_blocks
+        grown = (end.indexf_blocks - idx0)
+        rootext = sum(c for _, c in end.info[4].extents) - sum(c for _, c in d0.info[4].extents)
+        self.note('fill: free at start %d, at end %d; INDEXF grew %d, root dir grew %d' % (free0, self.free_blocks, grown, rootext))
+        if lost != grown + rootext:
+            self.fail('space leak: %d blocks free at the start, %d after deleting everything (INDEXF grew %d, root %d): %d unaccounted'
+                      % (free0, self.free_blocks, grown, rootext, lost - grown - rootext))
+
+    def scenario_frag(self):
+        r, m = self.rng, self.model
+        nsmall = r.choice([300, 600, 1000])
+        free0 = self.free_blocks
+        self.dname = 'FRAG'
+        res = run_ods2(self.img, 'CREATE/DIRECTORY [FRAG]')
+        if not res.ok:
+            self.fail('mkdir FRAG: ' + res.text[-300:])
+        m.add_dir((), 'FRAG')
+        dp = ('FRAG',)
+        items = []
+        for i in range(nsmall):
+            nm = 'F%05d.D' % i
+            sz = r.choice([1, 100, 512, 512, 512, 1000, 1024, 1500])
+            items.append((dp, nm, gen_content(r, sz, 'tagged')))
+        oks, _ = self.batch_copy(items)
+        if not all(oks):
+            self.note('only %d of %d small files fit' % (sum(oks), nsmall))
+        self.verify('small files')
+        # delete a pattern: every other, or random 50%
+        mode = r.choice(['alternate', 'random', 'runs'])
+        keep = [(it[1]) for it, ok in zip(items, oks) if ok]
+        if mode == 'alternate':
+            gone = keep[::2]
+        elif mode == 'random':
+            gone = [k for k in keep if r.random() < 0.5]
+        else:
+            gone = []
+            i = 0
+            while i < len(keep):
+                n = r.randint(1, 4)
+                if r.random() < 0.5:
+                    gone += keep[i:i + n]
+                i += n + r.randint(1, 3)
+        self.batch_delete([(dp, g, 1) for g in gone])
+        self.verify('holes made (%s, %d)' % (mode, len(gone)))
+        # big files into the holes: each must fragment
+        vol = self.vol_stats()
+        total_free = self.free_blocks
+        for j in range(3):
+            if j == 0:
+                size_blocks = max(total_free // 2, 2)
+            elif j == 1:
+                size_blocks = max(total_free - 1, 1)
+            else:
+                size_blocks = max(total_free // 8, 2)
+            kind = r.choice(['tagged', 'bin'])
+            data = gen_content(r, size_blocks * 512 - r.randint(0, 511), kind)
+            ok = self.batch_copy([((), 'BIG%d.DAT' % j, data)])[0][0]
+            vol = self.vol_stats()
+            self.note('frag: BIG%d %d blocks ok=%s; INDEXF extension headers %d, max extents of a file %d' % (j, size_blocks, ok, vol.nheaders_ext, vol.max_extents))
+            self.verify('big file %d (%s)' % (j, 'ok' if ok else 'refused'))
+            total_free = self.free_blocks
+        self.coverage = {'ext_headers': vol.nheaders_ext, 'max_extents': vol.max_extents}
+        # delete the big ones, then the rest
+        rest = [(dp, k, 1) for k in keep if k not in gone]
+        self.batch_delete([((), 'BIG%d.DAT' % j, 1) for j in range(3) if m.ents.get((m.fkpath(()), key_of('BIG%d.DAT' % j), 1))])
+        self.verify('big files deleted')
+        self.batch_delete(rest)
+        res = run_ods2(self.img, 'DELETE [000000]FRAG.DIR')
+        if res.ok:
+            m.remove_dir(('FRAG',))
+        self.verify('everything deleted')
+
+    def scenario_bigdir(self):
+        r, m = self.rng, self.model
+        n = r.choice([400, 1200, 3000, 5000])
+        res = run_ods2(self.img, 'CREATE/DIRECTORY [BIG]')
+        m.add_dir((), 'BIG')
+        dp = ('BIG',)
+        names = set()
+        items = []
+        longnames = r.random() < 0.5
+        while len(items) < n:
+            nm, strict = self.names.file_name('long' if (longnames and r.random() < 0.3 and self.ods5) else (None if self.ods5 else None))
+            if not self.ods5:
+                nm = nm.upper()
+            if not strict or key_of(nm) in names or key_of(nm).endswith('.DIR'):
+                continue
+            names.add(key_of(nm))
+            items.append((dp, nm, gen_content(r, r.choice([0, 0, 1, 100, 511, 513]), 'bin')))
+        for i in range(0, n, 500):
+            self.batch_copy(items[i:i + 500])
+            self.verify('bigdir fill %d' % min(i + 500, n), export=False)
+        self.verify('bigdir full', export=True)
+        vol = self.vol_stats()
+        self.coverage = {'dir_blocks': sum(c for _, c in vol.info[vol.dirs[dp]].extents), 'entries': n}
+        # delete most, in random order, then add again
+        ents = [(dp, d, v) for (fp, key, v), (d, o) in m.ents.items() if m.dirs[fp] == dp]
+        r.shuffle(ents)
+        cut = int(len(ents) * r.choice([0.3, 0.7, 0.95]))
+        self.batch_delete(ents[:cut])
+        self.verify('bigdir shrunk to %d' % (len(ents) - cut), export=False)
+        items2 = []
+        while len(items2) < min(300, n // 2):
+            nm, strict = self.names.file_name(None)
+            nm = nm.upper() if not self.ods5 else nm
+            if not strict or key_of(nm) in names or key_of(nm).endswith('.DIR'):
+                continue
+            names.add(key_of(nm))
+            items2.append((dp, nm, gen_content(r, r.choice([0, 1, 100]), 'bin')))
+        self.batch_copy(items2)
+        self.verify('bigdir regrown', export=True)
+        ents = [(dp, d, v) for (fp, key, v), (d, o) in m.ents.items() if m.dirs[fp] == dp]
+        self.batch_delete(ents)
+        self.verify('bigdir emptied', export=True)
+        res = run_ods2(self.img, 'DELETE [000000]BIG.DIR')
+        if not res.ok:
+            self.fail('rmdir BIG after emptying it: ' + res.text[-300:])
+        m.remove_dir(dp)
+        self.verify('bigdir removed')
+
+    def scenario_deep(self):
+        r, m = self.rng, self.model
+        limit = 8 if not self.ods5 else r.choice([30, 100, 255, 256])
+        names = []
+        cmds = ['SET DEFAULT [000000]']
+        path = ()
+        made = 0
+        for lvl in range(1, limit + 1):
+            nm = 'D%d' % lvl if r.random() < 0.7 else self.names.dir_name()
+            if not self.ods5:
+                nm = nm.upper()
+            if any(fold_str(nm) == fold_str(n) for n in names[-1:]):
+                nm = 'Z%d' % lvl
+            cmds.append('CREATE/DIRECTORY [.%s]' % spec_dir_name(nm, r, self.ods5))
+            cmds.append('SET DEFAULT [.%s]' % spec_dir_name(nm, r, self.ods5))
+            names.append(nm)
+        outs, crash, text, rc = run_batch(self.img, cmds, self.dir)
+        if crash:
+            self.fail('deep tree crashed: ' + text[-800:])
+        depth = 0
+        for i in range(1, len(outs), 2):
+            c, ok, t = outs[i]
+            if not ok:
+                break
+            depth += 1
+        self.note('deep: requested %d levels, %d made (%s)' % (limit, depth, outs[2 * depth + 1][2][-200:].replace('\n', ' ') if 2 * depth + 1 < len(outs) else ''))
+        for i in range(depth):
+            m.add_dir(tuple(names[:i]), names[i])
+        want = limit if limit <= (8 if not self.ods5 else 255) else 255
+        if depth < want:
+            self.fail('deep tree: only %d of %d levels were made: %s' % (depth, want, text[-400:]))
+        if depth > want:
+            self.fail('deep tree: %d levels made, more than the %d VMS allows' % (depth, want))
+        self.verify('deep tree', export=True)
+        # files at several depths, written by relative path in a script
+        cmds = ['SET DEFAULT [000000]']
+        items = []
+        leaf_levels = set(range(1, depth + 1, max(depth // 6, 1)))
+        for k in range(1, depth + 1):
+            cmds.append('SET DEFAULT [.%s]' % spec_dir_name(names[k - 1], r, self.ods5))
+            if k in leaf_levels:
+                data = gen_content(r, r.choice([1, 513, 5000]), 'tagged')
+                src = self.write_src(data)
+                cmds.append('COPY %s LEAF%d.TXT' % (src, k))
+                items.append((tuple(names[:k]), 'LEAF%d.TXT' % k, data))
+        outs, crash, text, rc = run_batch(self.img, cmds, self.dir)
+        if crash:
+            self.fail('deep copy crashed: ' + text[-500:])
+        okc = [o for o in outs if o[0].startswith('COPY')]
+        for (dp, d, data), o in zip(items, okc):
+            if o[1]:
+                m.add_file(dp, d, Obj('file', hashlib.md5(data).hexdigest(), len(data)))
+            else:
+                self.fail('deep copy at depth %d refused: %s' % (len(dp), o[2][-300:]))
+        self.verify('deep files', export=True)
+        # remove from the bottom
+        for k in range(depth, 0, -1):
+            dp = tuple(names[:k])
+            leaf = [(dp, d, 1) for (fp, key, v), (d, o) in list(m.ents.items()) if m.dirs[fp] == dp]
+            if leaf:
+                self.batch_delete(leaf)
+            parent = ('[000000]' if k == 1 else '[' + '.'.join(spec_dir_name(n, r, self.ods5) for n in names[:k - 1]) + ']')
+            if len(parent) > 900:
+                break
+            res = run_ods2(self.img, 'DELETE %s%s.DIR' % (parent, spec_dir_name(names[k - 1], r, self.ods5)))
+            if not res.ok:
+                self.fail('rmdir at depth %d: %s' % (k, res.text[-300:]))
+            m.remove_dir(dp)
+            if k % 40 == 0:
+                self.verify('deep teardown %d' % k, export=False)
+        self.verify('deep removed', export=True)
+
+    def scenario_indexf(self):
+        r, m = self.rng, self.model
+        # fill with tiny files until the index file cannot hold more: no corruption allowed, the limit is reported
+        res = run_ods2(self.img, 'CREATE/DIRECTORY [IDX]')
+        m.add_dir((), 'IDX')
+        dp = ('IDX',)
+        total = 0
+        refused = False
+        vol0 = self.vol_stats()
+        self.coverage = {}
+        for rnd in range(40):
+            items = [(dp, 'I%06d.X' % (total + i), gen_content(r, r.choice([0, 1, 10, 600]), 'bin')) for i in range(200)]
+            oks, texts = self.batch_copy(items)
+            total += len(items)
+            self.verify('indexf round %d' % rnd, export=(rnd % 5 == 4))
+            if not all(oks):
+                refused = True
+                self.note('indexf: refusal after %d files: %s' % (total, texts[oks.index(False)][-200:].replace('\n', ' ')))
+                break
+        vol = self.vol_stats()
+        self.coverage = {'files': len(vol.files), 'indexf_blocks': vol.indexf_blocks, 'maxfiles_refused': refused}
+        # delete half, add again (header reuse)
+        ents = [(dp, d, v) for (fp, key, v), (d, o) in m.ents.items() if m.dirs[fp] == dp]
+        r.shuffle(ents)
+        self.batch_delete(ents[:len(ents) // 2])
+        self.verify('indexf half deleted')
+        items = [(dp, 'J%06d.X' % i, gen_content(r, 5, 'bin')) for i in range(len(ents) // 4)]
+        self.batch_copy(items)
+        self.verify('indexf reuse', export=True)
+
     def run(self):
         self.setup()
-        ops = self.OPS['mix']
+        ops = self.OPS.get(self.profile, self.OPS['mix'])
         for i in range(self.nops):
             self.opno = i + 1
-            if self.profile == 'mix':
+            if self.profile in self.OPS or self.profile == 'mix':
                 names = [n for n, _ in ops]
                 name = self.rng.choices(names, [w for _, w in ops])[0]
                 self.note('#%d %s' % (self.opno, name))
@@ -1096,10 +1460,12 @@ class Harness:
 
 # ---------------------------------------------------------------- driver
 
-def pick_config(seed, only=None):
+def pick_config(seed, only=None, profile='mix'):
     rng = random.Random(seed)
     if only:
         return only
+    if profile in ('fill', 'frag', 'bigdir', 'deep', 'indexf'):
+        return 'f5' if rng.random() < 0.6 else 'f2'    # scenarios need a volume of their own size
     r = rng.random()
     if r < 0.4:
         return 'f5'
@@ -1110,7 +1476,7 @@ def pick_config(seed, only=None):
 
 def run_seed(args):
     seed, profile, config, nops, keep, verbose, check_every = args
-    config = pick_config(seed, config)
+    config = pick_config(seed, config, profile)
     wd = os.path.join(WORK, 'stress', 's%d-%s' % (seed, profile))
     shutil.rmtree(wd, ignore_errors=True)
     os.makedirs(wd)
