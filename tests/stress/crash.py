@@ -56,7 +56,11 @@ def run_fault(img, cmd, k=None, count=False, timeout=300):
     return p.returncode, p.stdout.decode('utf-8', 'replace') + p.stderr.decode('utf-8', 'replace')
 
 
-def checker_errors(img):
+TRANSIENT = [r'two entries for', r'out of order']     # ods5-wr2 (F2 fix): a split/move may leave a name listed twice or briefly out of order
+TRANSIENT_OPS = ('COPY', 'MKDIR', 'LINK', 'SYMLINK', 'IMPORT', 'SCRIPT')
+
+
+def checker_errors(img, label=''):
     r = subprocess.run([sys.executable, '-I', CHECKER, img], capture_output=True, text=True, env=stress.ENV)
     errs = [l for l in r.stdout.split('\n') if l.startswith('ERROR')]
     warns = [l for l in r.stdout.split('\n') if l.startswith('WARN')]
@@ -67,7 +71,7 @@ def checker_errors(img):
         if m:
             if m.group(1) not in lost:
                 bad.append(l)       # a LISTED file whose clusters are free: the forbidden state
-        elif not any(re.search(a, l) for a in ALLOWED):
+        elif not any(re.search(a, l) for a in ALLOWED) and not (label in TRANSIENT_OPS and any(re.search(a, l) for a in TRANSIENT)):
             bad.append(l)
     return bad, errs, warns, r.stdout[-300:]
 
@@ -101,15 +105,31 @@ def snapshot(img):
 
 
 def build_base(seed, work):
-    """a random populated volume (stress harness, 'mix' ops), returns image path and harness"""
-    h = stress.Harness(seed, 'mix', stress.pick_config(seed, None, 'mix') if seed % 3 else ('f5' if seed % 2 else 'f2'), 25, work, check_every=1000, big=False)
-    h.nops = 25
-    h.setup()
-    names = [n for n, _ in h.OPS['mix']]
-    for i in range(25):
-        name = h.rng.choices(names, [w for _, w in h.OPS['mix']])[0]
-        h.do_op(name)
-    h.verify('base')
+    """a populated volume + model. kind by seed: 0 random mix, 1 fragmented (extension headers), 2 big directory,
+    3 nearly full, 4 INDEXF near its limit"""
+    kind = seed % 5
+    cfg = 'f5' if seed % 2 else 'f2'
+    if kind == 0:
+        h = stress.Harness(seed, 'mix', stress.pick_config(seed, None, 'mix') if seed % 3 else cfg, 25, work, check_every=1000, big=False)
+        h.setup()
+        names = [n for n, _ in h.OPS['mix']]
+        for i in range(25):
+            h.do_op(h.rng.choices(names, [w for _, w in h.OPS['mix']])[0])
+        h.verify('base')
+        h.focus = None
+        return h
+    prof = {1: 'frag', 2: 'bigdir', 3: 'fill', 4: 'indexf'}[kind]
+    h = stress.Harness(seed, prof, cfg, 1, work, check_every=1000, big=False)
+    h.stop = {1: 'frag', 2: 'bigdir', 3: 'full', 4: None}[kind]
+    if kind == 2:
+        h.opts = {'size': 65536}
+    h.run()
+    h.focus = {2: ('BIG',), 1: ('FRAG',), 4: ('IDX',)}.get(kind)
+    if kind == 3:
+        # make a little room: delete a few files, so COPYs fit or just fail to fit
+        ents = [(m_dp, d, v) for (fp, key, v), (d, o) in h.model.ents.items() for m_dp in [h.model.dirs[fp]] if not o.volatile and o.kind == 'file']
+        h.batch_delete(ents[:3])
+    h.verify('base (%s)' % prof)
     return h
 
 
@@ -119,6 +139,8 @@ def random_op(h, rng):
     r = rng
     kind = r.choice(['copy', 'copy', 'delete', 'delete', 'mkdir', 'link', 'symlink', 'label', 'copybig', 'rmdir', 'import'])
     dp = h.pick_dir()
+    if getattr(h, 'focus', None) and h.model.has_dir(h.focus) and r.random() < 0.7:
+        dp = h.model.find_dir(h.focus)
     if kind in ('copy', 'copybig'):
         disp, strict = h.names.file_name('plain' if r.random() < 0.7 else None)
         if not h.ods5:
@@ -173,13 +195,16 @@ def random_op(h, rng):
     return None
 
 
-def check_state(tag, img, before, targets, fails, extra_new=None):
+dups = []   # states that left a name listed twice (allowed after a split, but counted)
+
+
+def check_state(tag, img, before, targets, fails, label=''):
     """steps 1-4 after an interruption. before: snapshot dict from before the op. returns state name"""
     sv = subprocess.run([stress.ODS2, img, 'SHOW VOLUME'], capture_output=True, env=stress.ENV)
     if sv.returncode != 0:
         fails.append('%s: the volume no longer mounts: %s' % (tag, sv.stderr.decode()[-200:]))
         return 'unmountable'
-    bad, errs, warns, tail = checker_errors(img)
+    bad, errs, warns, tail = checker_errors(img, label)
     if bad:
         fails.append('%s: checker (non-leak) errors: %s' % (tag, bad[:3]))
     try:
@@ -187,8 +212,11 @@ def check_state(tag, img, before, targets, fails, extra_new=None):
     except Exception as e:
         fails.append('%s: reader failed: %r' % (tag, e))
         return 'unreadable'
-    if v.problems:
-        fails.append('%s: reader problems: %s' % (tag, v.problems[:3]))
+    probs = [p for p in v.problems if not (label in TRANSIENT_OPS and ('listed twice' in p or 'duplicate directory entry' in p))]
+    if probs:
+        fails.append('%s: reader problems: %s' % (tag, probs[:3]))
+    if len(probs) != len(v.problems):
+        dups.append(tag)
     for k, val in before.items():
         if k in targets or val is None:
             continue
@@ -220,7 +248,7 @@ def trial(h, rng, label, cmd, targets, k, kill_at, out, fails, tag):
             p.send_signal(signal.SIGKILL)
         p.wait()
     t = '%s [%s k=%s kill=%s]' % (tag, label, k, kill_at)
-    state = check_state(t, trial_img, before, targets, fails)
+    state = check_state(t, trial_img, before, targets, fails, label)
     out[state] = out.get(state, 0) + 1
     # a COPY afterwards: must work, must not disturb anything, new file must read back
     if state not in ('unmountable', 'unreadable'):
@@ -236,7 +264,7 @@ def trial(h, rng, label, cmd, targets, k, kill_at, out, fails, tag):
                 fid = v2.files.get(((), 'AFTERCRASH.DAT', 1))
                 if not fid or v2.info[fid].md5 != hashlib.md5(data).hexdigest():
                     fails.append('%s: the COPY after the interruption does not read back' % t)
-            bad, errs, warns, tail = checker_errors(trial_img)
+            bad, errs, warns, tail = checker_errors(trial_img, label)
             if bad:
                 fails.append('%s: after the follow-up COPY, checker (non-leak) errors: %s' % (t, bad[:3]))
             try:
@@ -270,6 +298,13 @@ def run_seed(seed, nops, nkills, work_root):
     while done_ops < nops and attempts < nops * 6:
         attempts += 1
         op = random_op(h, rng)
+        if op is not None and rng.random() < 0.3:
+            # a script of 2-4 commands in ONE process: the buffer, the commit and the fault counter span several commands
+            ops = [op] + [o for o in (random_op(h, rng) for _ in range(rng.randint(1, 3))) if o]
+            if len(ops) > 1:
+                sp = os.path.join(h.dir, 'trial%d.cmd' % attempts)
+                open(sp, 'w', encoding='utf-8').write('\n'.join(o[1] for o in ops) + '\n')
+                op = ('SCRIPT', '@' + sp, set().union(*[o[2] for o in ops]))
         if op is None:
             continue
         label, cmd, targets = op
