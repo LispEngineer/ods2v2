@@ -70,14 +70,16 @@ def pick_commands(base_digest, rng, tree, srcfile, ods5):
     cmds.append(('COPY', 'COPY %s %sFZNEW.TXT' % (srcfile, sd), None))
     cmds.append(('MKDIR', 'CREATE/DIRECTORY %s' % stress.spec_dir(d + ('FZDIR',), rng, ods5), None))
     cmds.append(('LABEL', 'SET VOLUME/LABEL=FUZZ', None))
-    cmds.append(('IMPORT', 'IMPORT %s %s' % (tree, sd), None))
-    if ods5:
+    if os.environ.get('UP2') != '1':
+        cmds.append(('IMPORT', 'IMPORT %s %s' % (tree, sd), None))
+    if ods5 and os.environ.get('UP2') != '1':
         cmds.append(('SYMLINK', 'SYMLINK %sFZSL.LNK target' % sd, None))
     if names:
         k = rng.choice(names)
         spec = '%s%s;%d' % (stress.spec_dir(k[0], rng, ods5), stress.spec_file_name(k[1], rng, ods5), k[2])
         cmds.append(('DELETE', 'DELETE ' + spec, k))
-        cmds.append(('LINK', 'LINK %sFZLINK.X %s' % (sd, spec.rsplit(';', 1)[0]), None))
+        if os.environ.get('UP2') != '1':
+            cmds.append(('LINK', 'LINK %sFZLINK.X %s' % (sd, spec.rsplit(';', 1)[0]), None))
     if len(d) > 0:
         cmds.append(('RMDIR', 'DELETE %s%s.DIR' % (stress.spec_dir(d[:-1], rng, ods5), stress.spec_dir_name(d[-1], rng, ods5)), None))
     return cmds

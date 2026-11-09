@@ -37,7 +37,8 @@ WORK = os.environ.get('STRESS_WORK', os.path.expanduser('~/tmp/ods5-st/work'))
 ENV = dict(os.environ)
 ENV['ASAN_OPTIONS'] = 'detect_leaks=1:abort_on_error=0:exitcode=77'
 ENV['UBSAN_OPTIONS'] = 'print_stacktrace=1:halt_on_error=1:exitcode=78'
-ENV['TZ'] = 'UTC'
+ENV.pop('TZ', None)
+ENV['ODS2_TZ'] = os.environ.get('ODS2_TZ', 'America/New_York')   # the guests' zone (EST): file dates are local time on VMS; my harness once forced TZ=UTC, which made every image's dates 5 hours ahead (FUTCREDAT on VMS)
 
 VMS_BASELINES = ['asim12-ods5t-20261108', 'asim12-ods2t-20261108', 'asim6-ods5t6-20261108', 'asim6-ods2t6-20261108',
                  'phvs2-ods2v-20261108']
@@ -319,10 +320,11 @@ def var_records(data):
 # ---------------------------------------------------------------- model
 
 class Obj:
-    __slots__ = ('kind', 'md5', 'size', 'target', 'volatile', 'name')
+    __slots__ = ('kind', 'md5', 'size', 'target', 'volatile', 'name', 'raw')
 
     def __init__(self, kind='file', md5=None, size=0, target=None, volatile=False):
         self.kind, self.md5, self.size, self.target, self.volatile = kind, md5, size, target, volatile
+        self.raw = False          # RMS indexed / relative / hash file: CHECKSUM on VMS reads these by record, not by block
 
 
 class Model:
@@ -429,6 +431,7 @@ def model_from_volume(vol, ods5, hardlinks, skip_dangling=False):
                 fobj[fid] = Obj('symlink', target=fi.target, volatile=False)
             else:
                 fobj[fid] = Obj('file', md5=fi.md5, size=fi.size, volatile=fi.volatile)
+                fobj[fid].raw = fi.fileorg in (1, 2, 3)
         m.ents[(m.fkpath(dpath), key_of(nm), ver)] = (nm, fobj[fid])
         m.vlim[(m.fkpath(dpath), key_of(nm), ver)] = vol.verlimit.get((dpath, nm, ver))
     for dp, vl in vol.dirlimit.items():
@@ -749,6 +752,9 @@ class Harness:
             if obj.kind == 'symlink':
                 lines.append('%s %d %s %s\t%s' % ('-' * 32, len(obj.target), 'symlink', lp, obj.target.decode('latin-1')))
                 vms.append('symlink %s' % spec)
+            elif obj.raw:
+                lines.append('%s %d %s %s' % (obj.md5, obj.size, 'file', lp))
+                vms.append('skip-rms-org %s' % spec)      # VMS CHECKSUM reads an indexed/relative file by record: not comparable with the block bytes
             else:
                 lines.append('%s %d %s %s' % (obj.md5, obj.size, 'file', lp))
                 vms.append('%s %d %s' % (obj.md5, obj.size, spec))

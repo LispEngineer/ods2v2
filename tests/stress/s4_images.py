@@ -18,11 +18,11 @@ import stress   # noqa: E402
 SPECS = {
     's4-f2-fresh':   ('mix', 'f2', 4101, 150, None, {'size': 131072, 'cluster': 4}, 'fresh ODS-2 (ods2_init), 150 random operations: directories, files of 0..6 MB, deletes, aliases, relabel'),
     's4-f5-hl':      ('mix', 'f5', 4102, 150, None, {'size': 131072, 'hl': True, 'cluster': 4}, 'fresh ODS-5 with HARDLINKS: names with spaces, dots, ISO Latin-1, UCS-2, 236-char names, hard links, symbolic links, IMPORT trees'),
-    's4-f5-nohl':    ('mix', 'f5', 4103, 150, None, {'size': 100000, 'hl': False, 'cluster': 3}, 'fresh ODS-5 without HARDLINKS (aliases), odd size 100000 blocks, cluster 3'),
+    's4-f5-nohl':    ('mix', 'f5', 4103, 150, None, {'size': 100002, 'hl': False, 'cluster': 3}, 'fresh ODS-5 without HARDLINKS (aliases), cluster 3 (100002 blocks: a whole number of clusters, V8.4 ANALYZE objects to a partial last cluster)'),
     's4-vms5-heavy': ('mix', 'vms:w1c-f5-after-asim12', 4104, 250, None, {}, 'a VMS-made and VMS-written ODS-5 image (w1c-f5-after-asim12) with 250 further ods2v2 operations'),
     's4-vms2-heavy': ('mix', 'vms:asim6-ods2t6-20261108', 4105, 250, None, {}, 'the V7.3-2-made ODS-2 corpus volume (asim6-ods2t6) with 250 further ods2v2 operations'),
     's4-full':       ('fill', 'f5', 4106, 1, 'full', {'size': 16384, 'hl': True, 'cluster': 2}, 'ODS-5 volume filled to the brim (the last copy refused, 1-3 byte files until nothing fits)'),
-    's4-full2':      ('fill', 'f2', 4107, 1, 'full', {'size': 20000, 'cluster': 3}, 'ODS-2 volume filled to the brim'),
+    's4-full2':      ('fill', 'f2', 4107, 1, 'full', {'size': 20001, 'cluster': 3}, 'ODS-2 volume filled to the brim (20001 blocks = 6667 clusters of 3)'),
     's4-exthdr':     ('frag', 'f5', 4108, 1, 'frag', {'size': 16384, 'hl': True, 'cluster': 1}, 'ODS-5, cluster 1: 1000 small files, half deleted, then 3 big files fragmented over the holes: extension headers'),
     's4-exthdr2':    ('frag', 'f2', 4109, 1, 'frag', {'size': 16384, 'cluster': 1}, 'ODS-2, the same: files with 500+ extents and extension headers'),
     's4-bigdir':     ('bigdir', 'f5', 4110, 1, 'bigdir', {'size': 131072, 'hl': True, 'cluster': 4}, 'ODS-5: one directory with 3000-5000 entries (long and short names), many block splits'),

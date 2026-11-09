@@ -12,16 +12,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ods5read   # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+# upstream's build: ODS2 = its ods2, ODS2_FAULT = its binary built with fault_shim.c, ODS2_INIT = OUR ods2_init (it has none), UP2=1 = ODS-2 only
+ODS2 = os.environ.get('ODS2') or os.path.join(ROOT, 'ods2')
+ODS2_FAULT = os.environ.get('FAULT_ODS2') or os.path.join(ROOT, 'ods2_fault')
+ODS2_INIT = os.environ.get('ODS2_INIT') or os.path.join(ROOT, 'ods2_init')
+UP2 = os.environ.get('UP2') == '1'
 work = tempfile.mkdtemp(prefix='regress_', dir=os.environ.get('TMPDIR', None))
 img = os.path.join(work, 'v.img')
 rc = 0
-for level in (2, 5):
+for level in ((2,) if UP2 else (2, 5)):
     if os.path.exists(img):
         os.unlink(img)
-    subprocess.run([os.path.join(ROOT, 'ods2_init'), img, '16384', '--structure=%d' % level, '--cluster=4'], check=True, capture_output=True)
+    subprocess.run([ODS2_INIT, img, '16384', '--structure=%d' % level, '--cluster=4'], check=True, capture_output=True)
     src = os.path.join(work, 'f.dat')
     open(src, 'wb').write(bytes(range(256)) * 20)
-    subprocess.run([os.path.join(ROOT, 'ods2'), img, 'COPY %s [000000]VICTIM.DAT' % src], check=True, capture_output=True)
+    subprocess.run([ODS2, img, 'COPY %s [000000]VICTIM.DAT' % src], check=True, capture_output=True)
     v = ods5read.read_volume(img)
     fid = v.files[((), 'VICTIM.DAT', 1)]
     home = open(img, 'rb').read(1024)[512:]
@@ -36,7 +41,7 @@ for level in (2, 5):
         f.seek((base + fid - 1) * 512)
         f.write(h)
     before = ods5read.read_volume(img)
-    r = subprocess.run([os.path.join(ROOT, 'ods2'), img, 'DELETE [000000]VICTIM.DAT;1'], capture_output=True, text=True)
+    r = subprocess.run([ODS2, img, 'DELETE [000000]VICTIM.DAT;1'], capture_output=True, text=True)
     after = ods5read.read_volume(img)
     refused = r.returncode == 1
     same = (after.files == before.files and {k: (i.size, i.md5) for k, i in after.info.items() if not i.volatile} ==

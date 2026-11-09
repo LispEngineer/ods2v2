@@ -31,6 +31,8 @@ import ods5read   # noqa: E402
 import stress     # noqa: E402
 
 FAULT = os.environ.get('FAULT_ODS2', os.path.join(ROOT, 'ods2_fault'))
+UP2 = os.environ.get('CRASH_UP2') == '1'      # upstream's ods2 (ODS-2 only, no IMPORT/LINK/SYMLINK, own SET FILE/VERSION_LIMIT) built with tests/stress/fault_shim.c
+STARTER = os.environ.get('STARTER', os.path.expanduser('~/tmp/ods5-st/work/up2/transfer.dsk'))
 CHECKER = stress.CHECKER
 
 # errors that a half-done operation may leave (same list as tests/fault_inject.py): leaks and dangling states only
@@ -56,6 +58,7 @@ def run_fault(img, cmd, k=None, count=False, timeout=300):
     return p.returncode, p.stdout.decode('utf-8', 'replace') + p.stderr.decode('utf-8', 'replace')
 
 
+GARBAGE_DIRS = []      # counted: an unlisted new directory with a garbage first block
 TRANSIENT = [r'two entries for', r'out of order']     # ods5-wr2 (F2 fix): a split/move may leave a name listed twice or briefly out of order
 TRANSIENT_OPS = ('COPY', 'MKDIR', 'LINK', 'SYMLINK', 'IMPORT', 'SCRIPT', 'DELETE', 'RMDIR')   # DELETE/RMDIR: removing an emptied directory block shifts the following blocks up (seen in seed 207, ods5 22f0811)
 
@@ -65,8 +68,13 @@ def checker_errors(img, label=''):
     errs = [l for l in r.stdout.split('\n') if l.startswith('ERROR')]
     warns = [l for l in r.stdout.split('\n') if l.startswith('WARN')]
     lost = set(re.findall(r'file (\d+) \(.*\) is in no directory \(lost file\)', r.stdout))
+    unreach = set(re.findall(r'directory (\d+) is not reachable from the root', r.stdout))
     bad = []
     for l in errs:
+        gd = re.search(r'dir (\d+) \(.*\) block \d+: .*(runs past the block|out of order|two entries)', l)
+        if gd and gd.group(1) in unreach and gd.group(1) in lost | unreach:
+            GARBAGE_DIRS.append(l[:100])      # an UNLISTED directory (header written, entry not yet) whose first block is not initialised: a leak ANALYZE/REPAIR would file in [SYSLOST]
+            continue
         m = re.search(r'cluster \d+ \(LBN \d+\) is in use by file (\d+) but marked free', l)
         if m:
             if m.group(1) not in lost:
@@ -107,6 +115,8 @@ def snapshot(img):
 def build_base(seed, work):
     """a populated volume + model. kind by seed: 0 random mix, 1 fragmented (extension headers), 2 big directory,
     3 nearly full, 4 INDEXF near its limit"""
+    if UP2:
+        return build_base_up2(seed, work)
     kind = seed % 5
     cfg = 'f5' if seed % 2 else 'f2'
     if kind == 0:
@@ -133,14 +143,53 @@ def build_base(seed, work):
     return h
 
 
+def build_base_up2(seed, work):
+    """ODS-2 bases for upstream's ods2: 0 random ops + split phase, 1 fragmented, 2 split directory only, 3 nearly full, 4 starter volume"""
+    kind = seed % 5
+    cfg = ['vms:phvs2-ods2v-20261108', 'vms:phvs2-ods2v-20261108', 'vms:asim6-ods2t6-20261108', 'vms:phvs2-ods2v-20261108', 'starter:' + STARTER][kind]
+    if kind in (0, 2, 4):
+        h = stress.Harness(seed, 'up2', cfg, 0 if kind == 2 else 25, work, check_every=1000, big=False)
+        h.run()                      # random ops (none for kind 2) then the split phase, verified at the end
+        h.focus = ('SPLIT%d' % seed,)
+        h.names.no_dash = True
+        return h
+    prof = 'frag' if kind == 1 else 'fill'
+    h = stress.Harness(seed, prof, cfg, 1, work, check_every=1000, big=False)
+    h.stop = 'frag' if kind == 1 else 'full'
+    h.run()
+    h.focus = ('FRAG',) if kind == 1 else None
+    if kind == 3:
+        ents = [(h.model.dirs[fp], d, v) for (fp, key, v), (d, o) in h.model.ents.items() if not o.volatile and o.kind == 'file']
+        h.batch_delete(ents[:3])
+    h.verify('base (%s)' % prof)
+    h.names.no_dash = True
+    return h
+
+
 def random_op(h, rng):
     """-> (label, command, target keys (display path tuples) that the op may change or remove)"""
     m = h.model
     r = rng
-    kind = r.choice(['copy', 'copy', 'delete', 'delete', 'mkdir', 'link', 'symlink', 'label', 'copybig', 'rmdir', 'import'])
+    kind = (r.choice(['copy', 'copy', 'delete', 'delete', 'mkdir', 'label', 'copybig', 'rmdir', 'vlimit', 'copysplit']) if UP2 else
+            r.choice(['copy', 'copy', 'delete', 'delete', 'mkdir', 'link', 'symlink', 'label', 'copybig', 'rmdir', 'import']))
     dp = h.pick_dir()
     if getattr(h, 'focus', None) and h.model.has_dir(h.focus) and r.random() < 0.7:
         dp = h.model.find_dir(h.focus)
+    if kind == 'vlimit':
+        e = h.pick_entry(False)
+        if e is None:
+            return None
+        (fp, key, ver), disp, edp, obj = e
+        return ('VLIMIT', 'SET FILE/VERSION_LIMIT=%d %s%s' % (r.choice([0, 2, 3, 5, 32, 32767]), stress.spec_dir(edp, r, h.ods5), stress.spec_file_name(disp, r, h.ods5)), set())
+    if kind == 'copysplit':       # a 39.39-character name into the split directory: splits and block shifts
+        if not (getattr(h, 'focus', None) and h.model.has_dir(h.focus)):
+            return None
+        dp = h.model.find_dir(h.focus)
+        disp = ('Q%03d' % r.randint(0, 999) + ''.join(r.choice(stress.ODS2_CHARS) for _ in range(34))) + '.' + ''.join(r.choice(stress.ODS2_CHARS) for _ in range(r.randint(3, 36)))
+        if h.model.name_taken(dp, disp):
+            return None
+        src = h.write_src(stress.gen_content(r, r.choice([0, 100, 700]), 'bin'))
+        return ('COPY', 'COPY %s %s%s' % (src, stress.spec_dir(dp, r, False), stress.spec_file_name(disp, r, False)), {(dp, disp, 1)})
     if kind in ('copy', 'copybig'):
         disp, strict = h.names.file_name('plain' if r.random() < 0.7 else None)
         if not h.ods5:
@@ -212,7 +261,9 @@ def check_state(tag, img, before, targets, fails, label=''):
     except Exception as e:
         fails.append('%s: reader failed: %r' % (tag, e))
         return 'unreadable'
-    probs = [p for p in v.problems if not (label in TRANSIENT_OPS and ('listed twice' in p or 'duplicate directory entry' in p))]
+    reach = set(str(f) for f in v.dirs.values())
+    probs = [p for p in v.problems if not (label in TRANSIENT_OPS and ('listed twice' in p or 'duplicate directory entry' in p))
+             and not (re.match(r'dir (\d+) block \d+: record past the block', p) and re.match(r'dir (\d+)', p).group(1) not in reach)]
     if probs:
         fails.append('%s: reader problems: %s' % (tag, probs[:3]))
     if len(probs) != len(v.problems):
@@ -322,7 +373,7 @@ def run_seed(seed, nops, nkills, work_root):
         if rc != 0 or n == 0:
             continue                       # refused by itself or no writes: not interesting here
         done_ops += 1
-        ks = list(range(1, n + 1)) if n <= 60 else sorted(set([1, 2, n - 1, n] + rng.sample(range(1, n + 1), 40)))
+        ks = list(range(1, n + 1)) if (n <= 60 or os.environ.get('CRASH_ALLK') == '1') else sorted(set([1, 2, n - 1, n] + rng.sample(range(1, n + 1), 40)))
         for k in ks:
             trial(h, rng, label, cmd, targets, k, None, totals, fails, 'seed %d op %d' % (seed, done_ops))
         # real SIGKILLs: the op takes a few tens of ms; kill at random fractions
@@ -333,6 +384,79 @@ def run_seed(seed, nops, nkills, work_root):
         rc, text = subprocess.run([stress.ODS2, h.img, cmd], capture_output=True, env=stress.ENV).returncode, ''
         if rc == 0:
             resync(h)
+    return seed, totals, fails
+
+
+def fixed_ops(h, rng):
+    """the operations of the review's list, each to be interrupted after EVERY write: DELETE of a small file, of the most fragmented
+    file (extension headers), of a name with several versions (;*), COPY of a small and of a fragmenting file, CREATE/DIRECTORY,
+    inserts into a directory that splits, DELETE from it down to emptied blocks, SET FILE/VERSION_LIMIT"""
+    m = h.model
+    v = ods5read.read_volume(h.img, want_md5=False)
+    ops = []
+    files = [(k, fid) for k, fid in v.files.items() if fid and not v.info[fid].volatile and not v.info[fid].directory]
+    by_ext = sorted(files, key=lambda kf: -len(v.info[kf[1]].extents))
+    small = sorted(files, key=lambda kf: v.info[kf[1]].size)
+    def spec(k):
+        return '%s%s;%d' % (stress.spec_dir(k[0], rng, False), stress.spec_file_name(k[1], rng, False), k[2])
+    if small:
+        k = small[0][0]
+        ops.append(('DELETE', 'DELETE ' + spec(k), {k}))
+    if by_ext and len(v.info[by_ext[0][1]].extents) > 1:
+        k = by_ext[0][0]
+        ops.append(('DELETE', 'DELETE ' + spec(k), {k}))
+    vers = {}
+    for (dpath, nm, ver), fid in v.files.items():
+        if fid:
+            vers.setdefault((dpath, nm), []).append(ver)
+    multi = [dn for dn, vs in vers.items() if len(vs) > 1]
+    if multi:
+        dpath, nm = multi[0]
+        ops.append(('DELETE', 'DELETE %s%s;*' % (stress.spec_dir(dpath, rng, False), stress.spec_file_name(nm, rng, False)), {(dpath, nm, vv) for vv in vers[(dpath, nm)]}))
+    root = ()
+    src1 = h.write_src(stress.gen_content(rng, 700, 'tagged'))
+    src2 = h.write_src(stress.gen_content(rng, 700000, 'tagged'))
+    ops.append(('COPY', 'COPY %s [000000]CRSMALL.TXT' % src1, {((), 'CRSMALL.TXT', 1)}))
+    ops.append(('COPY', 'COPY %s [000000]CRBIG.DAT' % src2, {((), 'CRBIG.DAT', 1)}))
+    ops.append(('MKDIR', 'CREATE/DIRECTORY [CRDIR]', set()))
+    ops.append(('MKDIR', 'CREATE/DIRECTORY [CRDIR.SUB]', set()))
+    if getattr(h, 'focus', None) and m.has_dir(h.focus):
+        dp = m.find_dir(h.focus)
+        for i in range(4):          # inserts that make the directory split
+            disp = ('Q%03d' % (i * 211 % 997) + ''.join(rng.choice(stress.ODS2_CHARS) for _ in range(34))) + '.' + ''.join(rng.choice(stress.ODS2_CHARS) for _ in range(30))
+            ops.append(('COPY', 'COPY %s %s%s' % (src1, stress.spec_dir(dp, rng, False), stress.spec_file_name(disp, rng, False)), {(dp, disp, 1)}))
+        ents = sorted((k for k in v.files if k[0] == dp and v.files[k]), key=lambda k: k[1])
+        for k in ents[::max(len(ents) // 6, 1)][:6]:      # deletes in the same directory: some empty a block
+            ops.append(('DELETE', 'DELETE ' + spec(k), {k}))
+    if files:
+        ops.append(('VLIMIT', 'SET FILE/VERSION_LIMIT=3 ' + spec(small[0][0]).rsplit(';', 1)[0], set()))
+    return ops
+
+
+def run_seed_fixed(seed, work_root):
+    work = os.path.join(work_root, 'c%d' % seed)
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    h = build_base(seed, work)
+    rng = random.Random(seed ^ 0xf1)
+    totals, fails = {}, []
+    nops = 0
+    for label, cmd, targets in fixed_ops(h, rng):
+        probe = h.img + '.probe'
+        subprocess.run(['cp', '--reflink=auto', h.img, probe], check=True)
+        rc, text = run_fault(probe, cmd, count=True)
+        os.unlink(probe)
+        m = re.search(r'ODS2_FAULT: (\d+) writes', text)
+        n = int(m.group(1)) if m else 0
+        if rc != 0 or n == 0:
+            print('  seed %d %s refused or no writes (rc %s): %s' % (seed, cmd[:70], rc, text.strip()[-90:].replace('\n', ' ')), flush=True)
+            continue
+        nops += 1
+        for k in range(1, n + 1):
+            trial(h, rng, label, cmd, targets, k, None, totals, fails, 'seed %d fixed %s' % (seed, cmd[:50]))
+        print('  seed %d %s: %d writes, every k tried' % (seed, cmd[:60], n), flush=True)
+        subprocess.run([stress.ODS2, h.img, cmd], capture_output=True, env=stress.ENV)
+        resync(h)
     return seed, totals, fails
 
 
@@ -347,13 +471,14 @@ def main():
     ap.add_argument('--seeds', default='1-4')
     ap.add_argument('--ops', type=int, default=8)
     ap.add_argument('--kills', type=int, default=3)
+    ap.add_argument('--fixed', action='store_true', help='the fixed list of operations, interrupted after every write (no random ops, no kills)')
     a = ap.parse_args()
     lo, _, hi = a.seeds.partition('-')
     allfails = 0
     grand = {}
     for seed in range(int(lo), int(hi or lo) + 1):
         try:
-            s, totals, fails = run_seed(seed, a.ops, a.kills, stress.WORK)
+            s, totals, fails = run_seed_fixed(seed, stress.WORK) if a.fixed else run_seed(seed, a.ops, a.kills, stress.WORK)
         except stress.Failure as e:
             print('seed %d: base volume failed: %s' % (seed, e))
             allfails += 1
@@ -364,7 +489,7 @@ def main():
         for f in fails[:6]:
             print('    ' + f[:400])
         allfails += len(fails)
-    print('TOTAL outcomes %s; %d failure(s); %d interrupted states list a name twice or out of order (allowed after split/move/shift)' % (json.dumps(grand), allfails, len(dups)))
+    print('TOTAL outcomes %s; %d failure(s); %d interrupted states list a name twice or out of order (allowed after split/move/shift); %d show an unlisted directory with an uninitialised first block (leak)' % (json.dumps(grand), allfails, len(dups), len(GARBAGE_DIRS)))
     return 1 if allfails else 0
 
 

@@ -16,7 +16,7 @@ WHAT = {
     'up2-full': "the VAX V7.3-made volume filled to the brim with upstream's ods2 (the last COPY refused; label UP2FULL)",
     's4-f2-fresh': 'ods2_init volume, 150 random operations (directories up to 7 deep, files 0..6 MB, deletes, aliases, relabel)',
     's4-f5-hl': 'ods2_init volume, 150 random operations: spaces, dots, ISO Latin-1, UCS-2, 236-character names, hard links, symbolic links, IMPORT trees',
-    's4-f5-nohl': 'the same without HARDLINKS (aliases, link count 0), odd size',
+    's4-f5-nohl': 'the same without HARDLINKS (aliases, link count 0), cluster 3 (100002 blocks)',
     's4-vms5-heavy': 'VMS-made and VMS-written w1c-f5-after-asim12, then 250 more ods2v2 operations (deletes of VMS files, new trees, links); label S4VMS5',
     's4-vms2-heavy': 'V7.3-2-made ODS2T6 corpus volume (asim6-ods2t6), then 250 more operations; label S4VMS2',
     's4-full': 'filled to the brim: 0 free blocks (last COPY refused, then 1-3 byte files until nothing fit)',
@@ -89,6 +89,8 @@ Manifests (made from the harness's MODEL, not from ods2v2's output): `NAME.MANIF
 Suggested run on VMS (per image): MOUNT it (read-only is enough; V8.4: `MOUNT/NOWRITE`); `ANALYZE/DISK_STRUCTURE/READ_CHECK/NOREPAIR/LIST`; `DIRECTORY/FULL [000000...]*.*;*`; CHECKSUM of every file of the manifest and compare; TYPE a few; DISMOUNT.
 %s ANALYZE should report no errors on any image. Anything ANALYZE says is of interest, warnings too.
 `NAME.VERLIMITS.TXT` lists the entries whose DIR$W_VERLIMIT is not 32767 (`limit spec`): ods2v2 writes 32767 (or the parent directory's default) for everything it creates; the few others were set on purpose by SET FILE/VERSION_LIMIT in the random operations (2, 3, 5, 32, 100, 32766) and must show up in VMS's DIRECTORY/FULL as that limit ("No version limit" for 32767).
+File dates: the images were made with ods2v2's file dates in the guests' zone (EST, ODS2_TZ=America/New_York; an earlier set of mine was made with TZ=UTC by mistake and showed FUTCREDAT on VMS). Volume sizes are a whole number of clusters (V8.4 ANALYZE reports ALLOCCLR / FREESPADRIFT for a partial last cluster that ods2v2 and the VAX V7.3 / VMS 7.1 INITIALIZE leave allocated).
+Lines `skip-rms-org <spec>` in MANIFEST_VMS are VMS-made RMS indexed or relative files: CHECKSUM reads those by record, so their md5 (of the file's blocks) is not comparable. Files whose names need ^U (UCS-2) escapes cannot be CHECKSUMmed on V8.4 (status 10C2816A): COPY such a file to an ASCII name first, then CHECKSUM the copy.
 Version-limit check (added after the real VAX96 found ods2v2 writing version limit 1 instead of VMS's 32767, so that VMS purged ;1 when ;2 was made): on a WRITABLE mount of a COPY of the image, `COPY` (DCL) some small file onto the name of an
 ods2v2-made file of the manifest (so VMS creates the next version, e.g. `COPY SYS$LOGIN:LOGIN.COM DKA0:[D]F.TXT`), then `DIRECTORY DKA0:[D]F.TXT;*`: **both ;1 (the old one, unchanged) and the new ;2 must be listed**. Do the same for a directory-listed alias or symlink name and for
 one file in each of the three kinds of directory (the root [000000], a subdirectory, a big one). Also `DIRECTORY/FULL` on an ods2v2-made file and on a VMS-made one next to it: nothing may differ but dates, ids and sizes.

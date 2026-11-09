@@ -13,6 +13,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ods5read   # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+# upstream's build: ODS2 = its ods2, ODS2_FAULT = its binary built with fault_shim.c, ODS2_INIT = OUR ods2_init (it has none), UP2=1 = ODS-2 only
+ODS2 = os.environ.get('ODS2') or os.path.join(ROOT, 'ods2')
+ODS2_FAULT = os.environ.get('FAULT_ODS2') or os.path.join(ROOT, 'ods2_fault')
+ODS2_INIT = os.environ.get('ODS2_INIT') or os.path.join(ROOT, 'ods2_init')
+UP2 = os.environ.get('UP2') == '1'
 CORPUS = os.path.expanduser('~/tmp/ods5-cli/')
 RESERVED = {'INDEXF.SYS', 'BITMAP.SYS', 'BADBLK.SYS', 'CORIMG.SYS', 'VOLSET.SYS', 'CONTIN.SYS', 'BACKUP.SYS', 'BADLOG.SYS', 'SECURITY.SYS'}
 rc = 0
@@ -41,15 +46,15 @@ open(os.path.join(tree, 'sub', 'b.bin'), 'wb').write(os.urandom(2000))
 os.symlink('a.txt', os.path.join(tree, 'l.lnk'))
 src = os.path.join(work, 'f.dat')
 open(src, 'wb').write(b'x' * 700)
-for level in (2, 5):
+for level in ((2,) if UP2 else (2, 5)):
     img = os.path.join(work, 'v%d.img' % level)
-    subprocess.run([os.path.join(ROOT, 'ods2_init'), img, '16384', '--structure=%d' % level], check=True, capture_output=True)
+    subprocess.run([ODS2_INIT, img, '16384', '--structure=%d' % level], check=True, capture_output=True)
     cmds = ['CREATE/DIRECTORY [D]', 'CREATE/DIRECTORY [D.E]', 'COPY %s [D]F.TXT' % src, 'COPY %s [000000]G.TXT' % src,
             'LINK [D.E]L.TXT [000000]G.TXT', 'CREATE/DIRECTORY [IMP]', 'IMPORT %s [IMP]' % tree]
     if level == 5:
         cmds.append('SYMLINK [D]S.LNK target')
     for c in cmds:
-        r = subprocess.run([os.path.join(ROOT, 'ods2'), img, c], capture_output=True, text=True)
+        r = subprocess.run([ODS2, img, c], capture_output=True, text=True)
         if r.returncode != 0 and not c.startswith('IMPORT'):
             print('  command failed: %s: %s' % (c, (r.stdout + r.stderr)[-150:]))
     v = ods5read.read_volume(img, want_md5=False)
