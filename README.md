@@ -413,10 +413,13 @@ $ ods2 vms-made.img "DIR/FULL [CORPUS.ACL]ACL1.TXT"
                       (IDENTIFIER=[200,1],ACCESS=READ+WRITE+EXECUTE+DELETE)
 ```
 
-Identifier, CREATOR, DEFAULT_PROTECTION, AUDIT and ALARM ACEs (also those continued in extension headers) are
-shown, with the options DEFAULT, PROTECTED and NOPROPAGATE. Identifiers are numbers, `[group,member]` in octal:
+Identifier, CREATOR, DEFAULT_PROTECTION, AUDIT, ALARM and APPLICATION ACEs (also those continued in extension headers)
+are shown, with the options DEFAULT, PROTECTED and NOPROPAGATE. Identifiers are numbers, `[group,member]` in octal:
 ods2v2 has no rights database, so `[USERS,USER1]` of VMS's listing is `[200,1]` here. An ACE of another kind (and
-HIDDEN) is shown as its bytes: `(ACE type N, flags %Xnnnn, data ..)`. ACLs are read, never written.
+an ACE with unusual flags) is shown as its bytes: `(ACE type N, flags %Xnnnn, data ..)`. An APPLICATION ACE
+(the hidden one DDIF files of a system disk carry) is shown as VMS prints it with the SECURITY privilege:
+`(APPLICATION,SIZE=%D25,FLAGS=%X0E03,ACCESS=%X00010000,DATA=%X...,%X...)`. VMS hides such an ACE (HIDDEN flag)
+from users without SECURITY; ods2 reads the disk with every privilege and shows it. ACLs are read, never written.
 
 **Records.** `TYPE` shows a sequential file the way VMS `TYPE` does (see "Record formats" above); a file with
 records, for example:
@@ -433,8 +436,9 @@ $ ods2 vms-made.img "DIR/FULL [CORPUS.RMS]SEQ_VFC.DAT"
 **Limits.** No volume sets, no ODS levels 3, 4 or 6 (refused), no quota or journaling, no UCS-2 beyond the Basic
 Multilingual Plane in names. File numbers are 24 bits (FID_NMX << 16 | FID_NUM), as on VMS volumes with more
 than 65,535 files; an entry naming another volume of a set (a nonzero RVN) is refused. Rights identifiers are numbers (above);
-HIDDEN and SUBSYSTEM ACEs, and the combinations of print or FORTRAN carriage control with the stream record formats,
-have not been compared with VMS (the stream formats are always shown as lines). A directory whose end-of-file is
+SUBSYSTEM ACEs, and the combinations of FORTRAN or print carriage control with the stream record formats that VMS
+accepts, have not been compared with VMS (the stream formats are always shown as lines; print control with a stream
+format is refused, as VMS does). A directory whose end-of-file is
 wrong (as old ods2v2 versions left them on ODS-2) is put right by the next write to it; other directory damage is not repaired.
 
 **Tested on.** Volumes written by ods2v2 (ODS-2 and ODS-5, also volumes it made with `ods2_init`) mount and pass
