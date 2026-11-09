@@ -22,6 +22,21 @@ import ods5check as C   # noqa: E402  (helpers only: Vol, decode_map, vbn2lbn, c
 u16, u32, swap32 = C.u16, C.u32, C.swap32
 
 
+class BoundedVol(C.Vol):
+    """C.Vol with every read bounded by the image: a damaged header can claim extents of 2^30 blocks
+    (this once made the fuzz harness grow to 139 GB)"""
+    def blk(self, lbn, n=1):
+        if lbn < 0 or lbn >= self.size_blocks:
+            return b'\0' * 512
+        n = max(1, min(n, self.size_blocks - lbn))
+        self.f.seek(lbn * 512)
+        b = self.f.read(512 * n)
+        return b + b'\0' * (512 * n - len(b))
+
+
+MAX_STRUCT_BYTES = 32 * 1024 * 1024    # a directory / bitmap / index file larger than this is not read whole
+
+
 class _F:
     def err(self, m):
         raise ValueError(m)
@@ -52,7 +67,7 @@ def _decode_name(raw, ntype):
 
 
 def read_volume(path, want_md5=True):
-    v = C.Vol(path)
+    v = BoundedVol(path)
     out = Volume()
     out.problems = []
     out.cluster = v.cluster
@@ -62,6 +77,10 @@ def read_volume(path, want_md5=True):
     out.volchar = v.volchar
     out.dirs, out.files, out.info = {}, {}, {}
     out.dir_aliases = []
+    out.free_clusters = None
+    out.indexf_blocks = 0
+    out.ext_files = 0
+    out.max_extents = 0
     fnd = _F()
 
     base = v.ibmaplbn + v.ibmapsize
@@ -80,11 +99,13 @@ def read_volume(path, want_md5=True):
         idx += C.decode_map(hb, fnd, 'INDEXF.SYS ext')
     hdr_vbn0 = 4 * v.cluster + v.ibmapsize
     nheaders = swap32(u32(h1, 28)) - 1 - hdr_vbn0
+    nheaders = max(0, min(nheaders, sum(c for _, c in idx) - hdr_vbn0, 1 << 20))   # a damaged EOF must not make this loop 2^32 times
 
     def data_blocks(ext, first_vbn, nblk):
         """bytes of nblk blocks from file VBN first_vbn"""
         got = []
         vb = 1
+        nblk = min(nblk, MAX_STRUCT_BYTES // 512)
         need_end = first_vbn + nblk
         for l, c in ext:
             lo, hi = max(vb, first_vbn), min(vb + c, need_end)
@@ -151,10 +172,25 @@ def read_volume(path, want_md5=True):
         out.info[n] = fi
         prim[n] = (b, fi)
 
+    def file_md5(fi):
+        h = hashlib.md5()
+        left, vb = fi.size, 1
+        for l, c in fi.extents:
+            while c > 0 and left > 0:
+                n = min(c, 2048)
+                chunk = v.blk(l, n)
+                take = min(len(chunk), left)
+                h.update(chunk[:take])
+                left -= take
+                l += n
+                c -= n
+            if left <= 0:
+                break
+        return h.hexdigest(), (None if left > 0 else True)
+
     def file_bytes(fi):
-        nb = (fi.size + 511) // 512
-        data = data_blocks(fi.extents, 1, nb)
-        return data[:fi.size]
+        nb = (min(fi.size, 1 << 20) + 511) // 512
+        return data_blocks(fi.extents, 1, nb)[:min(fi.size, 1 << 20)]
 
     # directories
     entries = {}
@@ -200,7 +236,11 @@ def read_volume(path, want_md5=True):
         if nvisit > 200000:
             out.problems.append('directory walk too long')
             break
+        seen_names = set()
         for nm, ver, fid, special in entries.get(dfid, []):
+            if (nm.upper(), ver) in seen_names:
+                out.problems.append('dir %r: name %r;%d listed twice' % (dpath, nm, ver))
+            seen_names.add((nm.upper(), ver))
             fi = out.info.get(fid)
             if fi is None:
                 out.files[(dpath, nm, ver)] = None   # dangling entry
@@ -217,15 +257,16 @@ def read_volume(path, want_md5=True):
                 out.dirs[sub] = fid
                 todo.append((sub, fid, anc + (fid,)))
                 continue
+            if (dpath, nm, ver) in out.files:
+                out.problems.append('duplicate directory entry %r' % ((dpath, nm, ver),))
             out.files[(dpath, nm, ver)] = fid
     for fid, fi in out.info.items():
         if fi.directory or fid in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
             continue
         if fi.md5 is None and want_md5 and fid in set(f for f in out.files.values() if f):
-            d = file_bytes(fi)
-            fi.md5 = hashlib.md5(d).hexdigest()
+            fi.md5, _ = file_md5(fi)
             if fi.special == 5:
-                fi.target = d
+                fi.target = file_bytes(fi)
     out.free_clusters = None
     out.indexf_blocks = sum(c for _, c in idx)
     out.ext_files = sum(1 for n, (b, fi) in prim.items() if len(fi.extents) > 0 and (u16(b, 14) | (b[19] << 16)) != 0)
@@ -233,7 +274,7 @@ def read_volume(path, want_md5=True):
     # storage bitmap free count (independent of the checker's loop)
     bm = prim.get(2)
     if bm:
-        bd = b''.join(v.blk(l, c) for l, c in bm[1].extents)
+        bd = data_blocks(bm[1].extents, 1, min(sum(c for _, c in bm[1].extents), MAX_STRUCT_BYTES // 512))
         nclusters = min(v.size_blocks // v.cluster, (len(bd) - 512) * 8)
         free = 0
         bits = bd[512:]
