@@ -1,5 +1,5 @@
 #!/bin/sh
-# MIT License - Copyright (c) 2026 Allen Pomeroy (see LICENSE)
+# MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
 #
 # cli_dir_loop_check.sh - DIR [...] on a volume with a directory loop
 # (an entry pointing at an ancestor): the walk must end with one

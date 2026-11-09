@@ -61,8 +61,11 @@
 #define ODS5_DIR_TYPE_LINKNAME  1u       /* DIR$C_LINKNAME */
 #define ODS5_DIR_NAMETYPE_SHIFT 3u       /* DIR$V_NAMETYPE, 3 bits */
 #define ODS5_DIR_NAMETYPE_MASK  0x38u
-#define ODS5_DIR_NEXTREC        0x40u    /* DIR$V_NEXTREC */
-#define ODS5_DIR_PREVREC        0x80u    /* DIR$V_PREVREC */
+/* DIRDEF's current bit 6 is DIR$V_SPECIAL: the entry points at a special file (a symbolic
+   link); measured on VMS V8.4 (ODS5_FORMAT_NOTES.md 11.2). The old names DIR$V_NEXTREC (bit 6) and
+   DIR$V_PREVREC (bit 7) are in DIRDEF's overlay "dir$r_flags_obsolete" and VMS does not use them: a
+   name with many versions continues in a following record that repeats the name. */
+#define ODS5_DIR_SPECIAL        0x40u    /* DIR$V_SPECIAL */
 
 /* Longest ODS-5 name in a directory record (DIR$S_ODS5_NAME). */
 #define ODS5_DIR_MAX_NAME       236

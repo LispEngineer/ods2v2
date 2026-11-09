@@ -228,6 +228,77 @@ const char *ods5_check_new_name(const char *utf8)
     return NULL;
 }
 
+/* --- Names on Linux and on the terminal --- */
+
+static bool linux_escaped_cp(uint32_t cp)
+{
+    return cp < 0x20 || cp == 0x2F || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F);
+}
+
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+size_t ods5_escape_for_linux(const char *utf8, char *out, size_t cap)
+{
+    size_t n = 0, left = strlen(utf8);
+    const char *p = utf8;
+    static const char hex[] = "0123456789ABCDEF";
+    while (left > 0) {
+        uint32_t cp;
+        size_t used = ods5_utf8_decode(p, left, &cp);
+        bool escape = linux_escaped_cp(cp);
+        if (cp == '%' && left >= 3) {
+            int h = hex_digit(p[1]), l = hex_digit(p[2]);
+            if (h >= 0 && l >= 0) {
+                uint32_t v = (uint32_t) (h * 16 + l);
+                if (linux_escaped_cp(v) || v == 0x25) escape = true;
+            }
+        }
+        if (escape) {
+            if (n + 3 + 1 > cap) return (size_t) -1;
+            out[n++] = '%';
+            if (cp == '%') { out[n++] = '2'; out[n++] = '5'; }
+            else { out[n++] = hex[(cp >> 4) & 0xF]; out[n++] = hex[cp & 0xF]; }
+        } else {
+            if (n + used + 1 > cap) return (size_t) -1;
+            memcpy(out + n, p, used);
+            n += used;
+        }
+        p += used;
+        left -= used;
+    }
+    out[n] = '\0';
+    return n;
+}
+
+size_t ods5_unescape_from_linux(const char *in, char *out, size_t cap)
+{
+    size_t n = 0;
+    while (*in) {
+        if (in[0] == '%' && hex_digit(in[1]) >= 0 && hex_digit(in[2]) >= 0) {
+            uint32_t v = (uint32_t) (hex_digit(in[1]) * 16 + hex_digit(in[2]));
+            if (linux_escaped_cp(v) || v == 0x25) {
+                char tmp[4];
+                size_t k = ods5_utf8_encode(v == 0 ? 0xFFFD : v, tmp);
+                if (n + k + 1 > cap) return (size_t) -1;
+                memcpy(out + n, tmp, k);
+                n += k;
+                in += 3;
+                continue;
+            }
+        }
+        if (n + 2 > cap) return (size_t) -1;
+        out[n++] = *in++;
+    }
+    out[n] = '\0';
+    return n;
+}
+
 /* --- Spellings --- */
 
 /* Printable ASCII that is written with a leading ^ (B.2.2.6). '.' is

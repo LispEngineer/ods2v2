@@ -40,6 +40,15 @@ int ods2_parse_directory(const uint8_t *data, size_t len,
 int ods2_parse_directory_level(const uint8_t *data, size_t len, unsigned level,
                                ods2_dir_entry_t *entries_out, size_t max_entries)
 {
+    unsigned bad = 0;
+    int n = ods2_parse_directory_records(data, len, level, entries_out, max_entries, &bad);
+    return bad != 0 ? -1 : n;
+}
+
+int ods2_parse_directory_records(const uint8_t *data, size_t len, unsigned level,
+                                 ods2_dir_entry_t *entries_out, size_t max_entries,
+                                 unsigned *bad_records)
+{
     size_t pos = 0;
     size_t count = 0;
 
@@ -68,7 +77,8 @@ int ods2_parse_directory_level(const uint8_t *data, size_t len, unsigned level,
            reported dir$size=22, i.e. total-2). */
         record_total = (size_t) size + 2;
         if (pos + record_total > len) {
-            return -1; /* declared size runs past the buffer - malformed */
+            (*bad_records)++; /* declared size runs past the buffer: nothing after it can be found */
+            break;
         }
 
         namecount = data[pos + 5];
@@ -82,14 +92,16 @@ int ods2_parse_directory_level(const uint8_t *data, size_t len, unsigned level,
         }
         name_start = pos + 6;
         name_end = name_start + namecount;
-        if (name_end > len) {
-            return -1;
-        }
         /* Name is padded to an even byte boundary before the
            per-version entries begin. */
         entry_start = name_end + (name_end % 2);
-        if (entry_start + 8 > len || entry_start + 8 > pos + record_total) {
-            return -1;
+        if (name_end > pos + record_total || entry_start + 8 > len ||
+            entry_start + 8 > pos + record_total) {
+            /* this record has no room for its name and a version: skip it, the size
+               word says where the next one starts */
+            (*bad_records)++;
+            pos += record_total;
+            continue;
         }
 
         /* Every complete 8-byte (version, FID) pair up to the end of
@@ -114,7 +126,13 @@ int ods2_parse_directory_level(const uint8_t *data, size_t len, unsigned level,
                     copy_len = ods5_isl1_to_utf8(data + name_start, namecount,
                                                  converted, sizeof(converted));
                 }
-                if (copy_len == (size_t) -1) return -1;
+                if (copy_len == (size_t) -1) {
+                    /* a UCS-2 name of odd length, or one that does not fit: skip the
+                       record, not the whole block */
+                    (*bad_records)++;
+                    pos += record_total;
+                    continue;
+                }
                 name_text = converted;
             } else if (copy_len > ODS2_DIR_MAX_NAME) {
                 copy_len = ODS2_DIR_MAX_NAME;

@@ -66,6 +66,7 @@ static void header(uint8_t *h, unsigned n, unsigned seg, unsigned lbn, unsigned 
     w16(h + 6, 0x0501);
     w16(h + 8, n); w16(h + 10, 1);
     w16(h + 14, ext); w16(h + 16, ext ? 1 : 0);
+    if (seg != 0) w16(h + 66, 1);       /* an extension header names the primary header (file 1) as its back link */
     ptr1(h + 200, lbn, count);
     h[58] = 2;
     if (two_extents) { ptr1(h + 204, lbn2, count2); h[58] = 4; }

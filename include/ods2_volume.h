@@ -48,7 +48,7 @@ typedef struct {
     bool           version0;  /* HM2$W_STRUCLEV version 0: read-only only */
     bool           ods5;      /* HM2$W_STRUCLEV level 5 (ODS-5): read-only
                                  for now, every write path refuses it */
-    unsigned       dir_block_errors; /* directory blocks skipped as malformed */
+    unsigned       dir_block_errors; /* directory records skipped as malformed (never reset) */
     ods2_home_t    home;
     /* INDEXF.SYS's own extents, decoded once at mount time - needed
        to locate every other file's header, including files beyond

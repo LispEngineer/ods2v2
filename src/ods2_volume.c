@@ -82,6 +82,21 @@ static bool contains_wildcard(const char *name)
     return strchr(name, '*') != NULL || strchr(name, '%') != NULL;
 }
 
+/* Is `h` the extension header it should be: a valid header (checksum), at level 2 or 5,
+   with the file number the chain said, the next segment number, and the primary header's
+   file number as back link? A damaged or crafted EXT_FID otherwise makes the file continue
+   in another file's blocks. */
+static bool extension_header_ok(const uint8_t *h, ods2_fid_t expect, uint16_t primary_num,
+                                unsigned segment)
+{
+    const ods2_head_core_t *core = (const ods2_head_core_t *) h;
+    unsigned level = core->struclev >> 8;
+    return (level == ODS5_LEVEL_2 || level == ODS5_LEVEL_5) &&
+           ods2_validate_head(h).ok &&
+           core->fid.fid_num == expect.fid_num && core->seg_num == segment &&
+           core->backlink.fid_num == primary_num;
+}
+
 static int decode_header_extents(const uint8_t *header, ods2_extent_t *extents_out, size_t max)
 {
     const ods2_head_core_t *core = (const ods2_head_core_t *) header;
@@ -180,6 +195,7 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
             int n;
             if (core->ext_fid.fid_num == 0) break;
             if (!ods2_read_header(vol, core->ext_fid.fid_num, next).ok) break;
+            if (!extension_header_ok(next, core->ext_fid, 1, (unsigned) segment + 1)) break;
             n = decode_header_extents(next, vol->indexf_extents + vol->indexf_extent_count,
                                       (size_t) (ODS2_MAX_EXTENTS - vol->indexf_extent_count));
             if (n <= 0) break;
@@ -464,8 +480,15 @@ ods2_result_t ods2_decode_all_extents(ods2_volume_t *vol, const uint8_t *header,
         }
 
         {
-            ods2_result_t r = ods2_read_header(vol, core->ext_fid.fid_num, current);
+            ods2_fid_t expect = core->ext_fid;
+            ods2_result_t r = ods2_read_header(vol, expect.fid_num, current);
             if (!r.ok) return r;
+            if (!extension_header_ok(current, expect,
+                                     ((const ods2_head_core_t *) header)->fid.fid_num,
+                                     (unsigned) segment + 1)) {
+                return fail("an extension header is not the next segment of this file "
+                            "(wrong file number, segment number, back link or checksum): damaged");
+            }
         }
     }
 
@@ -520,16 +543,15 @@ static ods2_result_t walk_directory(ods2_volume_t *vol, const uint8_t *dir_heade
         r = ods2_read_file_block(vol, dir_header, block_index, block);
         if (!r.ok) return r;
 
-        n = ods2_parse_directory_level(block, sizeof(block),
-                                       vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2,
-                                       block_entries, ODS2_DIR_MAX_ENTRIES_PER_BLOCK);
-        if (n < 0) {
-            vol->dir_block_errors++;
-            /* Malformed block content is a real problem, but an
-               entirely EMPTY block (all zero, size word 0x0000) just
-               means "no more entries in this particular block" for a
-               multi-block directory - not every block need be full. */
-            continue;
+        {
+            unsigned bad = 0;
+            n = ods2_parse_directory_records(block, sizeof(block),
+                                             vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2,
+                                             block_entries, ODS2_DIR_MAX_ENTRIES_PER_BLOCK, &bad);
+            /* a record that cannot be read is skipped, the others in the block are still
+               listed; the count is what the CLI warns about (an entirely empty block, size
+               word 0, is no error: not every block of a directory need be full) */
+            vol->dir_block_errors += bad;
         }
         if (n > ODS2_DIR_MAX_ENTRIES_PER_BLOCK) {
             /* Can't happen for anything ods2_parse_directory() accepts
@@ -2005,7 +2027,7 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
        parent's own allocation automatically if none of its existing
        content blocks have room. */
     r = insert_into_directory(vol, parent_core->fid.fid_num, name, 1, spec.fid,
-                              special != 0 ? ODS5_DIR_SPECIAL_FLAG : 0);
+                              special != 0 ? ODS5_DIR_SPECIAL : 0);
     if (!r.ok) return r;
 
     *new_fid_out = spec.fid;

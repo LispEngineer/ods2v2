@@ -63,7 +63,6 @@ bool ods2_insert_dir_entry_level(uint8_t *block, size_t block_size,
 /* The same, with `extra_flags` ORed into DIR$B_FLAGS at level 5 (the
  * only one used: ODS5_DIR_SPECIAL, 0x40, which VMS sets on the entry of a
  * symbolic link). Ignored at level 2. */
-#define ODS5_DIR_SPECIAL_FLAG 0x40u
 bool ods2_insert_dir_entry_flags(uint8_t *block, size_t block_size,
                                  const char *name, uint16_t version, ods2_fid_t fid,
                                  unsigned level, uint8_t extra_flags);

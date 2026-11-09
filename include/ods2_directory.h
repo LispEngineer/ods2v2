@@ -97,4 +97,12 @@ int ods2_parse_directory(const uint8_t *data, size_t len,
 int ods2_parse_directory_level(const uint8_t *data, size_t len, unsigned level,
                                ods2_dir_entry_t *entries_out, size_t max_entries);
 
+/* The same, but a record that cannot be read (a name too long to hold or of odd
+   length in UCS-2, a record too small for its name and a version) is skipped and
+   counted in *bad_records, and the records after it are still read; a record whose size
+   runs past the buffer ends the block (counted too). Never returns -1. */
+int ods2_parse_directory_records(const uint8_t *data, size_t len, unsigned level,
+                                 ods2_dir_entry_t *entries_out, size_t max_entries,
+                                 unsigned *bad_records);
+
 #endif /* ODS2_DIRECTORY_H */

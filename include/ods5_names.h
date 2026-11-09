@@ -38,9 +38,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Longest literal (UTF-8) name an entry can hold: 236 ISO Latin-1
-   bytes of 2 UTF-8 bytes each, or 118 UCS-2 units of up to 3. */
-#define ODS5_MAX_LITERAL_NAME 480
+/* Longest literal (UTF-8) name an entry can hold: DIR$B_NAMECOUNT is one byte, so a
+   damaged record can say 255 ISO Latin-1 bytes of 2 UTF-8 bytes each (a legal name is
+   at most 236 bytes, or 118 UCS-2 units of up to 3). */
+#define ODS5_MAX_LITERAL_NAME 510
 
 /* UTF-8 --- */
 
@@ -131,5 +132,19 @@ bool ods5_complete_name(const char *utf8, char *out, size_t cap);
    UCS2), *len their count in bytes. False if it does not fit in cap or has
    a character above U+FFFF. */
 bool ods5_stored_name(const char *utf8, uint8_t *out, size_t cap, size_t *len, unsigned *type);
+
+/* Names on Linux and on the terminal --- */
+
+/* The name made safe for a Linux file name and for the terminal: the characters that
+   would be a path separator or could do harm there -- '/', the C0 controls U+0000-U+001F,
+   DEL U+007F and the C1 controls U+0080-U+009F -- are written %XX (two upper-case hex
+   digits of the code point); a '%' is written %25 only where it is followed by two hex digits
+   that would read back as one of those escapes, so every other name, '%' included, is left
+   as it is and the mapping is reversible with ods5_unescape_from_linux(). Returns the
+   length, or (size_t) -1 if it does not fit in cap (a nul is added). */
+size_t ods5_escape_for_linux(const char *utf8, char *out, size_t cap);
+
+/* The inverse: %XX with XX one of the escaped code points (or 25) becomes that character. */
+size_t ods5_unescape_from_linux(const char *in, char *out, size_t cap);
 
 #endif /* ODS5_NAMES_H */

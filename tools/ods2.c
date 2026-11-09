@@ -187,13 +187,11 @@ static bool matches(const char *token, const char *name)
     return token[i] == '\0' && name[i] == '\0';
 }
 
-/* Case-insensitive equality of two directory entry names. */
+/* Equality of two directory entry names as the directory itself compares them: case-blind
+   with the VMS folding of ISO Latin-1 and UCS-2 letters (ods2_dir_name_compare). */
 static bool same_name(const char *a, const char *b)
 {
-    for (; *a && *b; a++, b++) {
-        if (toupper((unsigned char) *a) != toupper((unsigned char) *b)) return false;
-    }
-    return *a == '\0' && *b == '\0';
+    return ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0;
 }
 
 /* Formats a parsed path's filename plus its ";version" exactly as
@@ -352,7 +350,8 @@ static void display_name(const char *literal, char *out, size_t cap)
 {
     if (g_utf8_names ||
         ods5_escape_name(literal, ODS5_ESC_KEEP_LAST_DOT, out, cap) == (size_t) -1) {
-        snprintf(out, cap, "%s", literal);
+        /* plain UTF-8 must not carry controls to the terminal: %XX (ods5_escape_for_linux) */
+        if (ods5_escape_for_linux(literal, out, cap) == (size_t) -1) snprintf(out, cap, "%s", "(name too long)");
     }
 }
 
@@ -374,11 +373,10 @@ static void spelling_to_slash_path(const char *spelling, char *out, size_t cap)
         }
         ul = ods5_unescape(p, (size_t) (end - p), literal, sizeof(literal));
         if (ul == (size_t) -1) snprintf(literal, sizeof(literal), "%.*s", (int) (end - p), p);
-        {   /* a '/' inside a name: %2F, as EXPORT does */
-            char *sl;
-            while ((sl = strchr(literal, '/')) != NULL) {
-                memmove(sl + 3, sl + 1, strlen(sl + 1) + 1);
-                memcpy(sl, "%2F", 3);
+        {   /* a '/' or a control character inside a name: %XX, as EXPORT does */
+            char safe[ODS2_PATH_MAX];
+            if (ods5_escape_for_linux(literal, safe, sizeof(safe)) != (size_t) -1) {
+                snprintf(literal, sizeof(literal), "%s", safe);
             }
         }
         len += (size_t) snprintf(out + len, cap - len, "/%s", literal);
@@ -536,13 +534,13 @@ static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_d
                 char slash[ODS2_PATH_MAX];
                 spelling_to_slash_path(dir_path, slash, sizeof(slash));
                 {
-                    /* a '/' inside a name would read as a separator: %2F, as EXPORT does */
-                    const char *c;
-                    printf("%s/", slash);
-                    for (c = entries[i].name; *c; c++) {
-                        if (*c == '/') fputs("%2F", stdout); else putchar(*c);
+                    /* a '/' inside a name would read as a separator, a control character
+                       would reach the terminal: %XX, as EXPORT does */
+                    char safe[ODS2_DIR_MAX_NAME * 3 + 8];
+                    if (ods5_escape_for_linux(entries[i].name, safe, sizeof(safe)) == (size_t) -1) {
+                        snprintf(safe, sizeof(safe), "%s", "(name too long)");
                     }
-                    printf(";%u", entries[i].version);
+                    printf("%s/%s;%u", slash, safe, entries[i].version);
                 }
                 if (g_paths_fid) {
                     printf("\t%u,%u,%u", (unsigned) entries[i].fid.fid_num,
@@ -885,20 +883,22 @@ typedef struct {
 /* A name made safe for one Linux path component. */
 static void linux_component(const char *literal, char *out, size_t cap)
 {
-    size_t n = 0;
-    const char *s;
     if (literal[0] == '\0' || strcmp(literal, ".") == 0 || strcmp(literal, "..") == 0) {
         snprintf(out, cap, "%s", literal[0] == '\0' ? "%00" : (literal[1] == '\0' ? "%2E" : "%2E%2E"));
         return;
     }
-    for (s = literal; *s && n + 4 < cap; s++) {
-        if (*s == '/') { out[n++] = '%'; out[n++] = '2'; out[n++] = 'F'; }
-        else out[n++] = *s;
+    if (ods5_escape_for_linux(literal, out, cap) == (size_t) -1) {
+        snprintf(out, cap, "%%FF"); /* too long to hold: cannot happen for a stored name */
     }
-    out[n] = '\0';
 }
 
-static bool make_local_dirs(const char *path)
+/* Makes the Linux directory `path`, and its parents as needed. The first `rootlen` bytes
+   are the destination the user named and are used as they are (they may be a symbolic link
+   to a directory, on purpose). Below that every component is checked with lstat(): a
+   symbolic link or anything that is not a directory is refused, so that a name on the
+   volume can never steer EXPORT's writes out of the destination (a directory `X` and a
+   symbolic link `X` of the same Linux name, a link already lying in the destination). */
+static bool make_local_dirs(const char *path, size_t rootlen)
 {
     char buf[ODS2_PATH_MAX * 2];
     char *p;
@@ -908,9 +908,25 @@ static bool make_local_dirs(const char *path)
     for (p = buf + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            if (stat(buf, &st) != 0 && mkdir(buf, 0777) != 0 && errno != EEXIST) return false;
+            if ((size_t) (p - buf) > rootlen) {
+                if (lstat(buf, &st) == 0) {
+                    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return false; }
+                } else if (mkdir(buf, 0777) != 0) {
+                    return false;
+                }
+            } else if (stat(buf, &st) != 0 && mkdir(buf, 0777) != 0 && errno != EEXIST) {
+                return false;
+            }
             *p = '/';
         }
+    }
+    if (strlen(buf) > rootlen) {
+        if (lstat(buf, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) return true;
+            errno = ENOTDIR;
+            return false;
+        }
+        return mkdir(buf, 0777) == 0;
     }
     return stat(buf, &st) == 0 ? S_ISDIR(st.st_mode) : mkdir(buf, 0777) == 0;
 }
@@ -930,21 +946,24 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
     export_ctx_t *x = (export_ctx_t *) ctx_;
     uint8_t header[512];
     const ods2_head_core_t *core = (const ods2_head_core_t *) header;
-    char dirpath[ODS2_PATH_MAX * 2], name[ODS2_DIR_MAX_NAME + 16], comp[ODS2_DIR_MAX_NAME * 2 + 16];
+    char dirpath[ODS2_PATH_MAX * 2], name[ODS2_DIR_MAX_NAME + 16], comp[ODS2_DIR_MAX_NAME * 3 + 16];
     char path[ODS2_PATH_MAX * 3];
     ods2_result_t r = ods2_read_header(vol, e->fid.fid_num, header);
     unsigned special;
     size_t i;
+    char shown[ODS2_DIR_MAX_NAME * 3 + 8]; /* the name, safe to print: %XX for controls */
+
+    if (ods5_escape_for_linux(e->name, shown, sizeof(shown)) == (size_t) -1) snprintf(shown, sizeof(shown), "(name too long)");
 
     if (!r.ok) {
-        report_error("%%ODS2-E-READERR, %s: %s\n", e->name, r.problem);
+        report_error("%%ODS2-E-READERR, %s: %s\n", shown, r.problem);
         x->errors++;
         return;
     }
     if (core->filechar & 0x2000u) { x->dirs_skipped++; return; }
     special = ods5_special_type(header);
     if (special != 0 && special != ODS5_FAT_SYMBOLIC_LINK && special != ODS5_FAT_SYMLINK) {
-        fprintf(stderr, "%%ODS2-W-SPECIAL, %s: special file (type %u) skipped\n", e->name, special);
+        fprintf(stderr, "%%ODS2-W-SPECIAL, %s: special file (type %u) skipped\n", shown, special);
         x->specials_skipped++;
         return;
     }
@@ -971,7 +990,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
                 if (*rel == '.') rel++;
             }
             if (too_long) {
-                report_error("%%ODS2-E-PATHTOOLONG, %s: the Linux path would be too long\n", e->name);
+                report_error("%%ODS2-E-PATHTOOLONG, %s: the Linux path would be too long\n", shown);
                 x->errors++;
                 return;
             }
@@ -985,7 +1004,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         snprintf(comp + l, sizeof(comp) - l, ";%u", (unsigned) e->version);
     }
     if (x->dest_is_dir || x->tree) {
-        if (!make_local_dirs(dirpath)) {
+        if (!make_local_dirs(dirpath, strlen(x->local))) {
             report_error("%%ODS2-E-MKDIR, cannot create %s: %s\n", dirpath, strerror(errno));
             x->errors++;
             return;
@@ -1001,7 +1020,11 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         snprintf(path, sizeof(path), "%s", x->local);
     }
 
-    if (x->overwrite) remove(path);
+    if (x->overwrite) {
+        /* only a file or a link is replaced, never a directory (remove() would take an empty one) */
+        struct stat old;
+        if (lstat(path, &old) == 0 && !S_ISDIR(old.st_mode)) remove(path);
+    }
 
     if (special != 0) {      /* a symbolic link: the data is the target text */
         uint8_t target[1100];
@@ -1010,7 +1033,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         if (len == 0 || len >= sizeof(target) ||
             !ods2_read_file(vol, header, target, sizeof(target), &got).ok ||
             ods5_isl1_to_utf8(target, got, lit, sizeof(lit)) == (size_t) -1) {
-            report_error("%%ODS2-E-SYMLINK, %s: cannot read the link target\n", e->name);
+            report_error("%%ODS2-E-SYMLINK, %s: cannot read the link target\n", shown);
             x->errors++;
             return;
         }
@@ -1032,7 +1055,9 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         }
     }
     {
-        FILE *f = fopen(path, "wbx");
+        /* O_EXCL | O_NOFOLLOW: a new file only, never through a link */
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0666);
+        FILE *f = fd >= 0 ? fdopen(fd, "wb") : NULL;
         file_sink_t sink;
         size_t bytes = 0;
         bool sink_failed = false;
@@ -1047,7 +1072,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         r = ods2_read_file_stream(vol, header, file_sink, &sink, &bytes, &sink_failed);
         if (fclose(f) != 0) sink.failed = true;
         if (!r.ok || sink.failed) {
-            report_error("%%ODS2-E-READERR, %s: %s\n", e->name,
+            report_error("%%ODS2-E-READERR, %s: %s\n", shown,
                          r.ok ? "could not write the Linux file" : r.problem);
             remove(path);
             x->errors++;
@@ -1132,7 +1157,7 @@ static void cmd_export(ods2_volume_t *vol, const ods2_parsed_path_t *p, const ch
     }
     if (stat(local, &st) == 0 && S_ISDIR(st.st_mode)) x.dest_is_dir = true;
     else if (wild) {
-        if (!make_local_dirs(local)) {
+        if (!make_local_dirs(local, strlen(local))) {
             report_error("%%ODS2-E-MKDIR, cannot create %s: %s\n", local, strerror(errno));
             return;
         }
@@ -1236,10 +1261,21 @@ static bool host_input_read(void *ctx_, uint8_t *buf, size_t n)
 
 /* Opens `path` for COPY, finding its length. Returns false and prints
    why on failure. */
+/* IMPORT reads a Linux tree: a file found there as a regular file must still be one when it
+   is opened (no symbolic link swapped in under it that would lead out of the tree). */
+static bool g_open_nofollow = false;
+
 static bool host_input_open(const char *path, host_input_t *in)
 {
     struct stat st;
-    FILE *f = fopen(path, "rb");
+    FILE *f;
+    if (g_open_nofollow) {
+        int fd = open(path, O_RDONLY | O_NOFOLLOW);
+        f = fd >= 0 ? fdopen(fd, "rb") : NULL;
+        if (fd >= 0 && f == NULL) close(fd);
+    } else {
+        f = fopen(path, "rb");
+    }
 
     memset(in, 0, sizeof(*in));
     in->path = path;
@@ -1806,16 +1842,8 @@ static int import_name_cmp(const struct dirent **a, const struct dirent **b)
 
 static void import_decode_name(const char *linux_name, char *out, size_t cap)
 {
-    size_t n = 0;
-    while (*linux_name && n + 1 < cap) {
-        if (linux_name[0] == '%' && linux_name[1] == '2' && (linux_name[2] == 'F' || linux_name[2] == 'f')) {
-            out[n++] = '/';
-            linux_name += 3;
-        } else {
-            out[n++] = *linux_name++;
-        }
-    }
-    out[n] = '\0';
+    /* the inverse of EXPORT's names: %2F is '/', %XX of a control character that character */
+    if (ods5_unescape_from_linux(linux_name, out, cap) == (size_t) -1) snprintf(out, cap, "%s", linux_name);
 }
 
 static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_file_number, int depth)
@@ -1881,9 +1909,14 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
                 st->skipped++;
                 continue;
             }
-            if (!host_input_open(path, &in)) {
-                st->errors++;
-                continue;
+            g_open_nofollow = true;
+            {
+                bool opened = host_input_open(path, &in);
+                g_open_nofollow = false;
+                if (!opened) {
+                    st->errors++;
+                    continue;
+                }
             }
             memset(&src, 0, sizeof(src));
             src.length = in.length;
@@ -2344,7 +2377,24 @@ static int tokenize(char *line, char *tokens[MAX_TOKENS])
 
 /* Executes one command line against the mounted volume. Returns
    false if the command was EXIT/QUIT (caller should stop looping). */
+static bool execute_line_inner(ods2_volume_t *vol, char *line);
+
+/* Runs one command, then says so if directory records could not be read while it ran:
+   they were skipped, so what the command shows may be incomplete. */
 static bool execute_line(ods2_volume_t *vol, char *line)
+{
+    unsigned before = vol->dir_block_errors;
+    bool keep_going = execute_line_inner(vol, line);
+    if (vol->dir_block_errors != before) {
+        fprintf(stderr, "%%ODS2-W-DIRBLOCK, %u directory record%s could not be read and %s skipped: "
+                        "the directory is damaged, the listing may be incomplete\n",
+                vol->dir_block_errors - before, vol->dir_block_errors - before == 1 ? "" : "s",
+                vol->dir_block_errors - before == 1 ? "was" : "were");
+    }
+    return keep_going;
+}
+
+static bool execute_line_inner(ods2_volume_t *vol, char *line)
 {
     char *tokens[MAX_TOKENS];
     char verb[32];          /* the command word without qualifiers */
