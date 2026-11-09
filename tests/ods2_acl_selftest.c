@@ -94,6 +94,7 @@ int main(void)
               strcmp(got[0], "(APPLICATION,SIZE=%D25,FLAGS=%X0E03,ACCESS=%X00010000,DATA=%X00140000,%X00010002,%X00000002,%X03010302,%X00000001)") == 0);
     }
 
+    ods2_acl_format_id(0xFFFFFFFFu, id, sizeof(id)); check("the all-ones identifier is *, as VMS prints it", strcmp(id, "*") == 0);
     ods2_acl_format_id(0x80010001u, id, sizeof(id)); check("unnamed general identifier in hex", strcmp(id, "%X80010001") == 0);
 
 

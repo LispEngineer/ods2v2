@@ -3002,9 +3002,9 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
    unreachable. A block left with no entries is removed and the blocks after
    it move up, as the VMS file system does, so every block inside the
    end-of-file holds entries. */
-static ods2_result_t remove_directory_entry(ods2_volume_t *vol, unsigned dir_file_number,
-                                            uint8_t *dir_header, const char *name,
-                                            uint16_t target_version)
+static ods2_result_t remove_directory_entry_once(ods2_volume_t *vol, unsigned dir_file_number,
+                                                 uint8_t *dir_header, const char *name,
+                                                 uint16_t target_version, ods2_fid_t fid, bool *removed_out)
 {
     uint8_t *blocks = NULL;
     unsigned used, v;
@@ -3015,7 +3015,7 @@ static ods2_result_t remove_directory_entry(ods2_volume_t *vol, unsigned dir_fil
     if (!r.ok) return r;
     for (v = 0; v < used && !removed; v++) {
         uint8_t *block = blocks + (size_t) v * 512;
-        if (!ods2_remove_dir_version(block, 512, name, target_version)) continue;
+        if (!ods2_remove_dir_version_fid(block, 512, name, target_version, &fid)) continue;
         removed = true;
         if (used > 1 && ods2_dir_block_is_empty(block)) {
             memmove(block, block + 512, (size_t) (used - v - 1) * 512);
@@ -3029,10 +3029,30 @@ static ods2_result_t remove_directory_entry(ods2_volume_t *vol, unsigned dir_fil
         }
     }
     free(blocks);
-    if (!r.ok) return r;
-    if (!removed) {
-        return fail("internal error: entry existed at lookup time but was not "
-                    "found for removal (should be unreachable)");
+    *removed_out = removed;
+    return r;
+}
+
+/* Removes the entry (name, version, fid) - every one of them: an interrupted block split can leave an entry
+   listed twice, exactly alike (the second is the file's own entry again, not another file's), and removing one
+   would leave the other pointing at a file that is gone. A pair with another FID is never touched. */
+static ods2_result_t remove_directory_entry(ods2_volume_t *vol, unsigned dir_file_number,
+                                            uint8_t *dir_header, const char *name,
+                                            uint16_t target_version, ods2_fid_t fid)
+{
+    unsigned pass;
+    for (pass = 0; pass < 64; pass++) {
+        bool removed = false;
+        ods2_result_t r = remove_directory_entry_once(vol, dir_file_number, dir_header, name, target_version,
+                                                      fid, &removed);
+        if (!r.ok) return r;
+        if (!removed) {
+            if (pass == 0) {
+                return fail("internal error: entry existed at lookup time but was not "
+                            "found for removal (should be unreachable)");
+            }
+            return ok();
+        }
     }
     return ok();
 }
@@ -3147,7 +3167,7 @@ static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_n
     if (!ods2_header_is_file(target_header, target_fid)) {
         /* a dangling entry (its file went with another name, the slot may be free or reused): take
            the entry out and touch nothing else, as VMS does (batch m1) */
-        r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+        r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);
         if (!r.ok) return r;
         if (version_out != NULL) *version_out = target_version;
         if (info != NULL) info->kept = 2;
@@ -3179,7 +3199,7 @@ static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_n
                 id.version == target_version) {
                 primary = true;
             }
-            r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+            r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);
             if (!r.ok) return r;
             links--;
             target_header[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
@@ -3218,7 +3238,7 @@ static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_n
             bool primary = ods2_fid_number(target_core->backlink) == dir_file_number &&
                            ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0;
             if (!primary) {
-                r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+                r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);
                 if (!r.ok) return r;
                 if (version_out != NULL) *version_out = target_version;
                 if (info != NULL) {
@@ -3298,7 +3318,7 @@ static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_n
     /* If the entry cannot be removed the header stays marked: the entry is then dangling and the file reads
        as gone, a leak; writing the old header back could make a half-removed entry's file live and unlisted
        (review 7, R7-5). */
-    r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+    r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);
     if (!r.ok) return r;
 
     /* Extension headers (spec 3.3): each has its own file number and header slot, released like the

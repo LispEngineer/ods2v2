@@ -81,6 +81,11 @@ bool ods2_insert_dir_entry_flags(uint8_t *block, size_t block_size,
 bool ods2_remove_dir_version(uint8_t *block, size_t block_size, const char *name,
                              uint16_t version);
 
+/* The same, but only a pair whose FID is `fid` (NULL: any): the entries of an interrupted directory block split
+ * are listed twice, exactly alike, and DELETE removes all of them (one removal per call). */
+bool ods2_remove_dir_version_fid(uint8_t *block, size_t block_size, const char *name,
+                                 uint16_t version, const ods2_fid_t *fid);
+
 /* --- Names (spec 4.2.5) ---
  *
  * A directory record's name is "NAME.TYPE": the dot is always there,

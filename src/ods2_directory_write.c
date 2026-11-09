@@ -338,6 +338,12 @@ bool ods2_insert_dir_entry_flags(uint8_t *block, size_t block_size,
 bool ods2_remove_dir_version(uint8_t *block, size_t block_size, const char *name,
                              uint16_t version)
 {
+    return ods2_remove_dir_version_fid(block, block_size, name, version, NULL);
+}
+
+bool ods2_remove_dir_version_fid(uint8_t *block, size_t block_size, const char *name,
+                                 uint16_t version, const ods2_fid_t *fid)
+{
     size_t pos = 0;
     size_t end_pos;
     size_t record_pos = (size_t) -1;
@@ -363,7 +369,10 @@ bool ods2_remove_dir_version(uint8_t *block, size_t block_size, const char *name
             size_t name_end = pos + 6 + namecount;
             size_t e = name_end + (name_end % 2);
             for (; e + 8 <= pos + this_total; e += 8) {
-                if (read_word(block + e) == version) {
+                if (read_word(block + e) == version &&
+                    (fid == NULL || (read_word(block + e + 2) == fid->fid_num &&
+                                     read_word(block + e + 4) == fid->fid_seq &&
+                                     block[e + 6] == fid->fid_rvn && block[e + 7] == fid->fid_nmx))) {
                     record_pos = pos;
                     record_total = this_total;
                     pair_pos = e;

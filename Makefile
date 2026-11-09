@@ -27,7 +27,7 @@ VOLUME_SRCS = src/ods5_names.c src/ods5_header.c src/ods2_volume.c src/ods2_vali
               src/ods2_text_var.c src/ods2_records.c src/ods2_acl.c
 
 TOOLS = ods2 ods2_init read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
-        ods2_put ods2_check_headers ods2_dump_root ods2_dump_header ods2_rm
+        ods2_put ods2_check_headers ods2_dump_root ods2_dump_header ods2_rm ods2_filedump
 
 # `ods2` is the actual, intended day-to-day interface (DIR,
 # CREATE/DIRECTORY, COPY, TYPE, DELETE, SET DEFAULT - everything a
@@ -39,7 +39,7 @@ MAIN_TOOLS = ods2 ods2_init
 # project - each testing or inspecting one specific piece in
 # isolation. See README.md - not built by default - `make dev-tools` builds them.
 DEV_TOOLS = read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
-            ods2_put ods2_check_headers ods2_dump_root ods2_dump_header ods2_rm
+            ods2_put ods2_check_headers ods2_dump_root ods2_dump_header ods2_rm ods2_filedump
 
 $(BUILD)/ods2_make_loop: tests/ods2_make_loop.c $(VOLUME_SRCS) include/ods2_volume.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_make_loop.c $(VOLUME_SRCS) -o $@
@@ -180,6 +180,9 @@ read_file_header: tools/read_file_header.c include/ods2_ondisk.h
 
 ods2_ls: tools/ods2_ls.c $(VOLUME_SRCS) src/ods2_wildcard.c include/ods2_volume.h include/ods2_wildcard.h
 	$(CC) $(CFLAGS) $(SANFLAGS) tools/ods2_ls.c $(VOLUME_SRCS) src/ods2_wildcard.c -o $@
+
+ods2_filedump: tools/ods2_filedump.c $(VOLUME_SRCS) include/ods2_volume.h
+	$(CC) $(CFLAGS) $(SANFLAGS) tools/ods2_filedump.c $(VOLUME_SRCS) -o $@
 
 ods2_cat: tools/ods2_cat.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c include/ods2_volume.h include/ods2_path.h
 	$(CC) $(CFLAGS) $(SANFLAGS) tools/ods2_cat.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c -o $@
