@@ -270,6 +270,48 @@ rm -f "$TMP"/r?.img
 out=$($ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=1,1" 2>&1)
 check "SET VOLUME/GEOMETRY with more than 65,535 cylinders warns (CYLWRAP)" 1 "$(echo "$out" | grep -c CYLWRAP)"
 
+# ---- file dates are the local time of the VMS system (FUTCREDAT / FUTREVDAT on VMS when they are not): the writer stamps
+# the zone of TZ (ODS2_TZ names the VMS machine's zone when it is another), never UTC by default; ods2_init says which zone,
+# and ods5check warns of dates ahead of the host that runs it. (A batch builder that sets TZ=UTC for reproducibility
+# writes dates 5 hours ahead of an EST VMS machine.)
+echo hi > "$TMP/tz.txt"
+TZ=Pacific/Honolulu $INIT "$TMP/tzh.img" 8192 --structure=2 --label=TZH >"$TMP/tzh.out" 2>&1
+TZ=Pacific/Honolulu $ODS2 "$TMP/tzh.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+TZ=UTC $INIT "$TMP/tzu.img" 8192 --structure=2 --label=TZU >"$TMP/tzu.out" 2>&1
+TZ=UTC $ODS2 "$TMP/tzu.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+ODS2_TZ=Pacific/Honolulu TZ=UTC $INIT "$TMP/tzo.img" 8192 --structure=2 --label=TZO >"$TMP/tzo.out" 2>&1
+ODS2_TZ=Pacific/Honolulu TZ=UTC $ODS2 "$TMP/tzo.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+check "ods2_init says the zone its dates are in (TZ=Pacific/Honolulu: HST, -1000)" "1 1" \
+    "$(grep -c 'I-TIME' "$TMP/tzh.out") $(grep -c -- '-1000' "$TMP/tzh.out")"
+check "... and that ODS2_TZ overrides TZ (it names the VMS machine's zone)" "1" "$(grep -c 'ODS2_TZ=Pacific/Honolulu' "$TMP/tzo.out")"
+check "ods5check (run in Honolulu time) on a volume written in Honolulu time: no future date" "0 error(s), 0 warning(s)" \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzh.img" 2>&1 | tail -1)"
+check "ods5check on a volume written with TZ=UTC (10 hours ahead of Honolulu): warns, names ODS2_TZ" "yes" \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzu.img" 2>&1 | grep -q 'hours in the future.*ODS2_TZ' && echo yes)"
+check "ODS2_TZ=Pacific/Honolulu over TZ=UTC writes Honolulu dates: no future date" "0 error(s), 0 warning(s)" \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzo.img" 2>&1 | tail -1)"
+# the rule, pinned: with TZ set, a new file's Created date is that zone's wall-clock time, and it reads back as the same
+# time (DIR/FULL prints the stored local time unchanged)
+for zone in Pacific/Honolulu America/New_York Asia/Kolkata UTC; do
+    TZ=$zone $INIT "$TMP/tzr.img" 8192 --structure=2 --label=TZR >/dev/null 2>&1
+    want_before=$(TZ=$zone date +%d-%b-%Y' '%H:%M | tr a-z A-Z)
+    TZ=$zone $ODS2 "$TMP/tzr.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+    want_after=$(TZ=$zone date +%d-%b-%Y' '%H:%M | tr a-z A-Z)
+    got=$(TZ=$zone $ODS2 "$TMP/tzr.img" "DIR/FULL [000000]X.TXT" 2>&1 | sed -n 's/^ *Created: *\([0-9]*-[A-Z]*-[0-9]*\) \([0-9]*:[0-9]*\):.*/\1 \2/p')
+    case "$got" in "$want_before"|"$want_after") res=local ;; *) res="$got (wanted $want_before)" ;; esac
+    check "TZ=$zone: the Created date stored and read back is that zone's local time" local "$res"
+    rm -f "$TMP/tzr.img"
+done
+# every date the tools write is local: the home block, the reserved files, a new file and a new directory
+for zone in America/New_York Asia/Kolkata; do
+    TZ=$zone $INIT "$TMP/tzk.img" 8192 --structure=5 --label=TZK >/dev/null 2>&1
+    TZ=$zone $ODS2 "$TMP/tzk.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+    TZ=$zone $ODS2 "$TMP/tzk.img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+    check "everything written under TZ=$zone is not ahead of $zone (reserved files, file, directory, ODS-5 dates)" "0 error(s), 0 warning(s)" \
+        "$(TZ=$zone python3 -I tests/ods5check.py "$TMP/tzk.img" 2>&1 | tail -1)"
+    rm -f "$TMP/tzk.img"
+done
+
 # a block that only starts like a footer (the signature and the two bytes, but a wrong CRC) is not one: no message, a normal write mount
 cp "$TMP/s0.img" "$TMP/s4.img"; python3 -I "$TMP/foot.py" inside "$TMP/s4.img" 8192
 python3 -I - "$TMP/s4.img" <<'PY'

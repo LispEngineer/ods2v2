@@ -40,7 +40,11 @@
  *
  * The image file must not exist yet; nothing is ever written to an existing file.
  */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE /* localtime_r(), tzset() */
+#endif
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -129,6 +133,26 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("%%ODS2-I-INITIALIZED, %s: %llu blocks, ODS-%u, label %s\n", argv[1], size, opt.level, opt.label);
+    {
+        /* VMS keeps file dates in local time: the zone of the system the volume is for. A volume stamped in another zone
+           than the VMS machine's gets dates ahead of its clock (ANALYZE: FUTCREDAT, FUTREVDAT) when that is the one
+           that is behind. */
+        const char *oz = getenv("ODS2_TZ");
+        if (oz != NULL && oz[0] != '\0') {
+            printf("%%ODS2-I-TIME, file dates are local time in the zone ODS2_TZ=%s\n", oz);
+        } else {
+            time_t now = time(NULL);
+            struct tm lt;
+            char abbr[32] = "?", off[16] = "?";
+            tzset();
+            if (localtime_r(&now, &lt) != NULL) {
+                strftime(abbr, sizeof(abbr), "%Z", &lt);
+                strftime(off, sizeof(off), "%z", &lt);
+            }
+            printf("%%ODS2-I-TIME, file dates are local time in this host's zone (%s, UTC%s): ODS2_TZ names the VMS "
+                   "system's zone if it is another\n", abbr, off);
+        }
+    }
     {
         /* what the storage control block records: OpenVMS VAX V7.3 ANALYZE/DISK_STRUCTURE compares it with the device's
            own geometry (measured: only the matching one is accepted) */

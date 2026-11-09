@@ -476,6 +476,11 @@ ODS2_TZ=America/New_York ./ods2 transfer.dsk COPY build.com [CONVERT]
 export ODS2_TZ=UTC        # for a VMS system that really runs on UTC
 ```
 
+**The zone must be the VMS machine's**: a volume stamped in a zone behind the VMS machine's (for instance by a script that sets
+`TZ=UTC` on a host that is not on UTC) gets dates in the VMS machine's future, which `ANALYZE/DISK_STRUCTURE` reports as
+`FUTCREDAT` / `FUTREVDAT` (and, on ODS-5, `FUTACCDAT` / `FUTATTDAT`). `ods2_init` says which zone it used, and
+`tests/ods5check.py` warns of dates more than an hour ahead of the host that runs it.
+
 Any value `TZ` accepts works, including POSIX rules such as
 `EST5EDT,M3.2.0,M11.1.0`. A zone name the host doesn't recognise
 quietly falls back to UTC, so check the spelling if dates still look

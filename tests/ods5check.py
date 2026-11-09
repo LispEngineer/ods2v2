@@ -41,7 +41,7 @@ of every file points at a directory that lists it, header name = the directory
 entry of the primary link, link count where the volume keeps one).
 """
 import os
-import struct, sys
+import struct, sys, time
 
 u16 = lambda b, o: struct.unpack_from('<H', b, o)[0]
 u32 = lambda b, o: struct.unpack_from('<I', b, o)[0]
@@ -145,6 +145,9 @@ def decode_map(b, fnd, where):
     if o != end:
         fnd.err('%s: map area pointers run past MAP_INUSE' % where)
     return ext
+
+
+FUTURE_SEEN = {}
 
 
 def parse_ident(b, fnd, where):
@@ -351,6 +354,23 @@ def main():
             continue
         d = parse_ident(b, fnd, where)
         prim[n] = (b, d)
+        # A date is local time in the zone the VMS system runs in. One that is more than an hour ahead of this host's
+        # local time was most likely written as UTC by a host west of Greenwich (VMS then calls it FUTCREDAT /
+        # FUTREVDAT, and every such file sorts and purges as if from the future): the writer's zone (TZ, or ODS2_TZ for
+        # ods2v2) was not the VMS machine's. Compared with the host running this checker, so it is a warning.
+        if d is not None and not FUTURE_SEEN.get('done'):
+            ahead = (time.time() + time.localtime().tm_gmtoff + 3506716800 + 3600) * 10000000
+            for key in ('credate', 'revdate', 'accdate', 'attdate'):
+                if d.get(key, 0) > ahead:
+                    hrs = (d[key] - (ahead - 3600 * 10000000)) / 10000000 / 3600.0
+                    fnd.warn('%s: %s is %.1f hours in the future of this host (file dates are local time of the VMS '
+                             'system: a writer that stamped UTC, or another zone, than the VMS machine runs in; see '
+                             'ODS2_TZ)' % (where, key, hrs))
+                    FUTURE_SEEN['count'] = FUTURE_SEEN.get('count', 0) + 1
+                    break
+            if FUTURE_SEEN.get('count', 0) >= 3:
+                fnd.warn('(further files with future dates are not listed)')
+                FUTURE_SEEN['done'] = True
         # extension chain
         exts = decode_map(b, fnd, where)
         cur = b
