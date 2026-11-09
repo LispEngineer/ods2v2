@@ -89,6 +89,27 @@ int main(void)
     }
     printf("PASS: control characters, '/' and ambiguous '%%' escape to %%XX and back\n");
 
+    /* --- the folding VMS V8.4 applies to names (ods5-vms, CORPUS.md 8 "Question (b)") --- */
+    {
+        /* names that fold together are one name (versions of it on VMS) */
+        assert(ods5_fold('d') == ods5_fold('D') && ods5_fold(0x1C4) == ods5_fold(0x1C5) && ods5_fold(0x1C5) == ods5_fold(0x1C6));
+        assert(ods5_fold(0x1F1) == ods5_fold(0x1F2) && ods5_fold(0x1F2) == ods5_fold(0x1F3));
+        assert(ods5_fold(0x3A3) == ods5_fold(0x3C3) && ods5_fold(0x3C3) == ods5_fold(0x3C2));      /* sigma, small, final */
+        assert(ods5_fold('k') == ods5_fold('K'));
+        assert(ods5_fold(0xC9) == ods5_fold(0xE9));                                                /* Latin-1 and the UCS-2 spelling */
+        /* separate names */
+        assert(ods5_fold(0x212A) != ods5_fold('K'));                                               /* Kelvin sign */
+        assert(ods5_fold(0xDF) != ods5_fold(0x1E9E));                                              /* sharp s, capital sharp s */
+        assert(ods5_fold(0x130) != ods5_fold(0x131) && ods5_fold(0xFB01) == 0xFB01);
+        assert(ods5_fold(0x1C4) != ods5_fold(0x1F1));
+        /* the order VMS lists them in: by the upper-cased code point (dotless i sorts as I, between E and K) */
+        assert(ods5_fold(0x131) == 'I' && ods5_fold('E') < ods5_fold(0x131) && ods5_fold(0x131) < ods5_fold('K'));
+        assert(ods5_fold(0xE9) < ods5_fold(0xDF) && ods5_fold(0xDF) < ods5_fold(0x130) && ods5_fold(0x130) < ods5_fold(0x1C4));
+        assert(ods5_fold(0x1C4) < ods5_fold(0x1F1) && ods5_fold(0x1F1) < ods5_fold(0x3C3) && ods5_fold(0x3C3) < ods5_fold(0x1E9E));
+        assert(ods5_fold(0x1E9E) < ods5_fold(0x212A) && ods5_fold(0x212A) < ods5_fold(0xFB01));
+        printf("PASS: the case folding agrees with what VMS V8.4 did to digraphs, sigmas, Kelvin, sharp s, dotless i (names and order)\n");
+    }
+
     /* --- 3: a bad record is skipped, the others are read --- */
     {
         uint8_t blk[512];
