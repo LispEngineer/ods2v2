@@ -34,6 +34,12 @@ def text(trip):
     return bytes(out)
 bad = 0
 for name, trip in sorted(secs.items()):
+    if any(r[2].startswith(b'%TYPE-') for r in trip):
+        run = subprocess.run([ods2, img, 'TYPE [000000]' + name], capture_output=True)
+        ok = run.returncode != 0 and run.stdout == b''
+        bad += 0 if ok else 1
+        print('%-4s %-14s VMS TYPE fails (%s); ods2 exit %d, %d bytes of output' % ('OK' if ok else 'DIFF', name, trip[1][2].decode(errors='replace')[:40], run.returncode, len(run.stdout)))
+        continue
     want = text(trip)
     got = subprocess.run([ods2, img, 'TYPE [000000]' + name], capture_output=True).stdout
     ok = got == want

@@ -58,6 +58,9 @@ typedef struct {
  * FORTRAN carriage control, none = records run together). ODS2_REC_LINES: ignore it, one line per record. */
 #define ODS2_REC_LINES 0x01u
 
+/* NULL, or why VMS TYPE refuses a file with these attributes (the carriage control cannot be applied) */
+const char *ods2_rec_check_attrs(const ods2_rec_attrs_t *attrs);
+
 typedef struct ods2_rec_decoder ods2_rec_decoder_t;
 
 /* The decoder hands text to `sink` (false = the sink failed). */

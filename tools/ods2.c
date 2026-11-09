@@ -1019,6 +1019,14 @@ static ods2_result_t read_file_content(ods2_volume_t *vol, const uint8_t *header
     a.rsize = core->recattr.rsize;
     a.maxrec = core->recattr.maxrec;
     a.vfcsize = core->recattr.vfcsize;
+    if (!(rec_options & ODS2_REC_LINES)) {
+        const char *bad = ods2_rec_check_attrs(&a);
+        if (bad != NULL) {
+            if (sink_failed_out) *sink_failed_out = false;
+            if (bytes_out) *bytes_out = 0;
+            return (ods2_result_t) { .ok = false, .problem = bad };
+        }
+    }
     d = ods2_rec_new(&a, rec_options, sink, ctx);
     if (d == NULL) {
         if (sink_failed_out) *sink_failed_out = false;

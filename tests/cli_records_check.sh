@@ -49,11 +49,14 @@ check "DIR/FULL: fixed length line" "Record format:      Fixed length 20 byte re
 check "DIR/FULL: CR attribute" "Record attributes:  Carriage return carriage control" "$(echo "$full" | sed -n 's/^  Record attributes: */Record attributes:  /p')"
 full=$($ODS2 "$TMP/rms.img" 'DIR/FULL [000000]VAR_BLK.TXT' 2>&1)
 check "DIR/FULL: CR and non-spanned" "Record attributes:  Carriage return carriage control, Non-spanned" "$(echo "$full" | sed -n 's/^  Record attributes: */Record attributes:  /p')"
-# a damaged VAR file (a record length over 32767) is reported, not decoded into garbage
-$ODS2 "$TMP/rms.img" "TYPE [000000]BAD_VAR.TXT" > "$TMP/out" 2> "$TMP/err"; st=$?
-check "TYPE of a damaged VAR file exits 1" 1 "$st"
-grep -q "READERR" "$TMP/err" && echo "PASS: ... and says so" || { echo "FAIL: damaged VAR file not reported"; fail=$((fail+1)); }
-$ODS2 "$TMP/rms.img" "TYPE/RAW [000000]BAD_VAR.TXT" > "$TMP/out" 2>/dev/null
-check "TYPE/RAW of it still gives the bytes" 5 "$(wc -c < "$TMP/out" | tr -d ' ')"
+# files VMS TYPE refuses (m2b): a damaged VAR file (RMS-F-IRC) and carriage control that cannot apply (RMS-F-RAT)
+for n in BAD_VAR.TXT VAR_PRN.TXT FIX_PRN.TXT FIX_CRFTN.TXT; do
+    $ODS2 "$TMP/rms.img" "TYPE [000000]$n" > "$TMP/out" 2> "$TMP/err"; st=$?
+    check "TYPE $n fails as VMS TYPE does" "1 0" "$st $(wc -c < "$TMP/out" | tr -d ' ')"
+    grep -q "READERR" "$TMP/err" && echo "PASS: ... and says so" || { echo "FAIL: $n: no message"; fail=$((fail+1)); }
+    $ODS2 "$TMP/rms.img" "TYPE/RAW [000000]$n" > "$TMP/out" 2>/dev/null
+    cmp -s "$TMP/src/$n" "$TMP/out" && echo "PASS: TYPE/RAW $n still gives the bytes" || { echo "FAIL: TYPE/RAW $n"; fail=$((fail+1)); }
+    $ODS2 "$TMP/rms.img" "TYPE/LINES [000000]$n" > "$TMP/out" 2>/dev/null
+done
 if [ $fail -ne 0 ]; then echo "$fail records check(s) failed"; exit 1; fi
 echo "all records checks passed"

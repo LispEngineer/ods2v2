@@ -49,7 +49,8 @@ add('BAD_VAR.TXT', 'VAR', CR, b'\x00\x80abc')
 add('EMPTY_VAR.TXT','VAR', CR, b'')
 add('BIG_VAR.TXT', 'VAR', CR,  var([b'record number %06d ' % i + b'z' * (i % 97) for i in range(1, 4000)]), rsize=200)
 
-# stream and carriage-control cases whose VMS TYPE output is not measured yet (batch m2b): no expected text
+# stream and carriage-control cases measured in batch m2b; VMS TYPE refuses VAR_PRN, FIX_PRN, FIX_CRFTN (RMS-F-RAT) and BAD_VAR (RMS-F-IRC)
+TYPE_FAILS = ['VAR_PRN.TXT', 'FIX_PRN.TXT', 'FIX_CRFTN.TXT', 'BAD_VAR.TXT']
 add('STM_NONE.TXT',  'STM',   0, b'one\r\ntwo\r\nthree')
 add('STMLF_NONE.TXT','STMLF', 0, b'one\ntwo\nthree\n')
 add('STMCR_NONE.TXT','STMCR', 0, b'one\rtwo\rthree\r')
@@ -63,9 +64,17 @@ add('VFC_PRN_ODD.TXT','VFC',  PRN, var([b'a', b'b', b'c', b'd', b'e', b'f'],
 add('FIX_PRN.TXT',   'FIX',   PRN, b''.join(b'%-10s' % (b'r%d' % i) for i in range(1, 5)), rsize=10, maxrec=10)
 add('FIX_CRFTN.TXT', 'FIX',   CR|FTN, b''.join(b'%-10s' % (b' r%d' % i) for i in range(1, 4)), rsize=10, maxrec=10)
 
-# the text VMS TYPE shows for each file, from the records VMS V8.4-2L2 wrote with TYPE/OUTPUT (batch m2),
+# the text VMS TYPE shows for each file, from the records VMS V8.4-2L2 wrote with TYPE/OUTPUT (batches m2 and m2b),
 # as Linux text (a carriage return after the data = a newline, a bare CR = overprint): ods5-wr2 batch m2, 9-NOV-2026
 VMS_EXPECT = {
+    'FTN_ODD.TXT': b'nul\nother\n\ntwo\nend\n\n',
+    'STMCR_NONE.TXT': b'one\ntwo\nthree\n',
+    'STMLF_FF.TXT': b'one\x0ctwo\nthree\n',
+    'STMLF_NONE.TXT': b'one\ntwo\nthree\n',
+    'STM_FF.TXT': b'one\x0c\ntwo\x0b\nthree\nfour\n',
+    'STM_NONE.TXT': b'one\ntwo\nthree\n',
+    'VFC_FTN.TXT': b'abc\n\ndef\n\x0cghi\n',
+    'VFC_PRN_ODD.TXT': b'\n\n\nab\n\n\n\n\nc\n\nd\n\x00e\n\nf\x0c',
     'EMPTY_VAR.TXT': b'',
     'FIX_CR.TXT': b'rec 1               \nrec 2               \nrec 3               \nrec 4               \nrec 5               \nrec 6               \nrec 7               \nrec 8               \n',
     'FIX_FTN.TXT': b'rec                \n\nrec                \n\x0crec                \rrec                \nrec                \n',

@@ -130,6 +130,28 @@ int main(void)
         CHECK(!ods2_rec_feed(d, bad, sizeof(bad)) && ods2_rec_bad_data(d), "record length over 32767 is refused");
         ods2_rec_free(d);
     }
+    /* attribute combinations VMS TYPE refuses (batch m2b) */
+    {
+        ods2_rec_attrs_t b;
+        memset(&b, 0, sizeof(b));
+        b.rfm = ODS2_RFM_FIX; b.rat = ODS2_RAT_PRN;
+        CHECK(ods2_rec_check_attrs(&b) != NULL, "FIX with print-file carriage control is refused");
+        b.rfm = ODS2_RFM_VAR;
+        CHECK(ods2_rec_check_attrs(&b) != NULL, "VAR with print-file carriage control is refused");
+        b.rfm = ODS2_RFM_FIX; b.rat = ODS2_RAT_CR | ODS2_RAT_FTN;
+        CHECK(ods2_rec_check_attrs(&b) != NULL, "CR and FTN together are refused");
+        b.rfm = ODS2_RFM_VFC; b.rat = ODS2_RAT_PRN;
+        CHECK(ods2_rec_check_attrs(&b) == NULL, "VFC with print-file carriage control is fine");
+        b.rat = ODS2_RAT_FTN;
+        CHECK(ods2_rec_check_attrs(&b) == NULL, "VFC with FORTRAN carriage control is fine");
+        b.rfm = ODS2_RFM_VAR; b.rat = ODS2_RAT_CR | ODS2_RAT_BLK;
+        CHECK(ods2_rec_check_attrs(&b) == NULL, "VAR with CR and BLK is fine");
+    }
+    /* STM: a form feed or a vertical tab ends a record and stays in it (measured); STMLF: only LF */
+    a.rfm = ODS2_RFM_STM; a.rat = ODS2_RAT_CR;
+    same_for_all_pieces("STM with FF and VT", &a, 0, (const uint8_t *) "one\fb\vc\r\nd", 10, "one\f\nb\v\nc\nd\n", 12);
+    a.rfm = ODS2_RFM_STMLF;
+    same_for_all_pieces("STMLF keeps a form feed inside the record", &a, 0, (const uint8_t *) "a\fb\n", 4, "a\fb\n", 4);
     (void) i;
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("all ods2_records checks passed\n");

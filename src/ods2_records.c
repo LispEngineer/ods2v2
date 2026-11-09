@@ -61,6 +61,19 @@ bool ods2_rec_decodable(unsigned fat_rtype)
     return (fat_rtype >> 4) == 0 && rfm >= ODS2_RFM_FIX && rfm <= ODS2_RFM_STMCR;
 }
 
+const char *ods2_rec_check_attrs(const ods2_rec_attrs_t *a)
+{
+    unsigned cc = ((a->rat & ODS2_RAT_FTN) ? 1u : 0u) + ((a->rat & ODS2_RAT_CR) ? 1u : 0u) +
+                  ((a->rat & ODS2_RAT_PRN) ? 1u : 0u);
+    /* VMS TYPE refuses (%TYPE-F-OPENOUT ... -RMS-F-RAT, batch m2b): FIX with PRN, VAR with PRN, FIX with CR and
+       FTN together. RMS keeps FTN, CR and PRN exclusive, and print-file carriage control needs the
+       fixed control area of a VFC file. */
+    if (cc > 1 || ((a->rat & ODS2_RAT_PRN) && a->rfm != ODS2_RFM_VFC)) {
+        return "invalid record attributes (RMS-F-RAT: carriage control combined, or print control without a VFC format)";
+    }
+    return NULL;
+}
+
 ods2_rec_decoder_t *ods2_rec_new(const ods2_rec_attrs_t *attrs, unsigned options,
                                  bool (*sink)(void *, const uint8_t *, size_t), void *ctx)
 {
@@ -175,7 +188,7 @@ static bool emit_record(ods2_rec_decoder_t *d, const uint8_t *hdr, size_t hlen,
     uint8_t rat = d->a.rat;
 
     if (!(d->options & ODS2_REC_LINES)) {
-        if ((rat & ODS2_RAT_FTN) && d->a.rfm != ODS2_RFM_VFC) {
+        if (rat & ODS2_RAT_FTN) {
             uint8_t c = len > 0 ? data[0] : ' ';
             if (len > 0) { data++; len--; }
             switch (c) {
@@ -183,6 +196,7 @@ static bool emit_record(ods2_rec_decoder_t *d, const uint8_t *hdr, size_t hlen,
             case '1': p = 0x8C; break;
             case '+': p = 0x00; break;
             case '$': q = 0x00; break;
+            case 0: p = 0x00; q = 0x00; break;     /* a NUL control byte: no carriage control (measured) */
             default: break;
             }
         } else if ((rat & ODS2_RAT_PRN) && d->a.rfm == ODS2_RFM_VFC && hlen >= 2) {
@@ -227,9 +241,10 @@ static bool feed_stream(ods2_rec_decoder_t *d, const uint8_t *data, size_t n)
             if (!put(d, data + start, i - start)) return false;
             d->cr_pending = true;
             start = i + 1;
-        } else if (data[i] == '\n') {
-            /* an LF without a CR also ends a record, and VMS TYPE keeps that LF in the record
-               (measured, m2: "four has a lone LF" gives the line, an empty line, then the rest) */
+        } else if (data[i] == '\n' || data[i] == '\f' || data[i] == '\v') {
+            /* an LF without a CR, a form feed or a vertical tab also ends a record, and VMS TYPE keeps
+               that byte in the record (measured, m2 and m2b: "four has a lone LF" gives the line with
+               its LF, an empty line, then the rest; "one<FF>" and "two<VT>" are records) */
             if (!put(d, data + start, i + 1 - start) || !put(d, &lf, 1)) return false;
             start = i + 1;
         }
