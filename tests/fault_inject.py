@@ -254,7 +254,9 @@ def main():
                 shutil.copyfile(base, trial)
                 rc, out = ods2(trial, cmd, {'ODS2_FAULT_AFTER_WRITES': str(k)})
                 prob = []
-                bad, leaks = check(trial, name)
+                # the run that completes (k = n) must be clean: no duplicate allowance (R9-3)
+                allow = name if k < n else None
+                bad, leaks = check(trial, allow)
                 prob += ['checker: ' + b for b in bad]
                 counts['leak' if leaks else 'clean'] += 1
                 rc2, files, text = tree(trial, 'after')
@@ -267,7 +269,7 @@ def main():
                 rc3, out3 = ods2(trial, 'COPY %s [000000]ZZ.DAT' % followup)
                 if rc3 != 0:
                     prob.append('the COPY after the fault failed: ' + out3.strip()[:120])
-                bad2, leaks2 = check(trial, name)
+                bad2, leaks2 = check(trial, allow)
                 prob += ['after COPY, checker: ' + b for b in bad2]
                 rc4, files2, text = tree(trial, 'after2')
                 for p, h in base_files.items():

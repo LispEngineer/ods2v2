@@ -3127,6 +3127,11 @@ static int run_script(ods2_volume_t *vol, const char *script_path)
         printf("ODS2> %s", line);
         if (line[strlen(line) - 1] != '\n') printf("\n");
         if (!execute_line(vol, line)) break;
+        if (vol->write_failed) {
+            /* a change failed part way through its write: the rest of the script is not run */
+            report_error("%%ODS2-E-WRITEFAIL, a write to the disk image failed; the rest of the script is not run\n");
+            break;
+        }
     }
     fclose(f);
     /* Every line runs, as before, but the script as a whole failed if

@@ -528,6 +528,31 @@ for level in 2 5; do
     check "ODS-$level: DIR [...] still walks the whole tree" "255" "$($ODS2 "$img" 'DIR [...]*.*' 2>&1 | grep -c '^Directory ')"
 done
 
+# ---- review 9: R9-1 a change that cannot get its buffer fails instead of writing unbuffered; R9-2 after a write
+# that fails part way (an I/O error at commit) no more is written through the mount and a script stops
+# (ods2_fault: ODS2_FAULT_NOMEM_TXN=1 makes the buffer allocation fail, ODS2_FAULT_ERROR_AT_WRITE=k the k-th write)
+for level in 2 5; do
+    img="$TMP/mm$level.img"
+    $INIT "$img" 8192 --structure=$level --label=NOMEM >/dev/null 2>&1
+    printf 'x\n' > "$TMP/u.txt"
+    $ODS2 "$img" "COPY $TMP/u.txt [000000]KEEP.TXT" >/dev/null 2>&1
+    before=$(md5sum < "$img")
+    for cmd in "DELETE [000000]KEEP.TXT" "COPY $TMP/u.txt [000000]NEW.TXT" "CREATE/DIRECTORY [NEWD]" "LINK [000000]LNK.TXT [000000]KEEP.TXT"; do
+        out=$(ODS2_FAULT_NOMEM_TXN=1 ./ods2_fault "$img" "$cmd" 2>&1); rc=$?
+        case "$out" in *"out of memory"*) msg=refused ;; *) msg="$out" ;; esac
+        check "ODS-$level: '$cmd' without a buffer fails (exit 1, out of memory) and writes nothing" "1 refused $before" "$rc $msg $(md5sum < "$img")"
+    done
+    printf 'COPY %s [000000]ONE.TXT\nCOPY %s [000000]TWO.TXT\n' "$TMP/u.txt" "$TMP/u.txt" > "$TMP/two.ods2"
+    out=$(ODS2_FAULT_ERROR_AT_WRITE=3 ./ods2_fault "$img" "@$TMP/two.ods2" 2>&1); rc=$?
+    check "ODS-$level: a write that fails during the commit stops the script (exit 1, WRITEFAIL)" "1 yes no" \
+        "$rc $(echo "$out" | grep -q WRITEFAIL && echo yes) $(echo "$out" | grep -q 'TWO.TXT' && echo yes || echo no)"
+    check "ODS-$level: the second command's file was not made" "1" "$(./ods2 "$img" 'TYPE [000000]TWO.TXT' >/dev/null 2>&1; echo $?)"
+    # in the same process a further change is refused outright
+    printf 'COPY %s [000000]ONE.TXT\n' "$TMP/u.txt" > "$TMP/one.ods2"
+    out=$(ODS2_FAULT_ERROR_AT_WRITE=3 ./ods2_fault "$img" "@$TMP/one.ods2" 2>&1)
+    check "ODS-$level: and a later process works again, the old leak being a leak" "KEEP.TXT" "$(./ods2 "$img" 'DIR [000000]KEEP.TXT' 2>&1 | grep -o KEEP.TXT | head -1)"
+done
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"

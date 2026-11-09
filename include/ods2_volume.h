@@ -63,6 +63,7 @@ typedef struct {
        Not for callers to touch. */
     struct ods2_txn *txn;
     int            txn_depth;
+    bool           write_failed; /* sticky: a change failed part way through its write; no more writes on this mount */
 } ods2_volume_t;
 
 typedef struct {
