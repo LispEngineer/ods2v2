@@ -145,13 +145,14 @@ version 1 and refuses a name that already exists.
 ### Record formats
 
 With no qualifier `COPY` (and `IMPORT`) choose the record format per file: **text** (no NUL byte, hardly
-any other control byte, lines of at most 32767 bytes, LF or all CR LF line ends) becomes a Stream_LF (Stream
-for CR LF) file with carriage-return carriage control, the longest line as its record length and no
-maximum, as VMS's own text files are; **anything else** becomes fixed 512-byte records with no carriage
+any other control byte, lines of at most 32767 bytes) becomes a Stream_LF file with carriage-return carriage
+control, the longest line as its record length and no maximum, as VMS's own text files are (a CR before an LF
+stays part of the line, so a file with mixed LF and CR LF ends keeps its bytes as they are; CR LF throughout
+makes a Stream file; CR-only line ends make a Stream_CR file); **anything else** becomes fixed 512-byte records with no carriage
 control and an exact end-of-file byte, as VMS binary FTP makes it. (Before, every file was Stream_LF with a
 512-byte maximum record size; VMS V7.3-2 cannot read a binary file written like that when a "line" of it is
 longer than 512 bytes: `%RMS-W-RTB`. V8.4 could.) `/FORMAT=` overrides the choice: `AUTO` (the default),
-`STMLF` (or `TEXT`), `STM`, `FIX512` (or `BINARY`), `UDF` (size 0 maximum, the file's length as record size)
+`STMLF` (or `TEXT`), `STM`, `STMCR`, `FIX512` (or `BINARY`), `UDF` (size 0 maximum, the file's length as record size)
 or `VAR` (= `/CONVERT`); it cannot be combined with `/ATTRIBUTES`. Some files must have a
 particular RMS record format - OpenVMS PCSI kit files, for one, are
 sequential files of fixed 8192-byte records, and `PRODUCT` won't treat
@@ -239,9 +240,87 @@ A structure level 5 volume mounts like an ODS-2 one; `SHOW VOLUME` reports
 `ODS-5, version 1` and the volume characteristics (`NOHIGHWATER`,
 `ACCESS_DATES`, `HARDLINKS`, ...). An image that cannot be written
 (`chmod 444`) is mounted read-only and every command that would write
-is refused. Other levels (3, 4, 6) are refused. The on-disk differences
-are written up, with sources, in `ODS5_FORMAT_NOTES.md` of the ods5-cli
-project.
+is refused. Other levels (3, 4, 6) are refused. ODS-5 reading and writing
+were checked against volumes made by OpenVMS itself (see "Tested on" below).
+
+**A short tour.** Real output; the image is made here, then used. (`ods2 IMAGE "COMMAND"` runs one
+command; `ods2 IMAGE` alone is the interactive prompt.)
+
+```
+$ ods2_init demo.img 16M --structure=5 --label=DEMO --hardlinks
+%ODS2-I-INITIALIZED, demo.img: 32768 blocks, ODS-5, label DEMO
+$ ods2 demo.img "CREATE/DIRECTORY [Docs]"
+%ODS2-I-CREATED, created [Docs]
+$ ods2 demo.img "COPY hello.txt [Docs]Hello^_World.TXT"
+%ODS2-I-COPIED, 29 bytes to Hello^_World.TXT;1
+$ ods2 demo.img "CREATE/DIRECTORY [Docs.Tree]"
+%ODS2-I-CREATED, created [Docs.Tree]
+$ ods2 demo.img "IMPORT tree [Docs.Tree]"
+%ODS2-I-IMPORTED, 4 files (1524 bytes), 1 directory, 1 symbolic link imported from tree; 0 skipped, 0 errors
+$ ods2 demo.img "DIR [Docs.Tree]"
+
+Directory [Docs.Tree]
+
+español.txt         ;1
+README.             ;1
+readme.lnk          ;1
+sub.DIR             ;1
+two^_words.txt      ;1
+
+Total of 5 files.
+$ ods2 demo.img "DIR/UTF8 [Docs.Tree]*.TXT"
+
+Directory [Docs.Tree]
+
+español.txt         ;1
+two words.txt       ;1
+
+Total of 2 files.
+$ ods2 demo.img "TYPE [Docs]Hello^_World.TXT"
+Hello from Linux
+second line
+$ ods2 demo.img "LINK [Docs]Second^_Name.TXT [Docs]Hello^_World.TXT"
+%ODS2-I-LINKED, Second^_Name.TXT;1 is a link to file (12,1,0)
+$ ods2 demo.img "SYMLINK [Docs]latest.lnk Hello^_World.TXT"
+%ODS2-I-SYMLINK, latest.lnk;1 -> Hello^_World.TXT
+```
+
+`^_` writes a space in a name (a command line is split at white space); `DIR` shows names with the same
+escapes, `DIR/UTF8` as UTF-8. The hard link (this volume has `HARDLINKS`; without it `LINK` makes an alias) and
+the record format `COPY` and `IMPORT` chose for each file (text: Stream_LF; the random binary: fixed
+512-byte records); then the whole tree out again:
+
+```
+$ ods2 demo.img "DIR/FULL [Docs]Second^_Name.TXT"
+Directory [Docs]
+Second^_Name.TXT;1
+  File ID:            (12,1,0)
+  Primary link name:  Hello^_World.TXT;1
+  Size:               1/1 blocks, 29 bytes
+  Protection:         (S:RWED, O:RWED, G:RE, W:)
+  Created:            09-NOV-2026 02:13:09.00
+  Revised:            09-NOV-2026 02:13:09.00 (1)
+  Link count:         2
+  File organization:  Sequential
+  Record format:      Stream_LF, maximum 0 bytes, longest 16 bytes
+  Record attributes:  Carriage return carriage control
+Total of 1 file.
+$ ods2 demo.img "DIR/FULL [Docs.Tree.SUB]data.bin"
+Directory [Docs.Tree.sub]
+data.bin;1
+  File ID:            (18,1,0)
+  Size:               3/3 blocks, 1500 bytes
+  Protection:         (S:RWED, O:RWED, G:RE, W:)
+  Created:            09-NOV-2026 02:13:09.00
+  Revised:            09-NOV-2026 02:13:09.00 (1)
+  Link count:         1
+  File organization:  Sequential
+  Record format:      Fixed length 512 byte records
+  Record attributes:  None
+Total of 1 file.
+$ ods2 demo.img "EXPORT/VERSIONS [Docs...]*.* out"
+%ODS2-I-EXPORTED, 6 files, 2 symbolic links copied to out
+```
 
 **Writing.** `CREATE/DIRECTORY`, `COPY`, `DELETE`, `SET VOLUME/LABEL`
 work as on ODS-2, but a name keeps its case and may hold any character VMS
@@ -252,7 +331,7 @@ character is up to U+00FF, else UCS-2). The new files carry level 5
 headers (FI5 ident area, link count, access and attribute dates) built as
 VMS V8.4 builds them, and are entered in the directory in VMS's order.
 A name equal to an existing one but for case is refused (it would be a new
-version, which ods2v2 does not make). Also:
+version, which ods2v2 does not make; it creates version 1 only). Also:
 
 * `IMPORT <linux-dir> <path>` copies a Linux tree (directories made,
   `%2F` in a name is a `/`, Linux symbolic links become VMS ones).
@@ -311,6 +390,58 @@ file with several names) a Linux hard link instead of a second copy. A
 symbolic link (an ODS-5 special file) becomes a Linux symbolic link;
 other special files are skipped with a warning; directory files are not
 copied. A `"quoted"` argument keeps white space: `EXPORT [A]*.* "/my files"`.
+
+**Versions.** An ODS-5 (and ODS-2) directory may hold many versions of a name: `DIR` lists them all (`;*` or no
+version), `TYPE NAME;2`, `EXPORT/VERSIONS` (every version, `NAME;N` on the Linux side) and `DELETE NAME;N` work on
+the one you name, and `;0` / no version / `;-1` mean the highest / the next lower one, as in VMS. ods2v2 itself makes
+version 1 of a new name only.
+
+**Linux names (IMPORT and EXPORT).** A Linux name becomes an ODS-5 name as it is (UTF-8; ISO Latin-1 when every
+character is up to U+00FF, else UCS-2); characters VMS refuses are rejected. Where the two worlds disagree a `%XX`
+escape (two hex digits) stands for the byte: `%2F` is a `/` in a VMS name, and a control character in a name is
+written `%XX` on the way out so that it cannot reach your terminal or steer a path. A name that VMS stores with a
+trailing dot and no type (`README.`) is `README` on Linux and back. The directory tree, symbolic links, hard links
+(`EXPORT/LINKS`) and empty directories survive the round trip.
+
+**Access control lists.** `DIR/FULL` prints a file's ACL as VMS's `DIRECTORY/FULL` does:
+
+```
+$ ods2 vms-made.img "DIR/FULL [CORPUS.ACL]ACL1.TXT"
+  ...
+  Access Cntrl List:  (IDENTIFIER=NETWORK,ACCESS=NONE)
+                      (IDENTIFIER=[1,2],ACCESS=READ)
+                      (IDENTIFIER=[200,1],ACCESS=READ+WRITE+EXECUTE+DELETE)
+```
+
+Identifier, CREATOR, DEFAULT_PROTECTION, AUDIT and ALARM ACEs (also those continued in extension headers) are
+shown, with the options DEFAULT, PROTECTED and NOPROPAGATE. Identifiers are numbers, `[group,member]` in octal:
+ods2v2 has no rights database, so `[USERS,USER1]` of VMS's listing is `[200,1]` here. An ACE of another kind (and
+HIDDEN) is shown as its bytes: `(ACE type N, flags %Xnnnn, data ..)`. ACLs are read, never written.
+
+**Records.** `TYPE` shows a sequential file the way VMS `TYPE` does (see "Record formats" above); a file with
+records, for example:
+
+```
+$ ods2 vms-made.img "DIR/FULL [CORPUS.RMS]SEQ_VFC.DAT"
+  ...
+  Record format:      VFC, 2 byte header, maximum 80 bytes, longest 61 bytes
+  Record attributes:  Print file carriage control
+```
+
+`TYPE/RAW` and `EXPORT` give the stored bytes, `EXPORT/RECORDS` the text, `TYPE/LINES` one line per record.
+
+**Limits.** No volume sets, no ODS levels 3, 4 or 6 (refused), no quota or journaling, no UCS-2 beyond the Basic
+Multilingual Plane in names, file numbers up to 65,535 (FID_NMX is not used). Rights identifiers are numbers (above);
+HIDDEN and SUBSYSTEM ACEs, and the combinations of print or FORTRAN carriage control with the stream record formats,
+have not been compared with VMS (the stream formats are always shown as lines). A directory whose end-of-file is
+wrong (as old ods2v2 versions left them on ODS-2) is put right by the next write to it; other directory damage is not repaired.
+
+**Tested on.** Volumes written by ods2v2 (ODS-2 and ODS-5, also volumes it made with `ods2_init`) mount and pass
+`ANALYZE/DISK_STRUCTURE/READ_CHECK` on OpenVMS Alpha V8.4-2L2 and OpenVMS Alpha V7.3-2, and VMS wrote into them there
+(files, directories, aliases, deletes) with a clean ANALYZE afterwards; on OpenVMS VAX V7.3 the ODS-2 volumes mount, read
+and take VMS writes and the ODS-5 ones mount and read (names with characters outside ASCII appear there, and on V7.3-2,
+as `\pISO_LATIN\.???` placeholders). Reading VMS-made volumes matches `DIRECTORY/FULL` and the file checksums of the test
+volumes of those three systems. Physical VAX and Alpha machines (through the LD driver) are still to be tested.
 
 ### File dates and time zones
 
