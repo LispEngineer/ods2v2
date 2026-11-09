@@ -95,8 +95,11 @@ const char *ods5_rfind_unescaped(const char *s, char ch);
 
 /* Comparison --- */
 
-/* Case folding for lookups: A-Z and a-z are the same letter. (Whether VMS
-   folds ISO Latin-1 letters is still to be measured; they are not folded.) */
+/* Case folding for lookups: the upper-case form of a character of the Basic
+   Multilingual Plane (simple Unicode mapping). VMS treats the ISO Latin-1 and
+   UCS-2 letters of a name case-blind in the same way, and orders directories
+   by the folded code points (measured, ODS5_FORMAT_NOTES.md 4.1). Which
+   exotic characters (dotless i, long s, micro sign) VMS folds is not measured. */
 uint32_t ods5_fold(uint32_t cp);
 
 /* Wildcard match of a pattern written as a spelling against a literal

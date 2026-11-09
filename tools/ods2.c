@@ -373,6 +373,13 @@ static void spelling_to_slash_path(const char *spelling, char *out, size_t cap)
         }
         ul = ods5_unescape(p, (size_t) (end - p), literal, sizeof(literal));
         if (ul == (size_t) -1) snprintf(literal, sizeof(literal), "%.*s", (int) (end - p), p);
+        {   /* a '/' inside a name: %2F, as EXPORT does */
+            char *sl;
+            while ((sl = strchr(literal, '/')) != NULL) {
+                memmove(sl + 3, sl + 1, strlen(sl + 1) + 1);
+                memcpy(sl, "%2F", 3);
+            }
+        }
         len += (size_t) snprintf(out + len, cap - len, "/%s", literal);
         if (len >= cap) { out[cap - 1] = '\0'; return; }
         p = end;
@@ -447,7 +454,10 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
     printf("  Protection:         (S:%s, O:%s, G:%s, W:%s)\n", s_, o_, g_, w_);
     ods5_format_vms_time(id.credate, t, sizeof(t));
     printf("  Created:            %s\n", t);
-    ods5_format_vms_time(id.revdate, t, sizeof(t));
+    /* ODS-5: the header's revision date is the data modification date; what VMS
+       shows as "Modified" is the later of it and the attribute-change date */
+    ods5_format_vms_time(id.has_ods5_dates && id.attdate > id.revdate ? id.attdate : id.revdate,
+                         t, sizeof(t));
     printf("  Revised:            %s (%u)\n", t, (unsigned) id.revision);
     ods5_format_vms_time(id.expdate, t, sizeof(t));
     printf("  Expires:            %s\n", t);
@@ -458,6 +468,8 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
         printf("  Accessed:           %s\n", t);
         ods5_format_vms_time(id.attdate, t, sizeof(t));
         printf("  Attributes changed: %s\n", t);
+        ods5_format_vms_time(id.revdate, t, sizeof(t));
+        printf("  Data modified:      %s\n", t);
         if (vol->home.volchar & ODS5_VC_HARDLINKS) {
             printf("  Link count:         %u\n", ods5_link_count(header));
         }
@@ -522,7 +534,15 @@ static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_d
             if (g_paths_mode) {
                 char slash[ODS2_PATH_MAX];
                 spelling_to_slash_path(dir_path, slash, sizeof(slash));
-                printf("%s/%s;%u", slash, entries[i].name, entries[i].version);
+                {
+                    /* a '/' inside a name would read as a separator: %2F, as EXPORT does */
+                    const char *c;
+                    printf("%s/", slash);
+                    for (c = entries[i].name; *c; c++) {
+                        if (*c == '/') fputs("%2F", stdout); else putchar(*c);
+                    }
+                    printf(";%u", entries[i].version);
+                }
                 if (g_paths_fid) {
                     printf("\t%u,%u,%u", (unsigned) entries[i].fid.fid_num,
                            (unsigned) entries[i].fid.fid_seq, (unsigned) entries[i].fid.fid_rvn);

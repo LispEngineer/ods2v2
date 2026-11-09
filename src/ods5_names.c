@@ -160,7 +160,7 @@ bool ods5_utf8_to_stored(const char *in, uint8_t *out, size_t cap,
    handled apart: only the ones that are not the type delimiter. */
 static bool needs_caret(uint32_t cp)
 {
-    return cp != 0 && strchr("!#&'`(){}+@,;[]%^=", (int) cp) != NULL;
+    return cp != 0 && strchr("!#&'`(){}+@,;[]%^=:<>\\|/\"*?", (int) cp) != NULL;
 }
 
 size_t ods5_escape_name(const char *utf8, unsigned flags, char *out, size_t cap)
@@ -295,9 +295,24 @@ const char *ods5_rfind_unescaped(const char *s, char ch)
 
 /* --- Comparison --- */
 
+#include "ods5_fold_table.h"
+
 uint32_t ods5_fold(uint32_t cp)
 {
-    return (cp >= 'a' && cp <= 'z') ? cp - 32 : cp;
+    size_t lo = 0, hi = sizeof(ods5_fold_ranges) / sizeof(ods5_fold_ranges[0]);
+
+    if (cp < 0x80) return (cp >= 'a' && cp <= 'z') ? cp - 32 : cp;
+    if (cp > 0xFFFF) return cp;
+    while (lo < hi) {                      /* binary search of the range table */
+        size_t mid = (lo + hi) / 2;
+        if (cp < ods5_fold_ranges[mid].lo) hi = mid;
+        else if (cp > ods5_fold_ranges[mid].hi) lo = mid + 1;
+        else {
+            if ((cp - ods5_fold_ranges[mid].lo) % ods5_fold_ranges[mid].stride != 0) return cp;
+            return (uint32_t) ((int32_t) cp + ods5_fold_ranges[mid].delta);
+        }
+    }
+    return cp;
 }
 
 typedef enum { TOK_END, TOK_STAR, TOK_ONE, TOK_CHAR, TOK_BAD } tok_kind_t;

@@ -246,7 +246,9 @@ switches back. The same escapes are accepted in every specification you
 type: `DIR [Lots^.Of^.Periods]two^_words*`, `DIR caf^E9.txt`; a typed
 UTF-8 character is itself. A command line is split at white space, so a
 space in a name is written `^_`. Lookups and wildcards (`*`, `%`, `?`)
-are case blind and work on whole characters, not bytes; directory names
+are case blind and work on whole characters, not bytes (the letters of
+ISO Latin-1 and UCS-2 fold like VMS folds them, e.g. `É` finds `é`, `^U03B1`
+finds Greek capital Alpha); directory names
 are shown in their stored case. Directories nest to 255 levels.
 `DIR/FULL` shows, per file, what the file header says: id, size, owner,
 protection, the dates (also the access and attribute-change dates of

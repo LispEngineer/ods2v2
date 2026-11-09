@@ -199,6 +199,32 @@ int main(void)
     assert(!ods2_wildcard_match("bad^Q", "badQ"));
     printf("PASS: wildcard patterns with escapes match names character by character, case-blind\n");
 
+    /* --- case folding beyond ASCII: what VMS does (measured on a VMS-made volume: the
+       records for ae/AE, Alpha/alpha, Zhe/zhe are one name with two versions, and the
+       directory is ordered by the folded code points: a-diaeresis, e-acute, n-tilde,
+       u-diaeresis, sharp s, A-macron, y-diaeresis (folds to U+0178), Alpha, Zhe, euro, CJK) --- */
+    assert(ods5_fold('a') == 'A' && ods5_fold('Z') == 'Z' && ods5_fold('0') == '0');
+    assert(ods5_fold(0xE4) == 0xC4 && ods5_fold(0xE9) == 0xC9 && ods5_fold(0xF1) == 0xD1 && ods5_fold(0xFC) == 0xDC);
+    assert(ods5_fold(0xF7) == 0xF7 && ods5_fold(0xDF) == 0xDF);          /* division sign, sharp s: no upper case */
+    assert(ods5_fold(0xFF) == 0x178 && ods5_fold(0x101) == 0x100);
+    assert(ods5_fold(0x3B1) == 0x391 && ods5_fold(0x436) == 0x416 && ods5_fold(0x20AC) == 0x20AC);
+    assert(ods5_fold(0x65E5) == 0x65E5 && ods5_fold(0x100) == 0x100);
+    {
+        static const uint32_t order[] = { 0x7E, 0xA0, 0xE4, 0xE9, 0xF1, 0xFC, 0xDF, 0x100, 0xFF, 0x391, 0x416, 0x20AC, 0x65E5 };
+        size_t i;
+        for (i = 1; i < sizeof(order) / sizeof(order[0]); i++) assert(ods5_fold(order[i - 1]) < ods5_fold(order[i]));
+    }
+    assert(ods2_wildcard_match("CAF\xC3\x89.TXT", "caf\xC3\xA9.txt"));          /* E-acute finds e-acute */
+    assert(ods2_wildcard_match("caf^E9.txt", "CAF\xC3\x89.TXT"));
+    assert(ods2_wildcard_match("^U03B1*", "\xCE\x91.TXT"));                    /* small alpha finds capital Alpha */
+    assert(ods2_wildcard_match("\xD0\x96.TXT", "\xD0\xB6.txt"));             /* Zhe, both cases */
+    assert(!ods2_wildcard_match("\xC3\x9F.TXT", "SS.TXT"));                    /* sharp s is not SS */
+    printf("PASS: case folding covers ISO Latin-1 and UCS-2 letters, in the order VMS keeps directories\n");
+
+    esc("sp:c.txt", ODS5_ESC_KEEP_LAST_DOT, "sp^:c.txt");
+    esc("a<b>c\\d|e/f.x", ODS5_ESC_KEEP_LAST_DOT, "a^<b^>c^\\d^|e^/f.x");
+    printf("PASS: the characters DCL escapes although a name may hold them (: < > \\ | /)\n");
+
     printf("\nods5_names_selftest: all checks passed\n");
     return 0;
 }

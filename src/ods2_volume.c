@@ -660,7 +660,16 @@ size_t ods2_file_content_length(const uint8_t *header)
        VMS files ending on a block boundary, and failed outright on a
        file with no allocation at all such as BADBLK.SYS. */
     if (efblk == 0) {
-        return 0; /* never written; no EOF mark at all */
+        /* An indexed file (FAT$V_FILEORG 2) keeps no end-of-file mark in its
+           header: RMS knows where its buckets end, the file system only
+           the allocation (measured on files made by VMS V8.4: EFBLK 0,
+           DIRECTORY/FULL shows used = allocated). Its content as a byte
+           stream is all of its blocks. Any other file with no mark was never
+           written. */
+        if ((core->recattr.rtype >> 4) == 2) {
+            return (size_t) ods2_word_swap32(core->recattr.hiblk) * 512u;
+        }
+        return 0;
     }
     if (ffbyte > 512) {
         ffbyte = 512; /* out of range - never claim more than a block */
