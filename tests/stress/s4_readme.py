@@ -68,6 +68,9 @@ Manifests (made from the harness's MODEL, not from ods2v2's output): `NAME.MANIF
 
 Suggested run on VMS (per image): MOUNT it (read-only is enough; V8.4: `MOUNT/NOWRITE`); `ANALYZE/DISK_STRUCTURE/READ_CHECK/NOREPAIR/LIST`; `DIRECTORY/FULL [000000...]*.*;*`; CHECKSUM of every file of the manifest and compare; TYPE a few; DISMOUNT.
 Expected from ods2v2's side: s4-full and s4-full2 have 0 free blocks, s4-exthdr and s4-exthdr2 1 free block; ANALYZE should report no errors on any image. Anything ANALYZE says is of interest, warnings too.
+Version-limit check (added after the real VAX96 found ods2v2 writing version limit 1 instead of VMS's 32767, so that VMS purged ;1 when ;2 was made): on a WRITABLE mount of a COPY of the image, `COPY` (DCL) some small file onto the name of an
+ods2v2-made file of the manifest (so VMS creates the next version, e.g. `COPY SYS$LOGIN:LOGIN.COM DKA0:[D]F.TXT`), then `DIRECTORY DKA0:[D]F.TXT;*`: **both ;1 (the old one, unchanged) and the new ;2 must be listed**. Do the same for a directory-listed alias or symlink name and for
+one file in each of the three kinds of directory (the root [000000], a subdirectory, a big one). Also `DIRECTORY/FULL` on an ods2v2-made file and on a VMS-made one next to it: nothing may differ but dates, ids and sizes.
 The images are what ods2v2 leaves after normal, completed commands; interrupted-write and damaged-image behaviour is not in them.
 """ % (time.strftime('%Y-%m-%d %H:%M'), rev, '\n'.join(rows))
 for name, body in (('README.md', txt), ('SHA256SUMS.TXT', '\n'.join(sums) + '\n')):

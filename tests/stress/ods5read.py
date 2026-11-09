@@ -77,6 +77,8 @@ def read_volume(path, want_md5=True):
     out.volchar = v.volchar
     out.dirs, out.files, out.info = {}, {}, {}
     out.dir_aliases = []
+    out.dirlimit = {}      # directory path -> DIR$W_VERLIMIT of its own entry in the parent
+    out.verlimit = {}      # (dir path, name, version) -> DIR$W_VERLIMIT of the directory record
     out.free_clusters = None
     out.indexf_blocks = 0
     out.ext_files = 0
@@ -220,7 +222,7 @@ def read_volume(path, want_md5=True):
                 if (flags & 7) == 0:
                     while ent + 8 <= pos + size + 2:
                         fid = u16(blk, ent + 2) | (blk[ent + 7] << 16)
-                        lst.append((nm, u16(blk, ent), fid, bool(flags & 0x40)))
+                        lst.append((nm, u16(blk, ent), fid, bool(flags & 0x40), u16(blk, pos + 2)))
                         ent += 8
                 pos += size + 2
         entries[n] = lst
@@ -239,7 +241,7 @@ def read_volume(path, want_md5=True):
             out.problems.append('directory walk too long')
             break
         seen_names = set()
-        for nm, ver, fid, special in entries.get(dfid, []):
+        for nm, ver, fid, special, vlim in entries.get(dfid, []):
             if (nm.upper(), ver) in seen_names:
                 out.problems.append('dir %r: name %r;%d listed twice' % (dpath, nm, ver))
             seen_names.add((nm.upper(), ver))
@@ -250,7 +252,9 @@ def read_volume(path, want_md5=True):
             if fi.directory and nm.upper().endswith('.DIR') and ver == 1:
                 if fid == 4 and dfid == 4 and nm.upper() == '000000.DIR':
                     continue   # the root's own entry
+                out.verlimit[(dpath, nm, ver)] = vlim
                 sub = dpath + (nm[:-4],)
+                out.dirlimit[sub] = vlim
                 if fid in anc:
                     out.problems.append('directory loop at %r' % (sub,))
                     continue
@@ -262,6 +266,7 @@ def read_volume(path, want_md5=True):
             if (dpath, nm, ver) in out.files:
                 out.problems.append('duplicate directory entry %r' % ((dpath, nm, ver),))
             out.files[(dpath, nm, ver)] = fid
+            out.verlimit[(dpath, nm, ver)] = vlim
     for fid, fi in out.info.items():
         if fi.directory or fid in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
             continue

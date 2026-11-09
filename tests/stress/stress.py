@@ -44,6 +44,11 @@ VMS_BASELINES = ['asim12-ods5t-20261108', 'asim12-ods2t-20261108', 'asim6-ods5t6
                  'm2b-after-asim12', 'phvs2-ods2v-20261108', 'w1c-f5-after-asim6', 'w1-ods5t6-after-asim6']
 
 
+# What VMS writes in DIR$W_VERLIMIT of every file and directory it creates: 32767 (no limit). Measured on the pure VMS-made images
+# (asim12/asim6 ODS2T/ODS5T, asim8, phvs2: 4,300 entries, all 32767; the 9 reserved files 1), tests/stress/verlimit_corpus.py
+VMS_VERLIMIT = 32767
+
+
 class EscRng:
     def choice(self, seq):
         return seq[0]
@@ -323,6 +328,8 @@ class Model:
         self.ents = {}                # (folded dir path, key, ver) -> (display, Obj)
         self.frozen = []              # display path prefixes the harness must not touch
         self.secondary = set()        # entry keys that are non-primary aliases made by us
+        self.vlim = {}                # entry key -> DIR$W_VERLIMIT the directory record must carry (VMS writes 32767)
+        self.dlim = {}                # folded directory path -> version limit of the directory's own entry
 
     # lookups
     def fkpath(self, path):
@@ -378,10 +385,12 @@ class Model:
 
     def add_file(self, path, display, obj):
         self.ents[(self.fkpath(path), key_of(display), 1)] = (display, obj)
+        self.vlim[(self.fkpath(path), key_of(display), 1)] = VMS_VERLIMIT
 
     def add_dir(self, path, name):
         full = tuple(path) + (name,)
         self.dirs[self.fkpath(full)] = full
+        self.dlim[self.fkpath(full)] = VMS_VERLIMIT
 
     def remove_dir(self, path):
         del self.dirs[self.fkpath(path)]
@@ -414,6 +423,10 @@ def model_from_volume(vol, ods5, hardlinks, skip_dangling=False):
             else:
                 fobj[fid] = Obj('file', md5=fi.md5, size=fi.size, volatile=fi.volatile)
         m.ents[(m.fkpath(dpath), key_of(nm), ver)] = (nm, fobj[fid])
+        m.vlim[(m.fkpath(dpath), key_of(nm), ver)] = vol.verlimit.get((dpath, nm, ver))
+    for dp, vl in vol.dirlimit.items():
+        if m.fkpath(dp) in m.dirs:
+            m.dlim[m.fkpath(dp)] = vl
     for dp in vol.dir_aliases:
         m.frozen.append(dp)
     # a directory that is the target of an alias is reachable by 2 paths: freeze both
@@ -622,6 +635,14 @@ class Harness:
             self.fail('%s: model has %r, the volume does not' % (tag, k))
         for k in sorted(set(got) - set(want), key=repr):
             self.fail('%s: the volume has %r, the model does not' % (tag, k))
+        for (fp, key, ver), (display, obj) in self.model.ents.items():
+            exp = self.model.vlim.get((fp, key, ver))
+            got_vl = vol.verlimit.get((self.model.dirs[fp], display, ver))
+            if exp is not None and got_vl != exp:
+                self.fail('%s: version limit of %r: the directory record says %s, VMS would write %s' % (tag, (self.model.dirs[fp], display, ver), got_vl, exp))
+        for fp, dpath in self.model.dirs.items():
+            if dpath and fp in self.model.dlim and self.model.dlim[fp] is not None and vol.dirlimit.get(dpath) != self.model.dlim[fp]:
+                self.fail('%s: version limit of directory %r: the directory record says %s, VMS would write %s' % (tag, dpath, vol.dirlimit.get(dpath), self.model.dlim[fp]))
         mdirs = set(self.model.dirs.values())
         vdirs = set(vol.dirs)
         if mdirs != vdirs:
