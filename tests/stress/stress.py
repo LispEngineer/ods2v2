@@ -1561,6 +1561,12 @@ class Harness:
             if self.opno % self.check_every == 0:
                 self.verify('after op %d' % self.opno, export=(self.opno % 3 == 0 or self.nops <= 40))
         self.verify('final')
+        self.final_digest = None
+        if os.environ.get('STRESS_DIGEST'):
+            v = ods5read.read_volume(self.img)
+            blob = repr((sorted((k, (v.info[f].size, v.info[f].md5, v.info[f].special) if f else None) for k, f in v.files.items()),
+                         sorted(v.dirs), v.free_clusters, v.indexf_blocks))
+            self.final_digest = hashlib.md5(blob.encode()).hexdigest()
         return True
 
 
@@ -1590,7 +1596,7 @@ def run_seed(args):
     t0 = time.time()
     try:
         h.run()
-        res = ('PASS', '')
+        res = ('PASS', 'digest=%s' % h.final_digest if h.final_digest else '')
     except Failure as e:
         res = ('FAIL', str(e))
     except Exception:
@@ -1663,7 +1669,7 @@ def main():
 
 def report(it):
     for seed, profile, config, status, msg, dt, nops in it:
-        print('seed %d %s %s: %s (%d ops, %.0fs) load %s' % (seed, profile, config, status, nops, dt, round(os.getloadavg()[0], 1)), flush=True)
+        print('seed %d %s %s: %s (%d ops, %.0fs) load %s %s' % (seed, profile, config, status, nops, dt, round(os.getloadavg()[0], 1), msg if status == 'PASS' else ''), flush=True)
         if status != 'PASS':
             print('    ' + msg.replace('\n', '\n    ')[:2500], flush=True)
         yield seed, profile, config, status, msg, dt, nops
