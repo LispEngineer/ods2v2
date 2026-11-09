@@ -2590,6 +2590,7 @@ static void print_name(const char *what, const char *field)
 static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
 {
     const char *label = NULL;
+    unsigned geo_s = 0, geo_t = 0;
     int i;
 
     for (i = 1; i < n; i++) {
@@ -2603,9 +2604,22 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
                 value = ++q;
                 while (*q && *q != '/') q++;
             }
+            if (keyword(name, name_len, "GEOMETRY", 3)) {
+                /* /GEOMETRY=sectors,tracks: the geometry the SCB records (the device's own: VAX V7.3 compares) */
+                char *end1 = NULL, *end2 = NULL;
+                unsigned long a = value ? strtoul(value, &end1, 10) : 0, b = (end1 && *end1 == ',') ? strtoul(end1 + 1, &end2, 10) : 0;
+                if (value == NULL || value == q || end1 == NULL || *end1 != ',' || end2 == NULL || end2 != q ||
+                    a == 0 || b == 0 || a > 65535 || b > 65535) {
+                    report_error("%%ODS2-E-VALREQ, /GEOMETRY needs sectors,tracks, e.g. SET VOLUME/GEOMETRY=57,15\n");
+                    return;
+                }
+                geo_s = (unsigned) a;
+                geo_t = (unsigned) b;
+                continue;
+            }
             if (!keyword(name, name_len, "LABEL", 3)) {
                 report_error("%%ODS2-E-IVQUAL, unrecognized qualifier /%.*s - SET VOLUME "
-                             "takes /LABEL=name\n", (int) name_len, name);
+                             "takes /LABEL=name or /GEOMETRY=sectors,tracks\n", (int) name_len, name);
                 return;
             }
             if (value == NULL || value == q) {
@@ -2628,8 +2642,17 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
             return;
         }
     }
+    if (geo_s != 0) {
+        ods2_result_t gr = ods2_set_volume_geometry(vol, geo_s, geo_t);
+        if (!gr.ok) {
+            report_error("%%ODS2-E-GEOMERR, %s\n", gr.problem);
+            return;
+        }
+        printf("%%ODS2-I-GEOMETRY, the storage control block now records %u sectors x %u tracks\n", geo_s, geo_t);
+        if (label == NULL) return;
+    }
     if (label == NULL) {
-        report_error("%%ODS2-E-NOPARM, usage: SET VOLUME/LABEL=name\n");
+        report_error("%%ODS2-E-NOPARM, usage: SET VOLUME/LABEL=name or /GEOMETRY=sectors,tracks\n");
         return;
     }
     {
@@ -2950,6 +2973,8 @@ static void print_help(void)
            "  SET DEFAULT path           set the current default directory\n"
            "  SHOW DEFAULT               show the current default directory\n"
            "  SET VOLUME/LABEL=name      relabel the volume (all home block copies)\n"
+           "  SET VOLUME/GEOMETRY=sectors,tracks   record the disk geometry of the device the volume will be used on\n"
+           "                             (OpenVMS VAX V7.3 ANALYZE compares it with the device: CHKSCB)\n"
            "  SET FILE/VERSION_LIMIT=n spec   the version limit of the entries a spec names (wildcards, [dir...]);\n"
            "                             32767 or 0 = no limit, what VMS writes (volumes written by ods2v2 before\n"
            "                             the fix carry 1: VMS purges version 1 when it makes version 2)\n"

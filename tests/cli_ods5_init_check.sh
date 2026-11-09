@@ -224,6 +224,17 @@ case "$out" in *"W-SIMHFOOTER"*"inside the volume (8192 blocks)"*"last block of 
 check "footer inside the volume (the last block): warned, and the write is refused (exit 1)" "warned 1" "$msg $rc"
 check "... the image is unchanged" "$before" "$(md5sum < "$TMP/s2.img")"
 check "... it can still be read" 1 "$($ODS2 "$TMP/s2.img" 'DIR [000000]' 2>/dev/null | grep -c BITMAP.SYS)"
+# SET VOLUME/GEOMETRY: the geometry of the device the image is to be used on (OpenVMS VAX V7.3 compares it with the device's)
+$INIT "$TMP/gs.img" 1G --structure=2 --label=GEOSET >/dev/null 2>&1
+out=$($ODS2 "$TMP/gs.img" "SET VOLUME/GEOMETRY=57,15" 2>&1); rc=$?
+check "SET VOLUME/GEOMETRY=57,15: done" "ok 0" "$(echo "$out" | grep -q 'I-GEOMETRY.*57 sectors x 15 tracks' && echo ok) $rc"
+check "... the SCB has 57 x 15 x 2453, BLKSIZE 1, as VMS made on the RA82 (scb1 SCB_C)" "513 2097152 1 57 15 2453" "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/gs.img" show)"
+check "... ods5check is clean and the label is untouched" "0 error(s), 0 warning(s) GEOSET" \
+    "$(python3 -I tests/ods5check.py "$TMP/gs.img" 2>&1 | tail -1) $($ODS2 "$TMP/gs.img" 'SHOW VOLUME' 2>&1 | grep -o 'GEOSET' | head -1)"
+$ODS2 "$TMP/gs.img" "SET VOLUME/GEOMETRY=0,15" >/dev/null 2>&1; check "SET VOLUME/GEOMETRY=0,15 is refused (exit 1)" 1 $?
+$ODS2 "$TMP/gs.img" "SET VOLUME/GEOMETRY=38,38/LABEL=BOTH" >/dev/null 2>&1
+check "geometry and label together: both set" "513 2097152 1 38 38 1453 BOTH" "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/gs.img" show) $($ODS2 "$TMP/gs.img" 'SHOW VOLUME' 2>&1 | grep -o 'BOTH' | head -1)"
+
 # a block that only starts like a footer (the signature and the two bytes, but a wrong CRC) is not one: no message, a normal write mount
 cp "$TMP/s0.img" "$TMP/s4.img"; python3 -I "$TMP/foot.py" inside "$TMP/s4.img" 8192
 python3 -I - "$TMP/s4.img" <<'PY'
