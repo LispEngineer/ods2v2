@@ -279,6 +279,16 @@ ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *
     return ok();
 }
 
+ods2_result_t ods2_sync(ods2_volume_t *vol)
+{
+    if (vol->fp == NULL || !vol->writable) return ok();
+    if (fflush(vol->fp) != 0) return fail("could not flush the disk image");
+    if (getenv("ODS2_NOSYNC") == NULL && fdatasync(fileno(vol->fp)) != 0) {
+        return fail("could not write the disk image to the disk (fdatasync failed)");
+    }
+    return ok();
+}
+
 void ods2_dismount(ods2_volume_t *vol)
 {
 #ifdef ODS2_FAULT_INJECTION
@@ -287,12 +297,9 @@ void ods2_dismount(ods2_volume_t *vol)
     }
 #endif
     if (vol->fp != NULL) {
-        /* Everything written so far is on the disk before the command is reported done (the order of the
-           writes in between is the code's, kept against a killed process; a power cut needs the file system
-           to honour it). One fdatasync per mount, not one per block. ODS2_NOSYNC=1 skips it. */
-        if (vol->writable && fflush(vol->fp) == 0 && getenv("ODS2_NOSYNC") == NULL) {
-            (void) fdatasync(fileno(vol->fp));
-        }
+        /* a last, best-effort sync for a caller that did not call ods2_sync() and look at its result (ods2
+           does, before it reports a command done); see ods2_sync() */
+        (void) ods2_sync(vol);
         fclose(vol->fp);
         vol->fp = NULL;
     }
@@ -1211,6 +1218,8 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
    the end-of-file, leaving those files invisible to VMS. INDEXF.SYS's
    header is written before the bitmap, so an interruption leaves at
    worst a garbage block inside the end-of-file, which the spec allows. */
+static ods2_result_t header_ok_for_write(const uint8_t *h, unsigned file_number);
+
 static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_number_out,
                                           uint16_t *seq_out)
 {
@@ -1228,6 +1237,10 @@ static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_num
     r = ods2_find_free_file_number(vol, 1, MAX_FILE_NUMBER, &n, &seq);
     if (!r.ok) return r;
     r = ods2_read_header(vol, 1, indexf_header);
+    if (!r.ok) return r;
+    /* INDEXF.SYS's own header is rewritten with a fresh checksum (and its backup with it): it must be sound
+       first (review 7, R7-4) */
+    r = header_ok_for_write(indexf_header, 1);
     if (!r.ok) return r;
 
     vbn = header_vbn(vol, n);
@@ -1275,7 +1288,8 @@ give_back:
 }
 
 /* --- ods2_lookup_name(): streams the directory, no size limit --- */
-#define ODS2_NAME_NOT_FOUND "name not found in directory"
+static const char ods2_name_not_found[] = "name not found in directory"; /* compared by address */
+#define ODS2_NAME_NOT_FOUND ods2_name_not_found
 typedef struct {
     const char *name;
     ods2_fid_t fid;
@@ -1505,7 +1519,7 @@ static ods2_result_t name_available(ods2_volume_t *vol, const uint8_t *dir_heade
     ods2_fid_t existing;
     ods2_result_t r = ods2_lookup_name(vol, dir_header, name, &existing);
     if (r.ok) return fail(exists);
-    if (r.problem != NULL && strcmp(r.problem, ODS2_NAME_NOT_FOUND) == 0) return ok();
+    if (r.problem == ODS2_NAME_NOT_FOUND) return ok(); /* the lookup's own status, not its wording */
     return r;
 }
 
@@ -1911,6 +1925,10 @@ ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, con
         if (!ods2_make_file_name(name, link_name, sizeof(link_name), &why)) return fail(why);
     }
 
+    if (target.fid_rvn != 0 || target.fid_nmx != 0) {
+        return fail("the file to link to is named by a relative volume number or an extended file number, "
+                    "which ods2v2 does not follow");
+    }
     r = ods2_read_header(vol, target.fid_num, target_header);
     if (!r.ok) return r;
     if (core->fid.fid_num != target.fid_num || core->fid.fid_seq != target.fid_seq ||
@@ -2711,6 +2729,7 @@ bool ods2_header_is_file(const uint8_t *header, ods2_fid_t fid)
 {
     const ods2_head_core_t *core = (const ods2_head_core_t *) header;
     return core->fid.fid_num == fid.fid_num && core->fid.fid_seq == fid.fid_seq &&
+           core->fid.fid_nmx == fid.fid_nmx && core->fid.fid_rvn == fid.fid_rvn &&
            !(core->filechar & 0x8000u);
 }
 
@@ -2751,7 +2770,6 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
     ods2_extent_t extents[ODS2_MAX_EXTENTS];
     int extent_count;
     int i;
-    uint8_t original_header[512];
     uint8_t ext_headers[ODS2_MAX_HEADER_SEGMENTS][512];
     unsigned ext_numbers[ODS2_MAX_HEADER_SEGMENTS];
     int ext_count = 0;
@@ -2769,6 +2787,15 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
 
     r = ods2_lookup_name_version(vol, dir_header, name, version, &target_fid, &target_version);
     if (!r.ok) return r;
+
+    /* An entry's FID names a file by number, sequence, relative volume number and extended number; this
+       code finds a file by the number alone, in this volume. An entry with an RVN or an NMX (a volume set
+       member, a file number above 65535) would resolve to some other file's header (review 7, R7-2): refused.
+       No VMS-made directory in the corpus has one. */
+    if (target_fid.fid_rvn != 0 || target_fid.fid_nmx != 0) {
+        return fail("this directory entry names a file by a relative volume number or an extended file "
+                    "number, which ods2v2 does not follow: not changed");
+    }
 
     /* The volume's own files cannot be deleted, whichever directory lists them (review 6, finding 1):
        INDEXF.SYS, BITMAP.SYS, BADBLK.SYS, the master file directory, CORIMG.SYS, VOLSET.SYS, CONTIN.SYS,
@@ -2909,12 +2936,14 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
         }
     }
 
-    /* VMS's own order (review 6, finding 2), so that an interruption never leaves a listed file whose
-       clusters are free: (a) mark the header for delete, FID and checksum intact; (b) remove the
-       directory entry; (c) free the blocks; (d) release the extension headers; (e) write the final deleted
-       header and clear the file number's bit. After (a) the file reads as gone (ods2_header_is_file);
-       what an interruption leaves from then on is a leak that ANALYZE/DISK/REPAIR cleans up. */
-    memcpy(original_header, target_header, sizeof(original_header));
+    /* VMS's own order (review 6, finding 2; review 7, R7-1), so that an interruption never leaves a listed
+       file whose clusters are free, nor a header that still maps clusters another file may be given:
+       (a) mark the header for delete, FID and checksum intact; (b) remove the directory entry; (c) write the
+       extension headers and then the primary header in their final deleted form (FID zeroed, checksum 0);
+       (d) free the blocks; (e) clear the file numbers' bits. After (a) the file reads as gone
+       (ods2_header_is_file); an interruption after (a) leaves a marked header whose clusters are still
+       allocated, and after (c) only clusters that nothing owns (lost clusters, which ANALYZE/DISK/REPAIR
+       frees): in no state does a header that could be finished or recovered map free clusters. */
     target_core->filechar |= 0x8000u; /* FH2$M_MARKDEL, confirmed value */
     {
         uint16_t checksum = ods2_checksum(target_header, 255);
@@ -2924,20 +2953,14 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
     r = ods2_write_header(vol, target_fid.fid_num, target_header);
     if (!r.ok) return r;
 
+    /* If the entry cannot be removed the header stays marked: the entry is then dangling and the file reads
+       as gone, a leak; writing the old header back could make a half-removed entry's file live and unlisted
+       (review 7, R7-5). */
     r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
-    if (!r.ok) {
-        /* the entry is still there: give the file its header back (best effort) */
-        (void) ods2_write_header(vol, target_fid.fid_num, original_header);
-        return r;
-    }
-
-    for (i = 0; i < extent_count; i++) {
-        r = ods2_free_blocks(vol, extents[i].lbn, extents[i].block_count);
-        if (!r.ok) return r;
-    }
+    if (!r.ok) return r;
 
     /* Extension headers (spec 3.3): each has its own file number and header slot, released like the
-       primary below. Left alone they would stay allocated, owned by nothing. */
+       primary. Left alone they would stay allocated, owned by nothing. */
     for (i = 0; i < ext_count; i++) {
         ods2_head_core_t *ext_core = (ods2_head_core_t *) ext_headers[i];
 
@@ -2949,15 +2972,13 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
         ext_headers[i][511] = 0;
         r = ods2_write_header(vol, ext_numbers[i], ext_headers[i]);
         if (!r.ok) return r;
-        r = mark_index_bitmap(vol, ext_numbers[i], false);
-        if (!r.ok) return r;
     }
 
     /* The header itself, per spec 3.5.1's exact rules: FH2$V_MARKDEL set, FID_NUM/NMX/RVN zeroed - but
        FH2$W_FID_SEQ is explicitly NOT touched, since spec 5.1.7 requires it to survive so the next use
        of this slot gets seq+1, not a fresh seq of 1 (that rule is only for a slot that was never used at
        all - "garbage" - which this no longer is). Checksum is set to zero, not recomputed - also an
-       explicit spec rule, not an oversight. Then the file number is free in the index file's bitmap. */
+       explicit spec rule, not an oversight. */
     target_core->fid.fid_num = 0;
     target_core->fid.fid_nmx = 0;
     target_core->fid.fid_rvn = 0;
@@ -2965,6 +2986,17 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
     target_header[511] = 0;
     r = ods2_write_header(vol, target_fid.fid_num, target_header);
     if (!r.ok) return r;
+
+    for (i = 0; i < extent_count; i++) {
+        r = ods2_free_blocks(vol, extents[i].lbn, extents[i].block_count);
+        if (!r.ok) return r;
+    }
+
+    /* the file numbers are free in the index file's bitmap: the extension headers, the primary last */
+    for (i = 0; i < ext_count; i++) {
+        r = mark_index_bitmap(vol, ext_numbers[i], false);
+        if (!r.ok) return r;
+    }
     r = mark_index_bitmap(vol, target_fid.fid_num, false);
     if (!r.ok) return r;
 

@@ -27,7 +27,6 @@ ALLOWED = [
     r'is in no directory \(lost file\)',
     r'is deleted but its index bitmap bit is set',
     r'bitmap bit set but no valid header',
-    r'index bitmap bit \d+ set beyond the index file EOF',
     r'its back link directory \d+ has no entry for it',
     r'is not reachable from the root',
     r'which is marked for delete \(a half-done delete\)',   # DELETE's first write: the header is marked, the entry goes next
@@ -71,13 +70,9 @@ def tree(img, tag):
 def check(img):
     rc, text = run(CHECK + [img])
     errs = [l for l in text.splitlines() if l.startswith('ERROR')]
-    lost = set(re.findall(r'file (\d+) \(.*\) is in no directory \(lost file\)', text))
     bad, leaks = [], []
     for l in errs:
-        m = re.search(r'cluster \d+ \(LBN \d+\) is in use by file (\d+) but marked free', l)
-        if m and m.group(1) in lost:
-            leaks.append(l)       # an unlisted file's clusters are free: a leak (REPAIR files it), nothing visible changes
-        elif any(re.search(a, l) for a in ALLOWED):
+        if any(re.search(a, l) for a in ALLOWED):
             leaks.append(l)
         else:
             bad.append(l)

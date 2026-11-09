@@ -3199,6 +3199,14 @@ int main(int argc, char **argv)
         exit_code = g_command_failed ? 1 : 0;
     }
 
+    {
+        /* a write that did not reach the disk is a command that failed */
+        ods2_result_t synced = ods2_sync(&vol);
+        if (!synced.ok) {
+            report_error("%%ODS2-E-SYNCERR, %s: %s\n", argv[1], synced.problem);
+            exit_code = 1;
+        }
+    }
     ods2_dismount(&vol);
     return exit_code;
 }
