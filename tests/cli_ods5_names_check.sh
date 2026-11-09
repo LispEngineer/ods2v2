@@ -49,7 +49,7 @@ def rec(flags, name, versions):                    # versions: [(version, fid)]
     pad = b'\0' if len(name) & 1 else b''
     body = struct.pack('<HBB', 0x7fff, flags, len(name)) + name + pad
     for v, fid in versions:
-        body += struct.pack('<HHHBB', v, fid, 4 if fid == 4 else 1, 0, 0)
+        body += struct.pack('<HHHBB', v, fid, fid if fid <= 10 else 1, 0, 0)   # sequence number: a reserved file's is its number
     return struct.pack('<H', len(body)) + body
 ISL1, UCS2 = 1 << 3, 3 << 3
 recs = [
@@ -132,7 +132,7 @@ Directory [Lots^.Of^.Periods]" "$("$ODS2" "$DISK" 'DIR [...]*.*' 2>/dev/null | g
 check "SET DEFAULT takes an escaped directory name" "%ODS2-I-DEFSET, default set to [Lots^.Of^.Periods]" \
     "$("$ODS2" "$DISK" 'SET DEFAULT [lots^.of^.periods]' 2>/dev/null)"
 
-check "DIR/FULL shows the file ID and the header's dates" "File ID:            (8,1,0)" \
+check "DIR/FULL shows the file ID and the header's dates" "File ID:            (8,8,0)" \
     "$("$ODS2" "$DISK" 'DIR/FULL [000000]BACKUP.SYS' 2>/dev/null | grep 'File ID' | sed 's/^ *//')"
 check "DIR/FULL needs no header name for a name that matches" 0 \
     "$("$ODS2" "$DISK" 'DIR/FULL [000000]BACKUP.SYS' 2>/dev/null | grep -c 'Primary link')"

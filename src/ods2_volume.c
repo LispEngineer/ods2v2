@@ -2495,6 +2495,13 @@ ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const ch
     return ods2_delete_version(vol, dir_file_number, name, ODS2_VERSION_HIGHEST, NULL);
 }
 
+bool ods2_header_is_file(const uint8_t *header, ods2_fid_t fid)
+{
+    const ods2_head_core_t *core = (const ods2_head_core_t *) header;
+    return core->fid.fid_num == fid.fid_num && core->fid.fid_seq == fid.fid_seq &&
+           !(core->filechar & 0x8000u);
+}
+
 ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
                                   const char *name, int version, uint16_t *version_out)
 {
@@ -2521,6 +2528,14 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
     r = ods2_read_header(vol, target_fid.fid_num, target_header);
     if (!r.ok) return r;
     target_core = (ods2_head_core_t *) target_header;
+    if (!ods2_header_is_file(target_header, target_fid)) {
+        /* a dangling entry (its file went with another name, the slot may be free or reused): take
+           the entry out and touch nothing else, as VMS does (batch m1) */
+        r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version);
+        if (!r.ok) return r;
+        if (version_out != NULL) *version_out = target_version;
+        return ok();
+    }
 
     if (vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS) &&
         (target_core->struclev >> 8) == ODS5_LEVEL_5 && target_core->seg_num == 0) {

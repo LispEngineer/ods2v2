@@ -439,6 +439,11 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
         printf("  (header not readable: %s)\n", r.problem);
         return;
     }
+    if (!ods2_header_is_file(header, e->fid)) {
+        printf("  no such file (the entry's file, ID (%u,%u,%u), no longer exists)\n",
+               (unsigned) e->fid.fid_num, (unsigned) e->fid.fid_seq, (unsigned) e->fid.fid_rvn);
+        return;
+    }
     printf("  File ID:            (%u,%u,%u)\n", (unsigned) e->fid.fid_num,
            (unsigned) e->fid.fid_seq, (unsigned) e->fid.fid_rvn);
     if (!ods5_read_ident(header, &id, &why)) {
@@ -496,10 +501,11 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
         printf("  Attributes changed: %s\n", t);
         ods5_format_vms_time(id.revdate, t, sizeof(t));
         printf("  Data modified:      %s\n", t);
-        if (vol->home.volchar & ODS5_VC_HARDLINKS) {
-            printf("  Link count:         %u\n", ods5_link_count(header));
-        }
     }
+    /* VMS prints "Linkcount" for every file on every volume: the header's count on a HARDLINKS volume,
+       1 elsewhere, aliases included (batch m1: header count 0, DIRECTORY/FULL says 1) */
+    printf("  Link count:         %u\n", (vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS))
+                                            ? ods5_link_count(header) : 1u);
     special = ods5_special_type(header);
     printf("  File organization:  %s\n", org_name(core->recattr.rtype >> 4));
     if (special == 0) {
@@ -1061,6 +1067,11 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
 
     if (!r.ok) {
         report_error("%%ODS2-E-READERR, %s: %s\n", shown, r.problem);
+        x->errors++;
+        return;
+    }
+    if (!ods2_header_is_file(header, e->fid)) {
+        report_error("%%ODS2-E-FNF, %s: no such file (a dangling entry: its file is gone)\n", shown);
         x->errors++;
         return;
     }
@@ -2364,6 +2375,10 @@ static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw, 
     r = ods2_read_header(vol, file_fid.fid_num, file_header);
     if (!r.ok) {
         report_error("%%ODS2-E-READERR, %s\n", r.problem);
+        return;
+    }
+    if (!ods2_header_is_file(file_header, file_fid)) {
+        report_error("%%ODS2-E-FNF, %s not found (a dangling entry: its file is gone)\n", spec);
         return;
     }
     /* Streamed a chunk at a time, so any size of file can be typed

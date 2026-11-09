@@ -107,7 +107,21 @@ for st in 2 5; do
     $ODS2 "$TMP/al.img" 'DELETE [000000]B.TXT;1' >/dev/null 2>&1
     check "structure $st: deleting the alias leaves the file" "alias test" "$($ODS2 "$TMP/al.img" 'TYPE [000000]A.TXT' 2>&1)"
     check "structure $st: the checker is satisfied" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/al.img" 2>&1 | tail -1)"
+    check "structure $st: DIR/FULL says link count 1 (as VMS does without HARDLINKS)" 1 "$($ODS2 "$TMP/al.img" 'DIR/FULL [000000]A.TXT' 2>&1 | sed -n 's/^  Link count: *//p')"
 done
+# an alias left behind when its file is deleted through the other name dangles (VMS keeps the entry, "no such file");
+# the file number may be reused, and the entry must not reach the new file (sequence number check)
+$INIT "$TMP/dg.img" 8M --structure=5 --label=DANG >/dev/null 2>&1
+$ODS2 "$TMP/dg.img" "COPY $TMP/al.txt [000000]A.TXT" >/dev/null 2>&1
+$ODS2 "$TMP/dg.img" 'LINK [000000]B.TXT [000000]A.TXT' >/dev/null 2>&1
+$ODS2 "$TMP/dg.img" 'DELETE [000000]A.TXT' >/dev/null 2>&1
+$ODS2 "$TMP/dg.img" "COPY $TMP/al.txt [000000]NEW.TXT" >/dev/null 2>&1
+check "a dangling alias: TYPE says not found (not the file that reused the slot)" "yes" \
+    "$($ODS2 "$TMP/dg.img" 'TYPE [000000]B.TXT' 2>&1 | grep -q 'dangling' && echo yes)"
+check "a dangling alias: DIR/FULL says no such file" "yes" "$($ODS2 "$TMP/dg.img" 'DIR/FULL [000000]B.TXT' 2>&1 | grep -q 'no such file' && echo yes)"
+$ODS2 "$TMP/dg.img" 'DELETE [000000]B.TXT' >/dev/null 2>&1
+check "deleting the dangling alias takes only its entry" "alias test" "$($ODS2 "$TMP/dg.img" 'TYPE [000000]NEW.TXT' 2>&1)"
+check "... and leaves a checker-clean volume" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/dg.img" 2>&1 | tail -1)"
 
 rm -rf "$TMP"
 [ "$fails" -eq 0 ] || { echo "$fails INITIALIZE check(s) failed"; exit 1; }

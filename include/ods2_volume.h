@@ -329,6 +329,12 @@ ods2_result_t ods2_create_symlink(ods2_volume_t *vol, const uint8_t *parent_head
 ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
                                ods2_fid_t target);
 
+/* True if `header` is the header of the file `fid` names: the same file number and sequence number, and
+ * not marked deleted. A directory entry whose file was deleted through another name (an alias entry
+ * on a volume without HARDLINKS; VMS keeps no count there) is dangling, and its slot may since have
+ * been reused by another file: VMS then says "no such file" (measured, ODS5_FORMAT_NOTES 15.7). */
+bool ods2_header_is_file(const uint8_t *header, ods2_fid_t fid);
+
 /* RMS record attributes for a new file (FH2$W_RECATTR, spec 3.5.2.9).
    Record formats (FAT$B_RTYPE, sequential organization): */
 #define ODS2_RFM_UDF   0 /* FAB$C_UDF: undefined - a stream of bytes */
