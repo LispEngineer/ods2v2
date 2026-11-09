@@ -121,6 +121,8 @@ check "TYPE finds a name with a space by ^_ in any case" "$(cat $TMP/f1.txt)" \
     "$($ODS2 $DISK 'TYPE [000000]mixed^_case.txt' 2>/dev/null)"
 check "TYPE finds a UCS-2 name by ^U" "newer version" "$($ODS2 $DISK 'TYPE [000000]euro^U20AC.TXT' 2>/dev/null)"
 check "TYPE finds an ISO Latin-1 name by ^xx" 1700 "$($ODS2 $DISK 'TYPE [000000]caf^E9.dat' 2>/dev/null | wc -c)"
+check "TYPE finds an ISO Latin-1 name with the other case of a non-ASCII letter (E acute for e acute)" 1700 \
+    "$($ODS2 $DISK 'TYPE [000000]CAF^C9.DAT' 2>/dev/null | wc -c)"
 check "TYPE takes the highest version" "newer version" "$($ODS2 $DISK 'TYPE [000000]multi.txt' 2>/dev/null)"
 check "TYPE ;1 takes the lower version" "hello one" "$($ODS2 $DISK 'TYPE [000000]multi.txt;1' 2>/dev/null | head -1)"
 check "TYPE through a directory with dots in its name" 1700 \

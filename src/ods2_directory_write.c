@@ -23,6 +23,7 @@
  */
 
 #include "ods2_directory_write.h"
+#include "ods5_names.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -36,12 +37,21 @@ static void write_word(uint8_t *p, uint16_t v)
     p[1] = (uint8_t) (v >> 8);
 }
 
-/* Character `i` of a name's canonical form: uppercased, and with a
-   trailing dot if it has none. Returns -1 past the end. */
-static int canonical_char(const char *s, size_t len, bool has_dot, size_t i)
+/* Next character of a name's canonical form: a whole UTF-8 character (names on an
+   ODS-5 volume are UTF-8, see ods5_names.h; ODS-2 names are ASCII), upper-cased by the
+   rules VMS applies (ods5_fold: ASCII, ISO Latin-1 and UCS-2 letters alike), and a
+   trailing dot if the name has none. Advances *pos; -1 past the end. */
+static long canonical_next(const char *s, size_t len, bool has_dot, size_t *pos)
 {
-    if (i < len) return toupper((unsigned char) s[i]);
-    if (i == len && !has_dot) return '.';
+    uint32_t cp;
+    if (*pos < len) {
+        *pos += ods5_utf8_decode(s + *pos, len - *pos, &cp);
+        return (long) ods5_fold(cp);
+    }
+    if (*pos == len && !has_dot) {
+        (*pos)++;
+        return '.';
+    }
     return -1;
 }
 
@@ -49,11 +59,11 @@ int ods2_dir_name_compare(const char *a, size_t a_len, const char *b, size_t b_l
 {
     bool a_dot = memchr(a, '.', a_len) != NULL;
     bool b_dot = memchr(b, '.', b_len) != NULL;
-    size_t i;
-    for (i = 0;; i++) {
-        int ca = canonical_char(a, a_len, a_dot, i);
-        int cb = canonical_char(b, b_len, b_dot, i);
-        if (ca != cb) return ca - cb; /* -1 (ended) sorts first */
+    size_t pa = 0, pb = 0;
+    for (;;) {
+        long ca = canonical_next(a, a_len, a_dot, &pa);
+        long cb = canonical_next(b, b_len, b_dot, &pb);
+        if (ca != cb) return ca < cb ? -1 : 1; /* -1 (ended) sorts first */
         if (ca == -1) return 0;
     }
 }
