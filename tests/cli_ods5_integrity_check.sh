@@ -418,6 +418,28 @@ PY
     check "ODS-$level: COPY with a damaged INDEXF.SYS header fails (exit 1) and says so; the image is unchanged" "1 damaged $before" "$rc $msg $(md5sum < "$img")"
 done
 
+# ---- a directory component whose entry has an RVN is not followed, to read or to write (review 8, R8-1):
+# the entry for D.DIR in the MFD, the patch above; [D] is directory number NUM of this volume, whatever its RVN says
+for level in 2 5; do
+    for which in rvn; do
+        img="$TMP/c$level$which.img"
+        $INIT "$img" 8192 --structure=$level --label=PATHFID >/dev/null 2>&1
+        printf 'x\n' > "$TMP/u.txt"
+        $ODS2 "$img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+        $ODS2 "$img" "COPY $TMP/u.txt [D]X.TXT" >/dev/null 2>&1
+        mkdir -p "$TMP/tree/sub"; printf 'y\n' > "$TMP/tree/sub/y.txt"
+        dnum=$($ODS2 "$img" 'DIR/FULL [000000]D.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+        python3 -I "$TMP/fidpatch.py" "$img" 4 "$dnum" $which
+        before=$(md5sum < "$img")
+        for cmd in "COPY $TMP/u.txt [D]Y.TXT" "CREATE/DIRECTORY [D.S]" "IMPORT $TMP/tree [D]" "DIR [D]" "TYPE [D]X.TXT" "DELETE [D]X.TXT"; do
+            out=$($ODS2 "$img" "$cmd" 2>&1); rc=$?
+            case "$out" in *"not supported"*) msg=refused ;; *) msg="$out" ;; esac
+            check "ODS-$level: $cmd, with an $which in D.DIR's entry: refused (exit 1)" "1 refused" "$rc $msg"
+        done
+        check "ODS-$level: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
+    done
+done
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"

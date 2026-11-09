@@ -98,6 +98,14 @@ void ods2_dismount(ods2_volume_t *vol);
    volume with a small number of files (well under what a full
    INDEXF.SYS extent list would cover) is normally everything that
    exists. Reads any header, primary or extension (seg_num > 0). */
+/* The FID of a directory entry or header link, as something this code can follow: RVN 0 (a volume set is
+   not supported), NMX 0 until 24-bit file numbers are. */
+ods2_result_t ods2_check_fid(ods2_fid_t fid);
+
+/* Reads the header the FID names; refuses a FID ods2_check_fid() refuses. Use this, not ods2_read_header()
+   with fid.fid_num, for every FID read from a directory entry. */
+ods2_result_t ods2_read_header_fid(ods2_volume_t *vol, ods2_fid_t fid, uint8_t *header_out);
+
 ods2_result_t ods2_read_header(ods2_volume_t *vol, unsigned file_number,
                                 uint8_t *header_out);
 

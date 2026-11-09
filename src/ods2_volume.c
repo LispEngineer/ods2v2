@@ -313,6 +313,28 @@ static bool header_lbn(ods2_volume_t *vol, unsigned file_number, uint32_t *lbn_o
     return vbn_to_lbn(vol->indexf_extents, vol->indexf_extent_count, target_vbn, lbn_out);
 }
 
+/* The header a directory entry's FID names. An entry names a file by number AND relative volume number AND
+   extended file number; finding the header by the low 16 bits alone read another file (review 8, R8-1).
+   A relative volume number other than 0 names a file on another volume of a set: not supported. */
+ods2_result_t ods2_check_fid(ods2_fid_t fid)
+{
+    if (fid.fid_rvn != 0) {
+        return fail("volume sets are not supported (a directory entry names a file on another volume "
+                    "of a set)");
+    }
+    if (fid.fid_nmx != 0) {
+        return fail("file numbers above 65535 are not supported yet");
+    }
+    return ok();
+}
+
+ods2_result_t ods2_read_header_fid(ods2_volume_t *vol, ods2_fid_t fid, uint8_t *header_out)
+{
+    ods2_result_t r = ods2_check_fid(fid);
+    if (!r.ok) return r;
+    return ods2_read_header(vol, fid.fid_num, header_out);
+}
+
 ods2_result_t ods2_read_header(ods2_volume_t *vol, unsigned file_number, uint8_t *header_out)
 {
     uint32_t lbn;
@@ -1445,7 +1467,7 @@ ods2_result_t ods2_lookup_path(ods2_volume_t *vol, const char *path, ods2_fid_t 
         ulen = ods5_unescape(spelling, len, component, sizeof(component) - 5);
         if (ulen == (size_t) -1) return fail("bad ^ escape in a directory name");
 
-        r = ods2_read_header(vol, current.fid_num, header);
+        r = ods2_read_header_fid(vol, current, header);
         if (!r.ok) return r;
 
         strcat(component, ".DIR");
@@ -1455,7 +1477,7 @@ ods2_result_t ods2_lookup_path(ods2_volume_t *vol, const char *path, ods2_fid_t 
             /* a file named X.DIR is not a directory: never walk into it (a writer would
                rewrite its data as directory blocks) */
             uint8_t next_header[512];
-            r = ods2_read_header(vol, current.fid_num, next_header);
+            r = ods2_read_header_fid(vol, current, next_header);
             if (!r.ok) return r;
             if (!(((const ods2_head_core_t *) next_header)->filechar & 0x2000u)) {
                 return fail("a directory name in the path is a file that is not a directory");

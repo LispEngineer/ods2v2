@@ -310,7 +310,7 @@ static ods2_result_t resolve_dir(ods2_volume_t *vol, const char *dir_path,
 {
     ods2_result_t r = ods2_lookup_path(vol, dir_path, dir_fid_out);
     if (!r.ok) return r;
-    return ods2_read_header(vol, dir_fid_out->fid_num, dir_header_out);
+    return ods2_read_header_fid(vol, *dir_fid_out, dir_header_out);
 }
 
 /* Splits a dot-separated dir_path into its parent path and its own
@@ -435,7 +435,7 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
     char shown[ODS2_PATH_MAX], t[64], s_[8], o_[8], g_[8], w_[8];
     uint32_t hiblk, efblk;
     unsigned special;
-    ods2_result_t r = ods2_read_header(vol, e->fid.fid_num, header);
+    ods2_result_t r = ods2_read_header_fid(vol, e->fid, header);
 
     display_name(e->name, shown, sizeof(shown));
     printf("\n%s;%u\n", shown, e->version);
@@ -662,7 +662,7 @@ static void canonical_dir_path(ods2_volume_t *vol, char *path, size_t cap)
         ulen = ods5_unescape(piece, plen, literal, sizeof(literal) - 5);
         if (ulen == (size_t) -1) return;
         snprintf(wanted, sizeof(wanted), "%s.DIR", literal);
-        if (!ods2_read_header(vol, fid.fid_num, header).ok ||
+        if (!ods2_read_header_fid(vol, fid, header).ok ||
             !ods2_list_directory_alloc(vol, header, &entries, &count).ok) {
             return;
         }
@@ -837,7 +837,7 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
         }
         /* Is it really a directory? Checked via its own header's
            FH2$M_DIRECTORY bit (0x2000), not just the .DIR suffix. */
-        r = ods2_read_header(w->vol, entries[i].fid.fid_num, sub_header);
+        r = ods2_read_header_fid(w->vol, entries[i].fid, sub_header);
         if (!r.ok || !(((ods2_head_core_t *) sub_header)->filechar & 0x2000u)) {
             continue;
         }
@@ -1070,7 +1070,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
     const ods2_head_core_t *core = (const ods2_head_core_t *) header;
     char dirpath[ODS2_PATH_MAX * 2], name[ODS2_DIR_MAX_NAME + 16], comp[ODS2_DIR_MAX_NAME * 3 + 16];
     char path[ODS2_PATH_MAX * 3];
-    ods2_result_t r = ods2_read_header(vol, e->fid.fid_num, header);
+    ods2_result_t r = ods2_read_header_fid(vol, e->fid, header);
     unsigned special;
     size_t i;
     char shown[ODS2_DIR_MAX_NAME * 3 + 8]; /* the name, safe to print: %XX for controls */
@@ -2224,7 +2224,13 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             if (ods2_lookup_name(st->vol, dir_header, dirname, &fid).ok) {
                 /* already there: put the files into it, if it is a directory */
                 uint8_t existing[512];
-                if (!ods2_read_header(st->vol, fid.fid_num, existing).ok ||
+                ods2_result_t fr = ods2_check_fid(fid);
+                if (!fr.ok) {
+                    report_error("%%ODS2-E-DIRERR, %s: %s\n", shown, fr.problem);
+                    st->errors++;
+                    continue;
+                }
+                if (!ods2_read_header_fid(st->vol, fid, existing).ok ||
                     !(((const ods2_head_core_t *) existing)->filechar & 0x2000u)) {
                     report_error("%%ODS2-E-NOTDIR, %s: a file of that name exists and is not a directory\n", shown);
                     st->errors++;
@@ -2540,7 +2546,7 @@ static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw, 
         report_error("%%ODS2-E-FNF, %s not found\n", spec);
         return;
     }
-    r = ods2_read_header(vol, file_fid.fid_num, file_header);
+    r = ods2_read_header_fid(vol, file_fid, file_header);
     if (!r.ok) {
         report_error("%%ODS2-E-READERR, %s\n", r.problem);
         return;
@@ -2846,7 +2852,7 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
             report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
             return true;
         }
-        r = ods2_read_header(vol, fid.fid_num, header);
+        r = ods2_read_header_fid(vol, fid, header);
         if (r.ok && !(((ods2_head_core_t *) header)->filechar & 0x2000u)) {
             report_error("%%ODS2-E-NOTDIR, %s is not a directory\n", tokens[2]);
             return true;
