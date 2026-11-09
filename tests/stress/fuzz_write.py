@@ -19,7 +19,7 @@ not understand" means here):
 usage: fuzz_write.py BASE_IMAGE ITERATIONS SEED WORKDIR [--bitmap]
 Failing images and commands are kept as WORKDIR/fail-N.{img,txt}.  Exit status 1 if any run failed.
 """
-import hashlib, os, random, shutil, struct, subprocess, sys, time
+import hashlib, os, random, re, shutil, struct, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
@@ -154,6 +154,14 @@ def main():
         if why and bitmap_damage and why.startswith(('DONE but another', 'REFUSED')):
             info += 1
             why = None
+        if why and why.startswith('DONE but another file changed'):
+            # a volume whose headers already map clusters the bitmap calls free, or map the same clusters twice, or whose
+            # directory entry names a stale file sequence, cannot be written safely by anything that trusts the bitmap
+            # (ANALYZE/DISK is the tool for it): counted, not failed, when the PRE image already shows that damage
+            pre_out = subprocess.run([sys.executable, '-I', stress.CHECKER, pre], capture_output=True, text=True, env=stress.ENV).stdout
+            if re.search(r'marked free|also owned by|sequence \d+, header has|has no valid header', pre_out):
+                info += 1
+                why = None
         if why:
             fails += 1
             shutil.copyfile(img, os.path.join(work, 'fail-%d.img' % fails))
