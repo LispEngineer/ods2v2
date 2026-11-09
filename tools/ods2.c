@@ -3149,6 +3149,15 @@ int main(int argc, char **argv)
     } else {
         if (r.ok) ods2_dismount(&vol);
         r = ods2_mount_write(argv[1], &vol);
+        if (!r.ok && strstr(r.problem, "locked") != NULL) {
+            /* another process has the image open (one writer or many readers): read it, refuse every write */
+            ods2_result_t r_read = ods2_mount(argv[1], &vol);
+            if (r_read.ok) {
+                fprintf(stderr, "%%ODS2-W-READONLY, %s: the image is locked by another process; mounted "
+                                "read-only\n", argv[1]);
+                r = r_read;
+            }
+        }
     }
     if (!r.ok) {
         fprintf(stderr, "%%ODS2-F-MOUNTERR, %s: %s\n", argv[1], r.problem);

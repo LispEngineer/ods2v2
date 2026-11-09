@@ -184,7 +184,7 @@ OPS = {
     'insert_split': ('COPY %(small)s [FULL]ZZSPLIT.TXT', ['FULL/ZZSPLIT.TXT;1'], False, False, 'split'),
     'insert_move': ('COPY %(small)s [FULL]ZZMOVE.TXT', ['FULL/ZZMOVE.TXT;1'], False, False, 'move'),
 }
-QUICK = ['delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'set_label']
+QUICK = ['delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label']
 
 
 def main():

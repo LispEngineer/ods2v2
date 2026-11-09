@@ -228,7 +228,7 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@echo "--- ods2_directory_selftest ---"
 	@$(BUILD)/ods2_directory_selftest
 	@echo "--- ods2_volume_selftest ---"
-	@$(BUILD)/ods2_volume_selftest
+	@ODS2_NOLOCK=1 $(BUILD)/ods2_volume_selftest   # it holds one read-only mount while it mounts the same image for write
 	@echo "--- ods2_wildcard_selftest ---"
 	@$(BUILD)/ods2_wildcard_selftest
 	@echo "--- ods2_read_file_selftest ---"

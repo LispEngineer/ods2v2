@@ -22,6 +22,9 @@
  * SOFTWARE.
  */
 
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE /* flock(), fileno(), fdatasync() */
+#endif
 #include "ods2_volume.h"
 #include "ods2_validate.h"
 #include "ods5_ondisk.h"
@@ -33,6 +36,9 @@
 #include "ods2_time.h"
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/file.h>
 #include <stdlib.h>
 
 static ods2_result_t ok(void)
@@ -142,6 +148,18 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
         return fail("could not open disk image file");
     }
     vol->writable = writable;
+    /* One writer or any number of readers (review 6, finding 9): two processes writing one image, or one
+       writing an image another reads, would corrupt it or read a half-done change. flock() is advisory:
+       it stops another ods2v2, not a simulator that has the image open; a file system without flock()
+       gives no lock and no error. ODS2_NOLOCK=1 turns it off (a test that holds a volume open while it
+       mounts the same image again). */
+    if (getenv("ODS2_NOLOCK") == NULL &&
+        flock(fileno(vol->fp), (writable ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0 && errno == EWOULDBLOCK) {
+        fclose(vol->fp);
+        vol->fp = NULL;
+        return fail(writable ? "the disk image is in use by another process (it is locked): not written"
+                             : "the disk image is being written by another process (it is locked)");
+    }
 
     if (fseek(vol->fp, 512, SEEK_SET) != 0 ||
         fread(&vol->home, 1, sizeof(vol->home), vol->fp) != sizeof(vol->home)) {
@@ -269,6 +287,12 @@ void ods2_dismount(ods2_volume_t *vol)
     }
 #endif
     if (vol->fp != NULL) {
+        /* Everything written so far is on the disk before the command is reported done (the order of the
+           writes in between is the code's, kept against a killed process; a power cut needs the file system
+           to honour it). One fdatasync per mount, not one per block. ODS2_NOSYNC=1 skips it. */
+        if (vol->writable && fflush(vol->fp) == 0 && getenv("ODS2_NOSYNC") == NULL) {
+            (void) fdatasync(fileno(vol->fp));
+        }
         fclose(vol->fp);
         vol->fp = NULL;
     }
@@ -1125,7 +1149,8 @@ ods2_result_t ods2_indexf_map_extent(uint8_t *indexf_header, uint32_t lbn, unsig
    retrieval pointer that describes it - Format 1 below LBN 4,194,303,
    Format 2 beyond (issue #14) - so INDEXF.SYS can grow anywhere on a
    volume of any size. */
-static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header)
+static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, uint32_t *lbn_out,
+                                  unsigned *got_out)
 {
     const ods2_head_core_t *core = (const ods2_head_core_t *) indexf_header;
     size_t map_offset = (size_t) core->mpoffset * 2;
@@ -1150,6 +1175,21 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header)
         r = ods2_allocate_blocks(vol, want, &lbn, &got);
     }
     if (!r.ok) return r;
+    {
+        /* The new blocks are zeroed (review 6, finding 7): the clusters hold whatever was in them, and
+           header images left in free space (an earlier index file, a BACKUP save set kept as a file) would
+           be seen by ANALYZE as valid headers, to be resurrected by REPAIR. Done before they are mapped. */
+        uint8_t zero[512];
+        unsigned v;
+        memset(zero, 0, sizeof(zero));
+        for (v = 0; v < got; v++) {
+            r = ods2_write_block(vol, lbn + v, zero);
+            if (!r.ok) {
+                ods2_free_blocks(vol, lbn, got);
+                return r;
+            }
+        }
+    }
     r = ods2_indexf_map_extent(indexf_header, lbn, got);
     if (!r.ok) {
         /* ods2_allocate_blocks() has already marked them used; give
@@ -1157,6 +1197,8 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header)
         ods2_free_blocks(vol, lbn, got);
         return r;
     }
+    *lbn_out = lbn;
+    *got_out = got;
     return ok();
 }
 
@@ -1178,6 +1220,9 @@ static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_num
     uint16_t seq;
     uint32_t vbn, efblk, new_efblk;
     bool changed = false;
+    uint32_t new_lbn[64];        /* the extents added to INDEXF.SYS by this call, given back if it fails */
+    unsigned new_got[64];
+    unsigned added = 0, a;
     ods2_result_t r;
 
     r = ods2_find_free_file_number(vol, 1, MAX_FILE_NUMBER, &n, &seq);
@@ -1188,16 +1233,17 @@ static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_num
     vbn = header_vbn(vol, n);
     while (vbn > ods2_word_swap32(core->recattr.hiblk)) {
         if (++extensions > 64) {
-            return fail("INDEXF.SYS could not be extended far enough to hold "
-                        "the new header");
+            r = fail("INDEXF.SYS could not be extended far enough to hold the new header");
+            goto give_back;
         }
-        r = extend_indexf(vol, indexf_header);
-        if (!r.ok) return r;
+        r = extend_indexf(vol, indexf_header, &new_lbn[added], &new_got[added]);
+        if (!r.ok) goto give_back;
+        added++;
         changed = true;
     }
 
     r = highest_used_file_number(vol, &highest_used);
-    if (!r.ok) return r;
+    if (!r.ok) goto give_back;
     new_efblk = vbn + 1;
     if (highest_used > n) {
         uint32_t used_vbn = header_vbn(vol, highest_used);
@@ -1213,7 +1259,7 @@ static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_num
     }
     if (changed) {
         r = write_indexf_header(vol, indexf_header);
-        if (!r.ok) return r;
+        if (!r.ok) return r;   /* the header may be on disk by now: the new extents are left as they are */
     }
 
     r = mark_index_bitmap(vol, n, true);
@@ -1221,6 +1267,11 @@ static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_num
     *file_number_out = n;
     *seq_out = seq;
     return ok();
+
+give_back:
+    /* nothing of INDEXF.SYS's header was written: the extents taken for it are free again */
+    for (a = 0; a < added; a++) ods2_free_blocks(vol, new_lbn[a], new_got[a]);
+    return r;
 }
 
 /* --- ods2_lookup_name(): streams the directory, no size limit --- */
@@ -1486,6 +1537,7 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
     ods2_header_spec_t spec;
     uint8_t new_header[512];
     uint8_t content_block[512];
+    bool header_written = false;
     ods2_result_t r;
 
     if (!vol->writable) {
@@ -1536,7 +1588,12 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
        block/extent) once it outgrows this, which is not yet
        implemented. */
     r = ods2_allocate_blocks(vol, vol->home.cluster, &content_lbn, &content_blocks);
-    if (!r.ok) return r;
+    if (!r.ok) {
+        /* the file number was taken first: give it back (review 6, finding 6; a full volume is the usual
+           way to get here) */
+        mark_index_bitmap(vol, file_number, false);
+        return r;
+    }
 
     extent.lbn = content_lbn;
     extent.block_count = content_blocks;
@@ -1576,21 +1633,20 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
         spec.link_count = (vol->home.volchar & ODS5_VC_HARDLINKS) ? 1 : 0;
 
         if (!ods2_build_file_header(new_header, &spec)) {
+            ods2_free_blocks(vol, content_lbn, content_blocks);
+            mark_index_bitmap(vol, file_number, false);
             return fail("could not construct new directory's header");
         }
     }
 
-    /* Initialize the new directory's first content block: entirely
-       empty except for the terminating sentinel. */
+    /* The content first, then the header, then the entry (review 6, finding 6): whatever an interruption or
+       a failure leaves is a number and some clusters nothing refers to, never a valid directory header
+       over a block that is not a directory block. The blocks are written through the header in memory. */
     memset(content_block, 0, sizeof(content_block));
     content_block[0] = 0xff;
     content_block[1] = 0xff;
-
-    r = ods2_write_header(vol, file_number, new_header);
-    if (!r.ok) return r;
-
     r = ods2_write_file_block(vol, new_header, 1, content_block);
-    if (!r.ok) return r;
+    if (!r.ok) goto undo;
     if (vol->ods5) {
         /* the rest of the allocation as zeros, so that HIGHWATER = HIBLK + 1
            (as VMS V8.4 makes a directory) tells the truth */
@@ -1598,17 +1654,27 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
         memset(content_block, 0, sizeof(content_block));
         for (v = 2; v <= content_blocks; v++) {
             r = ods2_write_file_block(vol, new_header, v, content_block);
-            if (!r.ok) return r;
+            if (!r.ok) goto undo;
         }
     }
+
+    r = ods2_write_header(vol, file_number, new_header);
+    if (!r.ok) goto undo;
+    header_written = true;
 
     /* Insert an entry for the new directory into the parent -
        growing the parent's own allocation automatically if none of
        its existing content blocks have room. */
     r = ods2_insert_into_directory(vol, parent_core->fid.fid_num, dirname, 1, spec.fid);
-    if (!r.ok) {
-        /* no entry in the parent: the new directory must not stay behind unreachable
-           (header marked deleted as ods2_delete_version does, blocks and file number given back) */
+    if (!r.ok) goto undo;
+
+    *new_fid_out = spec.fid;
+    return ok();
+
+undo:
+    /* no entry in the parent: the new directory must not stay behind unreachable (header marked deleted as
+       ods2_delete_version does, blocks and file number given back) */
+    if (header_written) {
         ods2_head_core_t *dc = (ods2_head_core_t *) new_header;
         dc->filechar |= 0x8000u; /* FH2$M_MARKDEL */
         dc->fid.fid_num = 0;
@@ -1617,13 +1683,10 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
         new_header[510] = 0;
         new_header[511] = 0;
         ods2_write_header(vol, file_number, new_header);
-        ods2_free_blocks(vol, content_lbn, content_blocks);
-        mark_index_bitmap(vol, file_number, false);
-        return r;
     }
-
-    *new_fid_out = spec.fid;
-    return ok();
+    ods2_free_blocks(vol, content_lbn, content_blocks);
+    mark_index_bitmap(vol, file_number, false);
+    return r;
 }
 
 /* Writes src->length bytes, read from `src` a chunk at a time, into

@@ -199,6 +199,117 @@ PY
     check "ODS-$level: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
 done
 
+# ---- CREATE/DIRECTORY on a full volume gives everything back (review 6, finding 6): no file number taken and
+# left, no header over a block that is not a directory block
+for level in 2 5; do
+    img="$TMP/f$level.img"
+    $INIT "$img" 8192 --structure=$level --label=FULLVOL >/dev/null 2>&1
+    head -c 51200 /dev/zero | tr '\0' 'x' > "$TMP/f100.dat"
+    printf 'x\n' > "$TMP/f1.dat"
+    : > "$TMP/fill.ods2"
+    i=0; while [ $i -lt 100 ]; do echo "COPY $TMP/f100.dat [000000]BIG$i.DAT" >> "$TMP/fill.ods2"; i=$((i+1)); done
+    i=0; while [ $i -lt 400 ]; do echo "COPY $TMP/f1.dat [000000]S$i.DAT" >> "$TMP/fill.ods2"; i=$((i+1)); done
+    $ODS2 "$img" "@$TMP/fill.ods2" >/dev/null 2>&1
+    free=$($ODS2 "$img" 'SHOW VOLUME' | sed -n 's/^  Free blocks: *//p')
+    check "ODS-$level: the volume is full" 0 "$free"
+    check "ODS-$level: the full volume is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" | tail -1)"
+    before=$(md5sum < "$img")
+    out=$($ODS2 "$img" 'CREATE/DIRECTORY [NEWD]' 2>&1); rc=$?
+    check "ODS-$level: CREATE/DIRECTORY on a full volume fails (exit 1)" 1 "$rc"
+    check "ODS-$level: and leaves nothing behind (no number taken, no lost header): checker clean" \
+        "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" | tail -1)"
+    $ODS2 "$img" 'DELETE [000000]BIG0.DAT' >/dev/null 2>&1
+    check "ODS-$level: after a delete CREATE/DIRECTORY succeeds" "%ODS2-I-CREATED, created [NEWD]" \
+        "$($ODS2 "$img" 'CREATE/DIRECTORY [NEWD]' 2>&1)"
+    check "ODS-$level: and the checker is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" | tail -1)"
+done
+
+# ---- INDEXF.SYS's new blocks are zeroed (review 6, finding 7): free space holds junk (0xA5), then enough files
+# are made to extend the index file; no block of INDEXF.SYS may hold any of the junk
+cat > "$TMP/junk.py" <<'PY'
+import struct, sys
+mode, img, cluster = sys.argv[1], sys.argv[2], int(sys.argv[3])
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+
+def header(n):
+    f.seek((base + n - 1) * 512); return f.read(512)
+
+def extents(h):
+    mp = h[1] * 2; end = h[3] * 2; pos = mp; out = []
+    while pos < mp + h[58] * 2 and pos < end:
+        w0 = struct.unpack_from('<H', h, pos)[0]
+        fmt = w0 >> 14
+        if fmt == 1:
+            w1 = struct.unpack_from('<H', h, pos + 2)[0]
+            out.append(((((w0 >> 8) & 0x3f) << 16) | w1, (w0 & 0xff) + 1)); pos += 4
+        elif fmt == 2:
+            cnt = (w0 & 0x3fff) + 1; lbn = struct.unpack_from('<I', h, pos + 2)[0]
+            out.append((lbn, cnt)); pos += 6
+        elif fmt == 3:
+            cnt = (((w0 & 0x3fff) << 16) | struct.unpack_from('<H', h, pos + 2)[0]) + 1
+            lbn = struct.unpack_from('<I', h, pos + 4)[0]; out.append((lbn, cnt)); pos += 8
+        else:
+            pos += 2
+    return out
+
+if mode == 'junk':
+    bm = extents(header(2))[0][0] + 1           # BITMAP.SYS: block 1 is the SCB, then the bits
+    f.seek(bm * 512); bits = f.read(4096)
+    size = struct.unpack_from('<I', home, 0)[0] if False else None
+    f.seek(0, 2); total = f.tell() // 512
+    for cl in range(total // cluster):
+        if bits[cl // 8] >> (cl % 8) & 1:        # free
+            f.seek(cl * cluster * 512); f.write(b'\xa5' * (cluster * 512))
+else:
+    junk = 0
+    for lbn, cnt in extents(header(1)):
+        for b in range(cnt):
+            f.seek((lbn + b) * 512)
+            if b'\xa5' * 16 in f.read(512): junk += 1
+    print(junk)
+PY
+for level in 2 5; do
+    img="$TMP/x$level.img"
+    $INIT "$img" 8192 --structure=$level --label=INDEXX >/dev/null 2>&1
+    cluster=$($ODS2 "$img" 'SHOW VOLUME' | sed -n 's/^  Cluster size: *//p')
+    python3 -I "$TMP/junk.py" junk "$img" "$cluster"
+    check "ODS-$level: the junk in free space leaves the volume clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" | tail -1)"
+    printf 'x\n' > "$TMP/f1.dat"
+    : > "$TMP/many.ods2"
+    i=0; while [ $i -lt 300 ]; do echo "COPY $TMP/f1.dat [000000]M$i.DAT" >> "$TMP/many.ods2"; i=$((i+1)); done
+    $ODS2 "$img" "@$TMP/many.ods2" >/dev/null 2>&1
+    check "ODS-$level: 300 files made (INDEXF.SYS extended), the checker is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" | tail -1)"
+    check "ODS-$level: no block of INDEXF.SYS holds the junk" 0 "$(python3 -I "$TMP/junk.py" count "$img" "$cluster")"
+done
+
+# ---- one writer or many readers (review 6, finding 9): ods2 refuses an image another process holds locked
+cat > "$TMP/lock.py" <<'PY'
+import fcntl, subprocess, sys
+img, tmp = sys.argv[1], sys.argv[2]
+def run(cmd):
+    p = subprocess.run(['./ods2', img, cmd], capture_output=True, text=True)
+    return p.returncode, p.stdout + p.stderr
+f = open(img, 'rb')
+fcntl.flock(f, fcntl.LOCK_EX)
+rc_w, out_w = run('COPY %s/u.txt [000000]LOCKED.TXT' % tmp)
+rc_r, out_r = run('DIR [000000]')
+fcntl.flock(f, fcntl.LOCK_UN)
+fcntl.flock(f, fcntl.LOCK_SH)
+rc_r2, out_r2 = run('DIR [000000]')
+rc_w2, out_w2 = run('COPY %s/u.txt [000000]LOCKED.TXT' % tmp)
+fcntl.flock(f, fcntl.LOCK_UN)
+rc_w3, out_w3 = run('COPY %s/u.txt [000000]LOCKED.TXT' % tmp)
+print(rc_w, 'locked' in out_w, rc_r, 'locked' in out_r, rc_r2, rc_w2, 'locked' in out_w2, rc_w3)
+PY
+for level in 2 5; do
+    img="$TMP/k$level.img"
+    $INIT "$img" 8192 --structure=$level --label=LOCKED >/dev/null 2>&1
+    printf 'x\n' > "$TMP/u.txt"
+    check "ODS-$level: an image locked by another process: write refused, read refused; locked for reading: read works, write refused; unlocked: write works" \
+        "1 True 1 True 0 1 True 0" "$(python3 -I "$TMP/lock.py" "$img" "$TMP")"
+done
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"
