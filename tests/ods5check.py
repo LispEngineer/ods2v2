@@ -40,6 +40,7 @@ name order, name type flags vs name, every FID exists and is in use, backlink
 of every file points at a directory that lists it, header name = the directory
 entry of the primary link, link count where the volume keeps one).
 """
+import os
 import struct, sys
 
 u16 = lambda b, o: struct.unpack_from('<H', b, o)[0]
@@ -495,7 +496,9 @@ def main():
                 if (size + 2 - (ent - pos)) % 8:
                     fnd.err('%s: record %r: odd tail length' % (where, nm))
                 vl = u16(blk, pos + 2)
-                if vl == 1 and not (n == 4 and (nm.upper().endswith('.SYS') or nm.upper() == '000000.DIR')):
+                # a directory's own entry is not judged: OpenVMS VAX V7.3 writes limit 1 for the directories it creates below
+                # [000000] (physical VAX96 run 1: VMSMADE.DIR, SUB.DIR), and a directory has no versions
+                if vl == 1 and not nm.upper().endswith('.DIR') and not (n == 4 and nm.upper().endswith('.SYS')):
                     vl1.append(nm)
                 key = fold_name(nm if '.' in nm else nm + '.')
                 if v.level == 5 and not (flags & 0x40):
@@ -537,6 +540,9 @@ def main():
                 fnd.err('%s: two entries for %r;%d' % (where, ent[0], ent[2]))
             seen_nv.add(key)
         entries[n] = lst
+        if os.environ.get('ODS5CHECK_DUMPDIR') and d and d['name'].upper().startswith(os.environ['ODS5CHECK_DUMPDIR'].upper()):
+            for ent in lst:
+                print('DUMPDIR %s: %r;%d fid=%s limit=%d' % (d['name'], ent[0], ent[2], ent[3], ent[5]))
     # --- cross checks: entries -> headers, backlinks ---
     referenced = set()
     dir_of_primary = {}

@@ -235,6 +235,16 @@ $ODS2 "$TMP/gs.img" "SET VOLUME/GEOMETRY=0,15" >/dev/null 2>&1; check "SET VOLUM
 $ODS2 "$TMP/gs.img" "SET VOLUME/GEOMETRY=38,38/LABEL=BOTH" >/dev/null 2>&1
 check "geometry and label together: both set" "513 2097152 1 38 38 1453 BOTH" "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/gs.img" show) $($ODS2 "$TMP/gs.img" 'SHOW VOLUME' 2>&1 | grep -o 'BOTH' | head -1)"
 
+# device types: the geometry each reports (measured by ods5-vms2 on VAX V7.3: LD 38 x 38 at 1 GiB, RA82 57 x 15, RA92 73 x 13)
+$INIT "$TMP/tg.img" 1G --structure=2 --label=TGT --target=ld >/dev/null 2>&1
+check "ods2_init --target=ld on 1 GiB: 38 x 38 x 1453 (what LDA5: reports)" "513 2097152 1 38 38 1453" "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/tg.img" show)"
+out=$($ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=ra" 2>&1)
+check "SET VOLUME/GEOMETRY=ra on 1 GiB: 57 x 15 x 2453 (the RA82), no prediction warning (a measured size)" "513 2097152 1 57 15 2453 0" \
+    "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/tg.img" show) $(echo "$out" | grep -c PREDICTED)"
+$ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=nonesuch" >/dev/null 2>&1; check "an unknown device type is refused" 1 $?
+$INIT "$TMP/tg2.img" 3000000 --target=ld >/dev/null 2>"$TMP/tg2.err"
+check "an unmeasured size says it is a prediction" 1 "$(grep -c predicted "$TMP/tg2.err")"
+
 # a block that only starts like a footer (the signature and the two bytes, but a wrong CRC) is not one: no message, a normal write mount
 cp "$TMP/s0.img" "$TMP/s4.img"; python3 -I "$TMP/foot.py" inside "$TMP/s4.img" 8192
 python3 -I - "$TMP/s4.img" <<'PY'
