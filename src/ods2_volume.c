@@ -2067,6 +2067,11 @@ const char *ods2_check_record_attrs(const ods2_record_attrs_t *attrs, size_t con
     if (cc != 0 && (cc & (cc - 1)) != 0) {
         return "only one carriage control (FTN, CR or PRN) can be given";
     }
+    if (attrs->rattrib & ODS2_RAT_PRN) {
+        /* print-file carriage control needs the fixed control area of a VFC file; with any other format VMS
+           TYPE refuses the file (RMS-F-RAT, batches m2b and C on V7.3): never made here */
+        return "RAT:PRN needs the VFC record format, which can't be imported (VMS refuses any other: RMS-F-RAT)";
+    }
     return NULL;
 }
 
@@ -2095,6 +2100,11 @@ const char *ods2_check_var_record_attrs(const ods2_record_attrs_t *attrs, size_t
     }
     if (cc != 0 && (cc & (cc - 1)) != 0) {
         return "only one carriage control (FTN, CR or PRN) can be given";
+    }
+    if (attrs->rattrib & ODS2_RAT_PRN) {
+        /* print-file carriage control needs the fixed control area of a VFC file; with any other format VMS
+           TYPE refuses the file (RMS-F-RAT, batches m2b and C on V7.3): never made here */
+        return "RAT:PRN needs the VFC record format, which can't be imported (VMS refuses any other: RMS-F-RAT)";
     }
     return NULL;
 }
@@ -2132,6 +2142,25 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
         return fail(why);
     }
     return create_file(vol, parent_header, name, src, attrs, 0, new_fid_out);
+}
+
+/* Is the header of file number 10 the volume's SECURITY.SYS? Always on ODS-5; on an ODS-2 volume only if it names
+   SECURITY.SYS and its back link is the master file directory (an older volume's user file may hold the number). */
+static bool file10_is_security(const ods2_volume_t *vol, const uint8_t *header)
+{
+    const ods2_head_core_t *core = (const ods2_head_core_t *) header;
+    ods5_ident_t id;
+    const char *why;
+    static const char name[] = "SECURITY.SYS";
+    size_t i;
+
+    if (vol->ods5) return true;
+    if (ods2_fid_number(core->backlink) != 4 || !ods5_read_ident(header, &id, &why)) return false;
+    if (strlen(id.name) != sizeof(name) - 1) return false;
+    for (i = 0; i < sizeof(name) - 1; i++) {
+        if (toupper((unsigned char) id.name[i]) != name[i]) return false;
+    }
+    return true;
 }
 
 static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
@@ -2177,27 +2206,9 @@ static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_numb
     }
     r = ods2_read_header(vol, ods2_fid_number(target), target_header);
     if (!r.ok) return r;
-    if (ods2_fid_number(target) == 10) {
-        /* the same rule as DELETE (is_reserved_file): file 10 is SECURITY.SYS on ODS-5; on an ODS-2 volume it
-           is only if it is the SECURITY.SYS of the master file directory (an older volume's user file may
-           hold the number) */
-        ods5_ident_t id;
-        const char *why;
-        bool security = false;
-        if (vol->ods5) {
-            security = true;
-        } else if (ods2_fid_number(core->backlink) == 4 && ods5_read_ident(target_header, &id, &why)) {
-            static const char name[] = "SECURITY.SYS";
-            size_t i;
-            security = strlen(id.name) == sizeof(name) - 1;
-            for (i = 0; security && i < sizeof(name) - 1; i++) {
-                security = toupper((unsigned char) id.name[i]) == name[i];
-            }
-        }
-        if (security) {
-            return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
-                        "SECURITY.SYS): it cannot be linked");
-        }
+    if (ods2_fid_number(target) == 10 && file10_is_security(vol, target_header)) {
+        return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
+                    "SECURITY.SYS): it cannot be linked");
     }
     if (ods2_fid_number(core->fid) != ods2_fid_number(target) || core->fid.fid_seq != target.fid_seq ||
         (core->filechar & 0x8000u)) {
@@ -3126,6 +3137,13 @@ static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_n
     r = ods2_read_header(vol, ods2_fid_number(target_fid), target_header);
     if (!r.ok) return r;
     target_core = (ods2_head_core_t *) target_header;
+    /* file 10 of an ODS-2 volume: by what its header says, wherever the entry is (an alias in another directory
+       is refused too; VMS's SET FILE/REMOVE took such entries and left LOSTHEADER) */
+    if (ods2_fid_number(target_fid) == 10 && ods2_header_is_file(target_header, target_fid) &&
+        file10_is_security(vol, target_header)) {
+        return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
+                    "SECURITY.SYS): it cannot be deleted");
+    }
     if (!ods2_header_is_file(target_header, target_fid)) {
         /* a dangling entry (its file went with another name, the slot may be free or reused): take
            the entry out and touch nothing else, as VMS does (batch m1) */

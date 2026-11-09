@@ -574,6 +574,83 @@ img="$TMP/s10b.img"
 $INIT "$img" 8192 --structure=2 --label=FILE10 >/dev/null 2>&1
 check "ODS-2: LINK to file 10 when it is SECURITY.SYS is refused" "1" "$($ODS2 "$img" 'LINK [000000]AL.TXT [000000]SECURITY.SYS' >/dev/null 2>&1; echo $?)"
 
+# ---- records (ods5-vms2 batch C, VAX V7.3): VMS TYPE refuses Stream, Stream_LF and Stream_CR files with RAT:PRN
+# (RMS-F-RAT). COPY/IMPORT never make one (/ATTRIBUTES included), and TYPE refuses one made another way.
+for level in 2 5; do
+    img="$TMP/rp$level.img"
+    $INIT "$img" 8192 --structure=$level --label=PRNREC >/dev/null 2>&1
+    printf 'line one\nline two\n' > "$TMP/t.txt"
+    before=$(md5sum < "$img")
+    for fmt in STMLF STM STMCR UDF; do
+        out=$($ODS2 "$img" "COPY/ATTRIBUTES=(RFM:$fmt,RAT:PRN) $TMP/t.txt [000000]P.TXT" 2>&1); rc=$?
+        case "$out" in *"RAT:PRN needs the VFC"*) msg=refused ;; *) msg="$out" ;; esac
+        check "ODS-$level: COPY/ATTRIBUTES=(RFM:$fmt,RAT:PRN) is refused (exit 1) and writes nothing" "1 refused $before" "$rc $msg $(md5sum < "$img")"
+    done
+    for fmt in STMLF STM STMCR; do
+        $ODS2 "$img" "COPY/FORMAT=$fmt $TMP/t.txt [000000]F$fmt.TXT" >/dev/null 2>&1
+        fnum=$($ODS2 "$img" "DIR/FULL [000000]F$fmt.TXT" | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+        python3 -I - "$img" "$fnum" <<'PY'
+import struct, sys
+img, n = sys.argv[1], int(sys.argv[2])
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+pos = (base + n - 1) * 512
+f.seek(pos); h = bytearray(f.read(512))
+h[21] = (h[21] & ~0x0f) | 4                  # FAT$B_RATTRIB: print carriage control, on a stream file
+struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+f.seek(pos); f.write(h)
+PY
+        out=$($ODS2 "$img" "TYPE [000000]F$fmt.TXT" 2>&1)
+        case "$out" in *"RMS-F-RAT"*) msg="RMS-F-RAT" ;; *) msg="$out" ;; esac
+        check "ODS-$level: TYPE of a $fmt file with RAT:PRN fails with RMS-F-RAT, as VMS" "RMS-F-RAT" "$msg"
+    done
+done
+
+# ---- ods5-vms2 batch C (VAX V7.3 ODS-2): VMS DELETE refuses the reserved files (RMS-E-PRV) but SET FILE/REMOVE,
+# which takes only the directory entry, was accepted on all ten and left LOSTHEADER. ods2v2 has no REMOVE; an
+# entry-only removal here is DELETE of an alias or a dangling entry, and it is refused for a reserved file too,
+# in whatever directory the entry is. Test: the entries for each reserved file copied into [D], then DELETE [D]name.
+cat > "$TMP/copyentries.py" <<'PY'
+import struct, sys
+img, dnum = sys.argv[1], int(sys.argv[2])
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+def first_block(n):
+    f.seek((base + n - 1) * 512); h = f.read(512)
+    mp = h[1] * 2; w0, w1 = struct.unpack_from('<HH', h, mp)
+    return (((w0 >> 8) & 0x3f) << 16) | w1
+mfd = first_block(4); f.seek(mfd * 512); blk = f.read(512)
+recs = []; pos = 0
+while pos + 6 <= 512:
+    size = struct.unpack_from('<H', blk, pos)[0]
+    if size in (0, 0xFFFF): break
+    name = bytes(blk[pos + 6:pos + 6 + blk[pos + 5]])
+    if name.endswith(b'.SYS'): recs.append(blk[pos:pos + size + 2])
+    pos += size + 2
+d = first_block(dnum)
+out = bytearray(512); p = 0
+for r in sorted(recs, key=lambda r: bytes(r[6:6 + r[5]])):
+    out[p:p + len(r)] = r; p += len(r)
+out[p:p + 2] = b'\xff\xff'
+f.seek(d * 512); f.write(out)
+PY
+for level in 2 5; do
+    img="$TMP/rm$level.img"
+    $INIT "$img" 8192 --structure=$level --label=REMOVE >/dev/null 2>&1
+    $ODS2 "$img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+    dnum=$($ODS2 "$img" 'DIR/FULL [000000]D.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+    python3 -I "$TMP/copyentries.py" "$img" "$dnum"
+    listed=$($ODS2 "$img" 'DIR [D]' 2>&1 | grep -c '\.SYS')
+    before=$(md5sum < "$img")
+    bad=0
+    for name in $($ODS2 "$img" 'DIR [D]' 2>&1 | grep '\.SYS' | awk '{print $1}'); do
+        out=$($ODS2 "$img" "DELETE [D]$name" 2>&1); rc=$?
+        case "$out" in *reserved*) ;; *) bad=$((bad + 1)); echo "      DELETE [D]$name: exit $rc: $out" ;; esac
+        [ $rc -eq 1 ] || bad=$((bad + 1))
+    done
+    check "ODS-$level: $listed entries for reserved files in [D]: removing each (the REMOVE case) is refused" "0 $before" "$bad $(md5sum < "$img")"
+done
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"
