@@ -1108,18 +1108,18 @@ int main(void)
                    "root directory header reads\n");
 
             r = ods2_write_block(&v5, 500, blk);
-            assert(!r.ok && strstr(r.problem, "ODS-5") != NULL);
+            assert(!r.ok && strstr(r.problem, "not mounted for write") != NULL);
             r = ods2_create_directory(&v5, hdr, "NEWDIR", &fid);
             assert(!r.ok);
             r = ods2_set_volume_label(&v5, "NEWLABEL", &copies);
             assert(!r.ok);
-            printf("PASS: writes to an ODS-5 volume are refused: %s\n", r.problem);
+            printf("PASS: writes to an ODS-5 volume mounted read-only are refused: %s\n", r.problem);
             ods2_dismount(&v5);
 
             r = ods2_mount_write(V0_DISK_PATH, &v5w);
-            assert(!r.ok && strstr(r.problem, "ODS-5") != NULL);
-            printf("PASS: a write mount of an ODS-5 volume is refused: %s\n",
-                   r.problem);
+            assert(r.ok && v5w.ods5 && v5w.writable);
+            ods2_dismount(&v5w);
+            printf("PASS: an ODS-5 volume mounts for write (writing to it: ods5_write_selftest)\n");
 
             f = fopen(V0_DISK_PATH, "rb");
             assert(f != NULL);
@@ -1128,7 +1128,7 @@ int main(void)
             fclose(f);
             assert(memcmp(before, after, (size_t) size) == 0);
             printf("PASS: the ODS-5 image is byte-for-byte unchanged after "
-                   "reads and refused writes\n");
+                   "reads, refused writes and a write mount\n");
             free(before); free(after);
             remove(V0_DISK_PATH);
         }

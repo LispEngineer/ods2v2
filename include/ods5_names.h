@@ -107,4 +107,29 @@ uint32_t ods5_fold(uint32_t cp);
    literal; case-blind. Both are NUL-terminated. */
 bool ods5_wildcard_match(const char *pattern, const char *name);
 
+/* Names for writing --- */
+
+/* Checks a literal name ("NAME.TYPE", or without the dot) as the name of a new
+   file or directory on an ODS-5 volume. Returns NULL if acceptable, else why
+   not: not empty, no control characters, none of the characters VMS itself
+   refuses at creation (# { } ` ? * and the double quote), none above U+FFFF,
+   and at most 236 bytes once stored (236 ISO Latin-1 characters, or 118 UCS-2
+   ones; ODS5_FORMAT_NOTES.md 5, 11). */
+const char *ods5_check_new_name(const char *utf8);
+
+/* The literal name with its dot completed ("README" -> "README."), as it is
+   stored. False if it does not fit in cap. */
+bool ods5_complete_name(const char *utf8, char *out, size_t cap);
+
+/* The name as stored in a directory record and in the file header: the
+   literal name with its dot completed, case kept. *type is the name type VMS
+   stores for it (measured, ODS5_FORMAT_NOTES.md 10-11): ODS5_NAME_ODS2 for a
+   name made only of letters, digits, '$', '_' and '-' with one '.', name and
+   type each at most 39 characters, in any case; ODS5_NAME_ISL1 for any other
+   name with nothing above U+00FF; ODS5_NAME_UCS2 otherwise. out gets the
+   stored bytes (ISO Latin-1 for ODS2/ISL1, little-endian 16-bit units for
+   UCS2), *len their count in bytes. False if it does not fit in cap or has
+   a character above U+FFFF. */
+bool ods5_stored_name(const char *utf8, uint8_t *out, size_t cap, size_t *len, unsigned *type);
+
 #endif /* ODS5_NAMES_H */

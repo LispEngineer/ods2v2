@@ -48,6 +48,18 @@
 bool ods2_insert_dir_entry(uint8_t *block, size_t block_size,
                             const char *name, uint16_t version, ods2_fid_t fid);
 
+/* The same for a volume of structure `level` (2 or 5). Level 2 is
+ * exactly ods2_insert_dir_entry(). At level 5 `name` is the UTF-8
+ * literal name (case kept; a '.' is added if it has none), stored as
+ * ISO Latin-1 or UCS-2 as ods5_stored_name() says, with that name type
+ * in the record's flags, a version limit of 32767, and the record put
+ * where VMS's ordering (ascending upper-cased code points, ISO Latin-1
+ * and UCS-2 names interleaved) places it. Names of existing records
+ * are compared in the same way, whatever their name type. */
+bool ods2_insert_dir_entry_level(uint8_t *block, size_t block_size,
+                                 const char *name, uint16_t version, ods2_fid_t fid,
+                                 unsigned level);
+
 /* Removes the whole directory RECORD matching `name` (case-
  * insensitive) from `block` - the name and EVERY version it holds in
  * this block - shifting all following bytes (through the sentinel)

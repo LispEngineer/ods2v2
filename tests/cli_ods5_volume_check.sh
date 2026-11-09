@@ -1,13 +1,14 @@
 #!/bin/sh
 # MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
 #
-# cli_ods5_volume_check.sh - an ODS-5 (structure level 5) volume mounts
-# read-only: SHOW VOLUME names the structure level and the volume
-# characteristics, reads work, every command that would write fails
-# with exit status 1 and the image stays byte for byte as it was. The
-# volume is the synthetic ODS-2 disk with its home block patched to
-# level 5, so this needs no big image. Called by `make test`; run from
-# the project root.
+# cli_ods5_volume_check.sh - an ODS-5 (structure level 5) volume mounts:
+# SHOW VOLUME names the structure level and the volume characteristics,
+# reads work, and an image that cannot be written (mode 444) is mounted
+# read-only: every command that would write fails with exit status 1 and
+# the image stays byte for byte as it was. (Writing to ODS-5 volumes is
+# tested in cli_ods5_write_check.sh.) The volume is the synthetic ODS-2
+# disk with its home block patched to level 5, so this needs no big
+# image. Called by `make test`; run from the project root.
 
 SRC_DISK=samples/synthetic_disk.img
 DISK=samples/cli_ods5_disk.img
@@ -57,19 +58,22 @@ check "SHOW VOLUME names the structure level" "ODS-5, version 1" \
 check "SHOW VOLUME lists the volume characteristics" \
     "NOHIGHWATER, ACCESS_DATES, HARDLINKS" \
     "$(echo "$out" | sed -n 's/^  Characteristics: *//p')"
-check "mounting an ODS-5 volume warns on stderr" 1 \
-    "$($ODS2 $DISK 'SHOW VOLUME' 2>&1 >/dev/null | grep -c '%ODS2-W-ODS5RO')"
+check "mounting a writable ODS-5 volume gives no warning" 0 \
+    "$($ODS2 $DISK 'SHOW VOLUME' 2>&1 >/dev/null | grep -c '%ODS2-W-')"
 check "DIR works on an ODS-5 volume and exits 0" 0 "$(status $ODS2 $DISK 'DIR [000000]')"
 
-check "COPY onto an ODS-5 volume exits 1" 1 "$(status $ODS2 $DISK COPY $TMP/t.txt '[000000]T.TXT')"
-check "...with a message naming ODS-5" "ODS-5" \
-    "$($ODS2 $DISK COPY $TMP/t.txt '[000000]T.TXT' 2>&1 | grep -o 'ODS-5' | head -1)"
-check "CREATE/DIRECTORY on an ODS-5 volume exits 1" 1 \
+# an image that cannot be written is mounted read-only: nothing writes
+chmod 444 "$DISK"
+check "an unwritable ODS-5 image mounts with a read-only warning" 1 \
+    "$($ODS2 $DISK 'SHOW VOLUME' 2>&1 >/dev/null | grep -c '%ODS2-W-READONLY')"
+check "COPY onto an unwritable ODS-5 image exits 1" 1 "$(status $ODS2 $DISK COPY $TMP/t.txt '[000000]T.TXT')"
+check "CREATE/DIRECTORY on an unwritable ODS-5 image exits 1" 1 \
     "$(status $ODS2 $DISK 'CREATE/DIRECTORY [NEWDIR]')"
-check "DELETE on an ODS-5 volume exits 1" 1 "$(status $ODS2 $DISK 'DELETE [000000]NOPE.TXT')"
-check "SET VOLUME/LABEL on an ODS-5 volume exits 1" 1 \
+check "DELETE on an unwritable ODS-5 image exits 1" 1 "$(status $ODS2 $DISK 'DELETE [000000]NOPE.TXT')"
+check "SET VOLUME/LABEL on an unwritable ODS-5 image exits 1" 1 \
     "$(status $ODS2 $DISK 'SET VOLUME/LABEL=NEWLBL')"
 check "the ODS-5 image is unchanged by all of it" unchanged "$(same $DISK $ORIG)"
+chmod 644 "$DISK"
 
 # The same disk as ODS-2 shows no ODS-5 characteristics (bits 5-7 mean nothing at level 2).
 python3 -I - "$DISK" <<'PY'
@@ -89,5 +93,6 @@ check "...and shows only the ODS-2 characteristic bits" \
     "NOHIGHWATER, 0x0060 (unknown)" \
     "$(echo "$out" | sed -n 's/^  Characteristics: *//p')"
 
+chmod 644 "$DISK" 2>/dev/null
 rm -rf "$TMP" "$DISK" "$ORIG"
 [ "$fails" -eq 0 ] || { echo "$fails ODS-5 volume check(s) failed"; exit 1; }

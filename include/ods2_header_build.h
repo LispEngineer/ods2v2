@@ -33,6 +33,7 @@
 #include "ods2_ondisk.h"
 #include "ods2_retrieval.h"
 #include <stdbool.h>
+#include <stddef.h>
 
 typedef struct {
     ods2_fid_t     fid;        /* this file's own FID */
@@ -70,7 +71,17 @@ typedef struct {
                                    truncated (matching VMS's own
                                    ODS-2 39-char name / 39-char type
                                    limits, this should never actually
-                                   happen in practice). */
+                                   happen in practice).
+                                   At level 5 it is the UTF-8 literal
+                                   name with its dot and ";version"
+                                   ("Read Me.txt;1"), stored in the
+                                   FI5 ident area as ISO Latin-1 or
+                                   UCS-2 (see ods5_names.h). */
+    unsigned       level;      /* 0 or 2: a level 2 header with an FI2
+                                   ident area (ODS-2); 5: a level 5
+                                   header with an FI5 ident area,
+                                   built as VMS V8.4 builds them
+                                   (ODS5_FORMAT_NOTES.md 3, 11) */
 } ods2_header_spec_t;
 
 /* Builds a complete, checksummed 512-byte header into `header_out`
@@ -88,5 +99,17 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
  * any retrieval pointer format. A file whose extents don't all fit
  * continues in extension headers. */
 int ods2_header_extents_that_fit(const ods2_extent_t *extents, int count);
+
+/* The same for a header whose Map Area starts at byte `map_offset_bytes`
+ * (see ods2_header_map_offset()). */
+int ods2_header_extents_that_fit_at(const ods2_extent_t *extents, int count,
+                                    size_t map_offset_bytes);
+
+/* Where the Map Area of the header ods2_build_file_header() makes from
+ * `spec` starts, in bytes: 200 at level 2; at level 5 80 plus the FI5
+ * ident area (at least 120 bytes, more for a long name) in the primary
+ * header (spec->seg_num 0), and 100 in an extension header, whose ident
+ * area is only the first 20 bytes of FI5, as VMS makes it. */
+size_t ods2_header_map_offset(const ods2_header_spec_t *spec);
 
 #endif /* ODS2_HEADER_BUILD_H */

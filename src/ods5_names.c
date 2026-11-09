@@ -23,6 +23,7 @@
  */
 
 #include "ods5_names.h"
+#include "ods5_ondisk.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -152,6 +153,79 @@ bool ods5_utf8_to_stored(const char *in, uint8_t *out, size_t cap,
     *out_len = n;
     *is_ucs2 = wide;
     return true;
+}
+
+/* --- Names for writing --- */
+
+bool ods5_complete_name(const char *utf8, char *out, size_t cap)
+{
+    size_t n = strlen(utf8);
+    bool dot = strchr(utf8, '.') != NULL;
+    if (n + (dot ? 0 : 1) + 1 > cap) return false;
+    memcpy(out, utf8, n);
+    if (!dot) out[n++] = '.';
+    out[n] = '\0';
+    return true;
+}
+
+/* Is the name (dot completed) legal on an ODS-2 volume, case aside? */
+static bool name_is_ods2_legal(const char *s)
+{
+    size_t name_len = 0, type_len = 0;
+    bool seen_dot = false;
+    for (; *s; s++) {
+        unsigned char c = (unsigned char) *s;
+        if (c == '.') {
+            if (seen_dot) return false;
+            seen_dot = true;
+        } else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                   c == '$' || c == '_' || c == '-') {
+            if (seen_dot) type_len++; else name_len++;
+        } else {
+            return false;
+        }
+    }
+    return name_len <= 39 && type_len <= 39;
+}
+
+bool ods5_stored_name(const char *utf8, uint8_t *out, size_t cap, size_t *len, unsigned *type)
+{
+    char full[ODS5_MAX_LITERAL_NAME + 2];
+    bool ucs2;
+    if (!ods5_complete_name(utf8, full, sizeof(full))) return false;
+    if (!ods5_utf8_to_stored(full, out, cap, len, &ucs2)) return false;
+    if (ucs2) *type = ODS5_NAME_UCS2;
+    else *type = name_is_ods2_legal(full) ? ODS5_NAME_ODS2 : ODS5_NAME_ISL1;
+    return true;
+}
+
+const char *ods5_check_new_name(const char *utf8)
+{
+    uint8_t stored[2 * ODS5_MAX_LITERAL_NAME + 4];
+    size_t len, left;
+    unsigned type;
+    const char *p;
+
+    if (utf8[0] == '\0') return "empty file name";
+    if (strlen(utf8) > ODS5_MAX_LITERAL_NAME) return "file name too long";
+    p = utf8;
+    left = strlen(utf8);
+    while (left > 0) {
+        uint32_t cp;
+        size_t used = ods5_utf8_decode(p, left, &cp);
+        if (cp < 0x20) return "a file name cannot contain control characters";
+        if (cp == '#' || cp == '{' || cp == '}' || cp == '`' || cp == '?' || cp == '*' || cp == '"') {
+            return "VMS refuses the characters # { } ` ? * and \" in file names";
+        }
+        if (cp > 0xFFFF) return "a file name can only hold characters up to U+FFFF (UCS-2)";
+        p += used;
+        left -= used;
+    }
+    if (!ods5_stored_name(utf8, stored, sizeof(stored), &len, &type)) return "file name too long";
+    if (len > ODS5_DIR_MAX_NAME) {
+        return "a file name and type are limited to 236 bytes (118 characters if any is above U+00FF)";
+    }
+    return NULL;
 }
 
 /* --- Spellings --- */

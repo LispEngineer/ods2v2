@@ -323,7 +323,7 @@ static void split_last_component(const char *dir_path, char *out_buf,
 {
     char *last_dot;
     strcpy(out_buf, dir_path);
-    last_dot = strrchr(out_buf, '.');
+    last_dot = (char *) ods5_rfind_unescaped(out_buf, '.'); /* an escaped ^. is part of a name */
     if (last_dot != NULL) {
         *last_dot = '\0';
         *parent_out = out_buf;
@@ -1189,7 +1189,16 @@ static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p
         report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
         return;
     }
-    r = ods2_create_directory(vol, parent_header, new_name, &new_fid);
+    {
+        /* the name is a spelling (^-escapes): create the characters it stands for */
+        char literal[ODS2_PATH_MAX];
+        if (ods5_unescape(new_name, strlen(new_name), literal, sizeof(literal)) == (size_t) -1) {
+            report_error("%%ODS2-E-BADNAME, [%s]: malformed ^ escape in the directory name\n",
+                         effective_path);
+            return;
+        }
+        r = ods2_create_directory(vol, parent_header, literal, &new_fid);
+    }
     if (!r.ok) {
         report_error("%%ODS2-E-CREATEERR, %s\n", r.problem);
         return;
@@ -1560,9 +1569,10 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
     ods2_text_var_scan_t scan;
     convert_ctx_t conv;
     ods2_result_t r;
+    char literal_name[ODS2_PATH_MAX];
     const char *name;
 
-    if (p->filename[0] == '\0') {
+    if (p->filename[0] == '\0' && !g_ods5) {
         report_error("%%ODS2-E-BADPATH, no destination filename given\n");
         return;
     }
@@ -1578,7 +1588,27 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
                         "give NAME, NAME; or NAME;1\n", spec);
         return;
     }
-    name = p->filename;
+    {
+        /* The name is a spelling (^-escapes): store the characters it
+           stands for. Without a name on an ODS-5 volume, the host file's own
+           name is used (UTF-8, as the host has it). */
+        if (p->filename[0] != '\0') {
+            if (ods5_unescape(p->filename, strlen(p->filename), literal_name,
+                              sizeof(literal_name)) == (size_t) -1) {
+                report_error("%%ODS2-E-BADNAME, malformed ^ escape in the file name\n");
+                return;
+            }
+        } else {
+            const char *base = strrchr(local_file, '/');
+            base = (base != NULL) ? base + 1 : local_file;
+            if (strlen(base) >= sizeof(literal_name) || base[0] == '\0') {
+                report_error("%%ODS2-E-BADPATH, no destination filename given\n");
+                return;
+            }
+            strcpy(literal_name, base);
+        }
+        name = literal_name;
+    }
 
     if (!host_input_open(local_file, &in)) {
         return;
@@ -1652,7 +1682,14 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
         /* Report the name as stored: uppercase, with its dot. */
         char stored[ODS2_PATH_MAX];
         const char *why;
-        if (!ods2_make_file_name(name, stored, sizeof(stored), &why)) {
+        if (g_ods5) {
+            char completed[ODS2_PATH_MAX];
+            if (ods5_complete_name(name, completed, sizeof(completed))) {
+                display_name(completed, stored, sizeof(stored));
+            } else {
+                snprintf(stored, sizeof(stored), "%s", name);
+            }
+        } else if (!ods2_make_file_name(name, stored, sizeof(stored), &why)) {
             snprintf(stored, sizeof(stored), "%s", name);
         }
         if (opts->convert) {
@@ -1919,7 +1956,12 @@ static void cmd_delete(ods2_volume_t *vol, const ods2_parsed_path_t *p)
         /* Normal case: "[SOMEDIR]FILE.TXT" - delete FILE.TXT from
            SOMEDIR directly. */
         dir_path = effective_path;
-        name = p->filename;
+        if (ods5_unescape(p->filename, strlen(p->filename), name_buf, sizeof(name_buf)) ==
+            (size_t) -1) {
+            report_error("%%ODS2-E-BADNAME, malformed ^ escape in the file name\n");
+            return;
+        }
+        name = name_buf;
     } else {
         /* Bare directory reference like "[TESTDIR]" - the directory
            itself is the target, one level up from where
@@ -1932,7 +1974,15 @@ static void cmd_delete(ods2_volume_t *vol, const ods2_parsed_path_t *p)
             return;
         }
         split_last_component(effective_path, split_buf, &parent_path, &last_name);
-        snprintf(name_buf, sizeof(name_buf), "%s.DIR", last_name);
+        {
+            char last_literal[ODS2_PATH_MAX - 8];
+            if (ods5_unescape(last_name, strlen(last_name), last_literal, sizeof(last_literal)) ==
+                (size_t) -1) {
+                report_error("%%ODS2-E-BADNAME, malformed ^ escape in the directory name\n");
+                return;
+            }
+            snprintf(name_buf, sizeof(name_buf), "%s.DIR", last_literal);
+        }
         dir_path = parent_path;
         name = name_buf;
     }
@@ -2325,15 +2375,7 @@ int main(int argc, char **argv)
         const char *names = getenv("ODS2_NAMES");
         if (names != NULL && matches(names, "UTF8")) g_utf8_names = true;
     }
-    if (r.ok && vol.ods5) {
-        fprintf(stderr, "%%ODS2-W-ODS5RO, %s: ODS-5 volume (structure level 5); "
-                        "mounted read-only, writing is not supported yet\n",
-                argv[1]);
-        if (vol.version0) {
-            fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version "
-                            "is 0\n", argv[1]);
-        }
-    } else if (r.ok && vol.version0) {
+    if (r.ok && vol.version0) {
         fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version is 0; "
                         "mounted read-only\n", argv[1]);
     } else if (r.ok && access(argv[1], W_OK) != 0) {

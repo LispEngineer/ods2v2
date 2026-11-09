@@ -43,14 +43,10 @@ static ods2_result_t fail(const char *why)
     ods2_result_t r; r.ok = false; r.problem = why; return r;
 }
 
-/* Why a write is refused: an ODS-5 or version 0 volume is never
-   writable, any other volume only if mounted with ods2_mount_write(). */
+/* Why a write is refused: a version 0 volume is never writable, any
+   other volume (ODS-2 or ODS-5) only if mounted with ods2_mount_write(). */
 static ods2_result_t not_writable(const ods2_volume_t *vol)
 {
-    if (vol->ods5) {
-        return fail("volume is ODS-5 (HM2$W_STRUCLEV level 5), which is "
-                    "read-only for now");
-    }
     if (vol->version0) {
         return fail("volume has HM2$W_STRUCLEV version 0 and is read-only");
     }
@@ -139,11 +135,6 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
     }
 
     vol->ods5 = ods2_home_is_ods5(&vol->home);
-    if (vol->ods5 && writable) {
-        ods2_dismount(vol);
-        return fail("HM2$W_STRUCLEV level is 5 (ODS-5): the volume can be "
-                    "read, not written, by this version");
-    }
     vol->version0 = ods2_home_is_version0(&vol->home);
     if (vol->version0 && writable) {
         ods2_dismount(vol);
@@ -881,7 +872,8 @@ static header_slot_t classify_header_slot(const uint8_t *h)
 {
     const ods2_head_core_t *core = (const ods2_head_core_t *) h;
     uint16_t stored = (uint16_t) (h[510] | (h[511] << 8));
-    bool structured = (core->struclev >> 8) == 2 &&
+    bool structured = ((core->struclev >> 8) == ODS5_LEVEL_2 ||
+                       (core->struclev >> 8) == ODS5_LEVEL_5) &&
                       core->idoffset >= 40 && core->idoffset <= core->mpoffset &&
                       core->mpoffset <= core->acoffset && core->acoffset <= core->rsoffset;
 
@@ -1331,7 +1323,7 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
                                      const char *name, ods2_fid_t *new_fid_out)
 {
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
-    char dirname[256];
+    char dirname[ODS5_MAX_LITERAL_NAME + 8];
     ods2_fid_t existing;
     unsigned file_number;
     uint16_t seq_num;
@@ -1346,20 +1338,30 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
     if (!vol->writable) {
         return not_writable(vol);
     }
-    if (contains_wildcard(name)) {
-        return fail("directory name cannot contain wildcard characters ('*' or '%')");
-    }
-    if (strchr(name, ';') != NULL) {
-        return fail("directory name cannot contain ';' (a version belongs in the "
-                    "directory entry, never in the name itself)");
-    }
-    {
+    if (vol->ods5) {
+        /* Level 5: the name as given, case kept; the characters VMS
+           accepts (ods5_check_new_name), at most 236 bytes with ".DIR" */
         const char *why;
-        if (!ods2_valid_dir_name(name, &why)) return fail(why);
+        if (strlen(name) + 5 > sizeof(dirname)) return fail("directory name too long");
+        snprintf(dirname, sizeof(dirname), "%s.DIR", name);
+        why = ods5_check_new_name(dirname);
+        if (why != NULL) return fail(why);
+    } else {
+        if (contains_wildcard(name)) {
+            return fail("directory name cannot contain wildcard characters ('*' or '%')");
+        }
+        if (strchr(name, ';') != NULL) {
+            return fail("directory name cannot contain ';' (a version belongs in the "
+                        "directory entry, never in the name itself)");
+        }
+        {
+            const char *why;
+            if (!ods2_valid_dir_name(name, &why)) return fail(why);
+        }
+        strcpy(dirname, name); /* at most 39 characters, checked above */
+        uppercase_str(dirname); /* real VMS always stores names uppercase */
+        strcat(dirname, ".DIR");
     }
-    strcpy(dirname, name); /* at most 39 characters, checked above */
-    uppercase_str(dirname); /* real VMS always stores names uppercase */
-    strcat(dirname, ".DIR");
 
     /* Refuse to create a name that already exists matching VMS
        behavior (CREATE/DIRECTORY on an existing name fails) and
@@ -1404,13 +1406,14 @@ ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_he
     spec.ffbyte = 2;  /* sentinel is 2 bytes */
 
     {
-        char ident[260]; /* dirname is already bounded (<256-4 chars,
-                             checked above) plus ";1" and a nul - this
+        char ident[ODS5_MAX_LITERAL_NAME + 16]; /* dirname is already bounded
+                             (checked above) plus ";1" and a nul - this
                              is always large enough, sized generously
                              to also silence a spurious compiler
                              truncation warning */
         snprintf(ident, sizeof(ident), "%s;1", dirname);
         spec.ident_name = ident;
+        spec.level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
 
         if (!ods2_build_file_header(new_header, &spec)) {
             return fail("could not construct new directory's header");
@@ -1672,8 +1675,8 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
     ods2_header_spec_t spec;
     uint8_t new_header[512];
     ods2_result_t r;
-    char upper_name[256];
-    char ident[260]; /* name is already bounded (<256 chars, checked
+    char upper_name[ODS5_MAX_LITERAL_NAME + 8];
+    char ident[ODS5_MAX_LITERAL_NAME + 16]; /* name is already bounded (checked
                         above) plus ";1" and a nul - always large
                         enough, sized generously to also silence a
                         spurious compiler truncation warning */
@@ -1681,21 +1684,32 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
     if (!vol->writable) {
         return not_writable(vol);
     }
-    if (contains_wildcard(name)) {
-        return fail("file name cannot contain wildcard characters ('*' or '%')");
-    }
-    if (strchr(name, ';') != NULL) {
-        /* A "NAME;VER" string stored as the name itself would create
-           an entry no VMS system can open. Callers split the version
-           off first (see ods2_path.h). */
-        return fail("file name cannot contain ';' - pass the name without its version");
-    }
-    /* Validated and in VMS's on-disk form: uppercase, only name
-       characters, and always a dot ("MAKEFILE" -> "MAKEFILE."). */
-    {
-        const char *why;
-        if (!ods2_make_file_name(name, upper_name, sizeof(upper_name), &why)) {
-            return fail(why);
+    if (vol->ods5) {
+        /* Level 5: the name as given, case kept, its dot completed;
+           the characters VMS accepts (ods5_check_new_name). A ';' in
+           it is part of the name here, as VMS allows with ^; */
+        const char *why = ods5_check_new_name(name);
+        if (why != NULL) return fail(why);
+        if (!ods5_complete_name(name, upper_name, sizeof(upper_name))) {
+            return fail("file name too long");
+        }
+    } else {
+        if (contains_wildcard(name)) {
+            return fail("file name cannot contain wildcard characters ('*' or '%')");
+        }
+        if (strchr(name, ';') != NULL) {
+            /* A "NAME;VER" string stored as the name itself would create
+               an entry no VMS system can open. Callers split the version
+               off first (see ods2_path.h). */
+            return fail("file name cannot contain ';' - pass the name without its version");
+        }
+        /* Validated and in VMS's on-disk form: uppercase, only name
+           characters, and always a dot ("MAKEFILE" -> "MAKEFILE."). */
+        {
+            const char *why;
+            if (!ods2_make_file_name(name, upper_name, sizeof(upper_name), &why)) {
+                return fail(why);
+            }
         }
     }
     name = upper_name; /* every use below now sees the on-disk name */
@@ -1756,8 +1770,15 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
        the primary header holds what fits in its map area, the rest go
        in extension headers chained through FH2$W_EXT_FID (spec 3.3,
        3.5.2.5, 3.5.2.8). */
+    snprintf(ident, sizeof(ident), "%s;1", name);
+    memset(&spec, 0, sizeof(spec));
+    spec.level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
+    spec.ident_name = ident;
     for (pos = 0; pos < extent_count; ) {
-        int fit = ods2_header_extents_that_fit(extents + pos, extent_count - pos);
+        int fit;
+        spec.seg_num = (uint16_t) segments; /* where the Map Area starts depends on it at level 5 */
+        fit = ods2_header_extents_that_fit_at(extents + pos, extent_count - pos,
+                                              ods2_header_map_offset(&spec));
         if (fit <= 0) {
             r = fail("internal error: an allocated extent cannot be described by "
                      "any retrieval pointer format (should be unreachable)");
@@ -1787,6 +1808,7 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
     if (!r.ok) goto undo;
 
     memset(&spec, 0, sizeof(spec));
+    spec.level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
     spec.rtype = attrs->rtype;
     spec.rattrib = attrs->rattrib;
     spec.rsize = attrs->rsize;
@@ -1978,13 +2000,28 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
         if (core->highwater < written + 1) core->highwater = written + 1;
     }
     {
-        /* FI2$W_REVISION / FI2$Q_REVDATE; FI2$Q_CREDATE stays. */
+        /* FI2$W_REVISION / FI2$Q_REVDATE; FI2$Q_CREDATE stays. The
+           header's own level says which ident area it has: the reserved
+           files, root directory included, keep level 2 on an ODS-5 volume. */
         uint8_t *ident = dir_header + (size_t) core->idoffset * 2;
-        uint16_t revision = (uint16_t) (ident[20] | (ident[21] << 8));
-        revision++;
-        ident[20] = (uint8_t) (revision & 0xff);
-        ident[21] = (uint8_t) (revision >> 8);
-        ods2_store_vms_time(ident + 30, ods2_vms_time_now()); /* local time */
+        if ((core->struclev >> 8) == ODS5_LEVEL_5) {
+            /* FI5$W_REVISION (2), FI5$Q_REVDATE (12), and the attribute
+               change date (44), as VMS moves both when it changes a directory */
+            uint16_t revision = (uint16_t) (ident[ODS5_FI5_REVISION] |
+                                            (ident[ODS5_FI5_REVISION + 1] << 8));
+            uint64_t now = ods2_vms_time_now();
+            revision++;
+            ident[ODS5_FI5_REVISION] = (uint8_t) (revision & 0xff);
+            ident[ODS5_FI5_REVISION + 1] = (uint8_t) (revision >> 8);
+            ods2_store_vms_time(ident + ODS5_FI5_REVDATE, now);
+            ods2_store_vms_time(ident + ODS5_FI5_ATTDATE, now);
+        } else {
+            uint16_t revision = (uint16_t) (ident[20] | (ident[21] << 8));
+            revision++;
+            ident[20] = (uint8_t) (revision & 0xff);
+            ident[21] = (uint8_t) (revision >> 8);
+            ods2_store_vms_time(ident + 30, ods2_vms_time_now()); /* local time */
+        }
     }
     {
         uint16_t checksum = ods2_checksum(dir_header, 255);
@@ -2060,7 +2097,8 @@ ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_n
     if (!r.ok) return r;
 
     t = ods2_dir_choose_block(blocks, used, name);
-    if (ods2_insert_dir_entry(blocks + (size_t) t * 512, 512, name, version, fid)) {
+    if (ods2_insert_dir_entry_level(blocks + (size_t) t * 512, 512, name, version, fid,
+                                    vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2)) {
         if (ods2_file_content_length(dir_header) == 0 ||
             !below_highwater(dir_header, t + 1)) {
             /* An end-of-file that didn't cover even block 1, or a block
@@ -2073,7 +2111,8 @@ ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_n
         uint8_t combined[1024];
         memcpy(combined, blocks + (size_t) t * 512, 512);
         memset(combined + 512, 0, 512);
-        if (!ods2_insert_dir_entry(combined, sizeof(combined), name, version, fid)) {
+        if (!ods2_insert_dir_entry_level(combined, sizeof(combined), name, version, fid,
+                                         vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2)) {
             free(blocks);
             return fail("internal error: a block plus one record overflowed 1024 "
                         "bytes (should be unreachable)");

@@ -24,6 +24,7 @@
 
 #include "ods2_directory_write.h"
 #include "ods5_names.h"
+#include "ods5_ondisk.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -68,11 +69,27 @@ int ods2_dir_name_compare(const char *a, size_t a_len, const char *b, size_t b_l
     }
 }
 
-/* An on-disk record's name (namecount bytes, not nul-terminated)
-   against a caller's nul-terminated name. */
-static int compare_names(const uint8_t *disk_name, size_t disk_len, const char *name)
+/* The name of the on-disk record at `rec` (DIR$B_FLAGS at 4, name count
+   at 5, name from 6) as UTF-8: ISO Latin-1 bytes, or UCS-2 units if the
+   record's name type says so (a level 5 record; a level 2 record's flags
+   are 0 and its names are ASCII, so it reads the same either way). Returns
+   the length, or 0 if the name does not fit or is malformed. */
+static size_t record_name_utf8(const uint8_t *rec, char *out, size_t cap)
 {
-    return ods2_dir_name_compare((const char *) disk_name, disk_len, name, strlen(name));
+    unsigned name_type = (rec[4] & ODS5_DIR_NAMETYPE_MASK) >> ODS5_DIR_NAMETYPE_SHIFT;
+    size_t n = (name_type == ODS5_NAME_UCS2)
+                   ? ods5_ucs2_to_utf8(rec + 6, rec[5], out, cap)
+                   : ods5_isl1_to_utf8(rec + 6, rec[5], out, cap);
+    if (n == (size_t) -1) { out[0] = '\0'; return 0; }
+    return n;
+}
+
+/* The on-disk record at `rec` against a caller's nul-terminated UTF-8 name. */
+static int compare_record(const uint8_t *rec, const char *name)
+{
+    char disk[ODS5_MAX_LITERAL_NAME + 1];
+    size_t n = record_name_utf8(rec, disk, sizeof(disk));
+    return ods2_dir_name_compare(disk, n, name, strlen(name));
 }
 
 static bool name_char_ok(char c)
@@ -159,17 +176,43 @@ bool ods2_valid_dir_name(const char *name, const char **why)
 bool ods2_insert_dir_entry(uint8_t *block, size_t block_size,
                             const char *name, uint16_t version, ods2_fid_t fid)
 {
+    return ods2_insert_dir_entry_level(block, block_size, name, version, fid, ODS5_LEVEL_2);
+}
+
+bool ods2_insert_dir_entry_level(uint8_t *block, size_t block_size,
+                                 const char *name, uint16_t version, ods2_fid_t fid,
+                                 unsigned level)
+{
     size_t pos = 0;
     size_t insert_pos = (size_t) -1; /* not yet found */
     size_t end_pos; /* position of the sentinel (or end of valid content) */
-    size_t namecount = strlen(name);
-    size_t name_padded = namecount + (namecount % 2);
-    size_t record_total = 6 + name_padded + 8;
+    uint8_t stored[2 * ODS5_MAX_LITERAL_NAME + 4];
+    const uint8_t *name_bytes;
+    size_t namecount;
+    size_t name_padded;
+    size_t record_total;
+    uint8_t flags = 0;
+    uint16_t verlimit = 1;
     bool had_real_sentinel = false;
 
-    if (namecount > 255) {
-        return false; /* DIR$B_NAMECOUNT is a single byte */
+    if (level == ODS5_LEVEL_5) {
+        /* level 5: the name as stored (case kept, dot completed, ISO
+           Latin-1 or UCS-2), its type in the record flags, and the
+           default version limit VMS V8.4 gives a new entry */
+        unsigned type;
+        if (!ods5_stored_name(name, stored, sizeof(stored), &namecount, &type)) return false;
+        name_bytes = stored;
+        flags = (uint8_t) (type << ODS5_DIR_NAMETYPE_SHIFT);
+        verlimit = 32767;
+    } else {
+        name_bytes = (const uint8_t *) name;
+        namecount = strlen(name);
     }
+    if (namecount > ((level == ODS5_LEVEL_5) ? ODS5_DIR_MAX_NAME : 255)) {
+        return false; /* DIR$B_NAMECOUNT is a single byte; 236 is the longest ODS-5 name */
+    }
+    name_padded = namecount + (namecount % 2);
+    record_total = 6 + name_padded + 8;
 
     /* Real VMS requires directory records within a block to be
        stored in sorted (alphabetical, case-insensitive) order by
@@ -183,7 +226,6 @@ bool ods2_insert_dir_entry(uint8_t *block, size_t block_size,
        make room. */
     while (pos + 6 <= block_size) {
         uint16_t size = read_word(block + pos);
-        uint8_t existing_namecount;
         if (size == 0xffff) {
             had_real_sentinel = true;
             break;
@@ -191,9 +233,7 @@ bool ods2_insert_dir_entry(uint8_t *block, size_t block_size,
         if (size == 0) {
             break; /* empty/uninitialized rest of block, no real sentinel yet */
         }
-        existing_namecount = block[pos + 5];
-        if (insert_pos == (size_t) -1 &&
-            compare_names(block + pos + 6, existing_namecount, name) > 0) {
+        if (insert_pos == (size_t) -1 && compare_record(block + pos, name) > 0) {
             insert_pos = pos;
         }
         pos += (size_t) size + 2;
@@ -219,15 +259,17 @@ bool ods2_insert_dir_entry(uint8_t *block, size_t block_size,
             (end_pos + 2) - insert_pos);
 
     write_word(block + insert_pos, (uint16_t) (record_total - 2));
-    write_word(block + insert_pos + 2, 1);      /* verlimit - spec says "ignored", but
+    write_word(block + insert_pos + 2, verlimit); /* verlimit - spec says "ignored", but
                                                      every real VMS-written record examined
-                                                     shows 1, never 0; since ANALYZE/DISK's
+                                                     shows 1 (reserved files) on ODS-2,
+                                                     32767 for a file made on V8.4; since
+                                                     ANALYZE/DISK's
                                                      BAD_DIRTYPE finding suggests this
                                                      field is validated more strictly
                                                      than the spec implies */
-    block[insert_pos + 4] = 0;                   /* flags - confirmed must be 0 */
+    block[insert_pos + 4] = flags;               /* flags - 0 on ODS-2, the name type at level 5 */
     block[insert_pos + 5] = (uint8_t) namecount;
-    memcpy(block + insert_pos + 6, name, namecount);
+    memcpy(block + insert_pos + 6, name_bytes, namecount);
     if (name_padded > namecount) {
         block[insert_pos + 6 + namecount] = 0;    /* padding byte */
     }
@@ -263,13 +305,10 @@ bool ods2_remove_dir_entry(uint8_t *block, size_t block_size, const char *name)
        stops for lack of a real one). */
     while (pos + 6 <= block_size) {
         uint16_t size = read_word(block + pos);
-        uint8_t namecount;
         if (size == 0xffff || size == 0) {
             break;
         }
-        namecount = block[pos + 5];
-        if (match_pos == (size_t) -1 &&
-            compare_names(block + pos + 6, namecount, name) == 0) {
+        if (match_pos == (size_t) -1 && compare_record(block + pos, name) == 0) {
             match_pos = pos;
             match_record_total = (size_t) size + 2;
         }
@@ -319,8 +358,7 @@ bool ods2_remove_dir_version(uint8_t *block, size_t block_size, const char *name
             return false; /* malformed - refuse to edit */
         }
         namecount = block[pos + 5];
-        if (pair_pos == (size_t) -1 &&
-            compare_names(block + pos + 6, namecount, name) == 0) {
+        if (pair_pos == (size_t) -1 && compare_record(block + pos, name) == 0) {
             size_t name_end = pos + 6 + namecount;
             size_t e = name_end + (name_end % 2);
             for (; e + 8 <= pos + this_total; e += 8) {
@@ -347,8 +385,14 @@ bool ods2_remove_dir_version(uint8_t *block, size_t block_size, const char *name
         size_t tail_end = (end_pos + 2 <= block_size) ? end_pos + 2 : block_size;
 
         if (pair_count <= 1) {
-            /* Last version in this record: drop the record itself. */
-            return ods2_remove_dir_entry(block, block_size, name);
+            /* Last version in this record: drop the record itself (this
+               one: another record of the same name, holding more
+               versions, may come first in the block). */
+            memmove(block + record_pos, block + record_pos + record_total,
+                    tail_end - (record_pos + record_total));
+            memset(block + tail_end - record_total, 0, record_total);
+            write_word(block + end_pos - record_total, 0xffff);
+            return true;
         }
 
         /* Close the 8-byte gap (through the sentinel's own 2 bytes),
@@ -400,7 +444,7 @@ unsigned ods2_dir_choose_block(const uint8_t *blocks, unsigned count, const char
     for (i = 0; i < count; i++) {
         const uint8_t *b = blocks + (size_t) i * 512;
         if (ods2_dir_block_is_empty(b)) continue;
-        if (compare_names(b + 6, b[5], name) <= 0) {
+        if (compare_record(b, name) <= 0) {
             choice = i;
         } else {
             break; /* blocks are in order: none further can qualify */
