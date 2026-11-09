@@ -243,8 +243,15 @@ check "SET VOLUME/GEOMETRY=ra on 1 GiB: 57 x 15 x 2453 (the RA82), no prediction
     "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/tg.img" show) $(echo "$out" | grep -c PREDICTED)"
 $ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=nonesuch" >/dev/null 2>&1; check "an unknown device type is refused" 1 $?
 $INIT "$TMP/tg2.img" 3000000 --target=ld >/dev/null 2>"$TMP/tg2.err"
-check "an unmeasured size says it is a prediction" 1 "$(grep -c predicted "$TMP/tg2.err")"
+check "an unmeasured size says it is a prediction" 1 "$(grep -c prediction "$TMP/tg2.err")"
 
+# ods2_init says which geometry it wrote, and how to fit a VAX
+out=$($INIT "$TMP/pg.img" 1G --structure=2 2>&1)
+check "ods2_init (default): prints the geometry and the VAX advice" "1 1 1" \
+    "$(echo "$out" | grep -c 'I-GEOMETRY.*32 sectors x 16 tracks x 4096 cylinders (the default)') $(echo "$out" | grep -c -- '--target=ld') $(echo "$out" | grep -c 'SET VOLUME/GEOMETRY')"
+out=$($INIT "$TMP/pg2.img" 1G --structure=2 --target=ld 2>&1)
+check "ods2_init --target=ld: prints 38 x 38 x 1453 (ld), no advice line" "1 0" \
+    "$(echo "$out" | grep -c 'I-GEOMETRY.*38 sectors x 38 tracks x 1453 cylinders (ld)') $(echo "$out" | grep -c -- '-ODS2-I-VAX')"
 # a block that only starts like a footer (the signature and the two bytes, but a wrong CRC) is not one: no message, a normal write mount
 cp "$TMP/s0.img" "$TMP/s4.img"; python3 -I "$TMP/foot.py" inside "$TMP/s4.img" 8192
 python3 -I - "$TMP/s4.img" <<'PY'

@@ -355,8 +355,14 @@ version, which ods2v2 does not make; it creates version 1 only). Also:
   of the device it initialized, and OpenVMS VAX V7.3's ANALYZE/DISK_STRUCTURE
   accepts only a storage control block that records the geometry of the device the
   volume is on (measured on an RA82: 57 x 15; the LD driver, 38 x 38; SCSI disks,
-  often 63 x 255), so an image meant for one machine is made with `--geometry`, or
-  fitted afterwards with `SET VOLUME/GEOMETRY=sectors,tracks`.
+  often 63 x 255). The default is 32 x 16 (63 x 255 above 16 GiB), which Alpha
+  V8.4 and V7.3-2 accept; `ods2_init` prints the geometry it chose. **For an
+  OpenVMS VAX V7.3 machine name the device when you make the volume:
+  `--target=ld` (the LD driver), `--target=ra` (SIMH RA82 / RA92) or
+  `--target=scsi` (also `axpbox`, `rz`; or `--geometry=SECTORS,TRACKS`), and fit an
+  existing image with `SET VOLUME/GEOMETRY=ld|ra|scsi|sectors,tracks`.** The
+  geometry of the LD driver and of the RA types depends on the size; a size that
+  was not measured is said to be a prediction (check `SHOW DEVICE/FULL`).
 
 **Names.** ODS-5 keeps the case of names and allows spaces, many dots,
 ISO Latin-1 and UCS-2 characters. `DIR` shows them the way DCL does,

@@ -65,6 +65,7 @@ int main(int argc, char **argv)
                         "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 256\n", argv[0]);
         return 2;
     }
+    const char *geo_source = NULL;
     memset(&opt, 0, sizeof(opt));
     opt.level = ODS5_LEVEL_5;
     size = strtoull(argv[2], &end, 10);
@@ -98,9 +99,11 @@ int main(int argc, char **argv)
                 fprintf(stderr, "unknown target %s (ld, ra, ra82, ra92, rq, scsi, axpbox, rz)\n", argv[i] + 9);
                 return 2;
             }
-            fprintf(stderr, "ods2_init: target %s, %llu blocks: geometry %u x %u%s\n", argv[i] + 9,
-                    (unsigned long long) opt.blocks, opt.sectors, opt.tracks,
-                    measured ? "" : " (predicted: not a measured size; confirm with SHOW DEVICE/FULL on the target)");
+            geo_source = argv[i] + 9;
+            if (!measured) {
+                fprintf(stderr, "ods2_init: the %s geometry for %llu blocks is a prediction (not a measured size): confirm "
+                        "with SHOW DEVICE/FULL on the target\n", argv[i] + 9, (unsigned long long) opt.blocks);
+            }
         }
         else if (starts(argv[i], "--geometry=")) {
             /* --geometry=SECTORS,TRACKS: the geometry the SCB records (cylinders follow from the size) */
@@ -110,6 +113,7 @@ int main(int argc, char **argv)
                 return 2;
             }
             opt.sectors = se; opt.tracks = tr;
+            geo_source = "--geometry";
         }
         else if (starts(argv[i], "--cluster=")) opt.cluster = (unsigned) atoi(argv[i] + 10);
         else if (strcmp(argv[i], "--security=profile") == 0) opt.security = ODS2_INIT_SECURITY_PROFILE;
@@ -125,5 +129,21 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("%%ODS2-I-INITIALIZED, %s: %llu blocks, ODS-%u, label %s\n", argv[1], size, opt.level, opt.label);
+    {
+        /* what the storage control block records: OpenVMS VAX V7.3 ANALYZE/DISK_STRUCTURE compares it with the device's
+           own geometry (measured: only the matching one is accepted) */
+        uint32_t sec = opt.sectors, trk = opt.tracks;
+        unsigned long long per = 0, cyl;
+        ods2_init_geometry(opt.blocks, &sec, &trk);
+        per = (unsigned long long) sec * trk;
+        cyl = (opt.blocks + per - 1) / per;
+        printf("%%ODS2-I-GEOMETRY, the storage control block records %u sectors x %u tracks x %llu cylinders (%s)\n",
+               sec, trk, cyl, geo_source != NULL ? geo_source : "the default");
+        if (geo_source == NULL) {
+            printf("-ODS2-I-VAX, for an OpenVMS VAX V7.3 machine use --target=ld (LD driver), ra (SIMH RA82/RA92) or scsi: "
+                   "its ANALYZE/DISK_STRUCTURE compares this with the device's own geometry; an existing image is fitted "
+                   "with SET VOLUME/GEOMETRY=ld|ra|scsi|sectors,tracks\n");
+        }
+    }
     return 0;
 }
