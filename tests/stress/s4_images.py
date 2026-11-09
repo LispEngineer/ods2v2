@@ -27,6 +27,8 @@ SPECS = {
     's4-exthdr2':    ('frag', 'f2', 4109, 1, 'frag', {'size': 16384, 'cluster': 1}, 'ODS-2, the same: files with 500+ extents and extension headers'),
     's4-bigdir':     ('bigdir', 'f5', 4110, 1, 'bigdir', {'size': 131072, 'hl': True, 'cluster': 4}, 'ODS-5: one directory with 3000-5000 entries (long and short names), many block splits'),
     's4-bigdir2':    ('bigdir', 'f2', 4111, 1, 'bigdir', {'size': 131072, 'cluster': 4}, 'ODS-2: one directory with thousands of entries'),
+    's4-bigindex':   ('bigdir', 'f5', 4113, 1, 'bigdir', {'size': 262144, 'hl': True, 'cluster': 4, 'n': 5200}, 'ODS-5: one directory with 5200 files: INDEXF.SYS grows past 4,096 blocks (ods5 22f0811 grows it in bigger steps there)'),
+    's4-bigindex2':  ('bigdir', 'f2', 4114, 1, 'bigdir', {'size': 262144, 'cluster': 4, 'n': 5200}, 'ODS-2: one directory with 5200 files, INDEXF.SYS past 4,096 blocks'),
     's4-deep':       ('deep', 'f5', 4112, 1, 'deep', {'size': 32768}, 'ODS-5: nested directories 30-255 levels deep with files at several depths'),
 }
 

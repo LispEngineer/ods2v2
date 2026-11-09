@@ -1419,7 +1419,7 @@ class Harness:
 
     def scenario_bigdir(self):
         r, m = self.rng, self.model
-        n = r.choice([400, 1200, 3000, 5000])
+        n = self.opts.get('n', r.choice([400, 1200, 3000, 5000]))
         res = run_ods2(self.img, 'CREATE/DIRECTORY [BIG]')
         m.add_dir((), 'BIG')
         dp = ('BIG',)
