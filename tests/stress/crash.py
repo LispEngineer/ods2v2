@@ -57,7 +57,7 @@ def run_fault(img, cmd, k=None, count=False, timeout=300):
 
 
 TRANSIENT = [r'two entries for', r'out of order']     # ods5-wr2 (F2 fix): a split/move may leave a name listed twice or briefly out of order
-TRANSIENT_OPS = ('COPY', 'MKDIR', 'LINK', 'SYMLINK', 'IMPORT', 'SCRIPT')
+TRANSIENT_OPS = ('COPY', 'MKDIR', 'LINK', 'SYMLINK', 'IMPORT', 'SCRIPT', 'DELETE', 'RMDIR')   # DELETE/RMDIR: removing an emptied directory block shifts the following blocks up (seen in seed 207, ods5 22f0811)
 
 
 def checker_errors(img, label=''):
@@ -360,7 +360,7 @@ def main():
         for f in fails[:6]:
             print('    ' + f[:400])
         allfails += len(fails)
-    print('TOTAL outcomes %s; %d failure(s)' % (json.dumps(grand), allfails))
+    print('TOTAL outcomes %s; %d failure(s); %d interrupted states list a name twice or out of order (allowed after split/move/shift)' % (json.dumps(grand), allfails, len(dups)))
     return 1 if allfails else 0
 
 
