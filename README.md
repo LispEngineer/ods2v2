@@ -117,7 +117,10 @@ number of levels, including none) anywhere in the directory spec.
 
 Like VMS, a multi-directory listing shows only directories that hold
 something matching, ends with a grand total, and says "no files
-found" when nothing matches. Quote these specs on the shell command
+found" when nothing matches. A directory reachable under two names
+(on a system disk, `SYS1`...`SYSFF` are all `SYS0`) is listed under
+each. An entry that points back at a directory it is below is a loop:
+it is not followed, and `%ODS2-W-DIRLOOP` names both paths. Quote these specs on the shell command
 line (`./ods2 transfer.dsk DIR "[*...]*.*"`), since `[`, `*` and `?`
 are shell wildcards too. The other commands act on one directory and
 refuse a wildcard one.

@@ -363,6 +363,12 @@ typedef struct {
     int dirs_shown;
     int files_shown;
     int errors;
+    /* The directories on the current recursion path, [0..depth]: their
+       FIDs and absolute paths, to refuse an entry that points back at
+       one of them (a loop). Aliases that are not ancestors are still
+       followed, as VMS does. */
+    ods2_fid_t path_fid[MAX_RECURSION_DEPTH + 1];
+    const char *path_name[MAX_RECURSION_DEPTH + 1];
 } dir_walk_t;
 
 /* Walks the tree below the start directory depth first, in directory
@@ -404,6 +410,9 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
         w->errors++;
         return;
     }
+
+    w->path_fid[depth] = dir_fid;
+    w->path_name[depth] = abs_path;
 
     if (here) {
         int shown = show_directory(abs_path, entries, count, w->pattern, w->p);
@@ -463,6 +472,24 @@ static void walk_directories(dir_walk_t *w, const char *abs_path, const char *re
         r = ods2_read_header(w->vol, entries[i].fid.fid_num, sub_header);
         if (!r.ok || !(((ods2_head_core_t *) sub_header)->filechar & 0x2000u)) {
             continue;
+        }
+        /* An entry naming a directory already on the path is a loop:
+           warn instead of descending until the depth limit. */
+        {
+            int d, loop = -1;
+            for (d = 0; d <= depth; d++) {
+                if (w->path_fid[d].fid_num == entries[i].fid.fid_num &&
+                    w->path_fid[d].fid_seq == entries[i].fid.fid_seq) {
+                    loop = d;
+                    break;
+                }
+            }
+            if (loop >= 0) {
+                fprintf(stderr, "%%ODS2-W-DIRLOOP, [%s] is the directory [%s] "
+                                "again; not descended into\n",
+                        child_abs, w->path_name[loop][0] ? w->path_name[loop] : "000000");
+                continue;
+            }
         }
         walk_directories(w, child_abs, child_rel, depth + 1);
     }

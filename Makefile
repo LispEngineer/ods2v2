@@ -41,6 +41,9 @@ MAIN_TOOLS = ods2
 DEV_TOOLS = read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
             ods2_put ods2_check_headers ods2_dump_root ods2_dump_header ods2_rm
 
+$(BUILD)/ods2_make_loop: tests/ods2_make_loop.c $(VOLUME_SRCS) include/ods2_volume.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_make_loop.c $(VOLUME_SRCS) -o $@
+
 TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest
 
 .PHONY: all test tools dev-tools release clean starter-volume
@@ -175,7 +178,7 @@ ods2_rm: tools/ods2_rm.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c incl
 ods2: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c include/ods2_volume.h include/ods2_text_var.h include/ods2_path.h include/ods2_wildcard.h third_party/linenoise/linenoise.h
 	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Ithird_party/linenoise $(SANFLAGS) tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c -o $@
 
-test: $(TESTS) tools ods2_put ods2_dump_header
+test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header
 	@echo "--- ods2_ondisk_selftest ---"
 	@$(BUILD)/ods2_ondisk_selftest
 	@echo "--- ods2_checksum_selftest ---"
@@ -224,6 +227,8 @@ test: $(TESTS) tools ods2_put ods2_dump_header
 	@sh tests/cli_versions_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
+	@echo "--- CLI directory loop checks ---"
+	@sh tests/cli_dir_loop_check.sh
 	@echo "--- CLI large file checks ---"
 	@sh tests/cli_large_file_check.sh
 	@echo "--- CLI exit status checks ---"
@@ -270,5 +275,5 @@ release: test
 clean:
 	rm -rf $(BUILD)
 	rm -f samples/synthetic_disk.img samples/synthetic_disk_working.img samples/synthetic_disk_v0.img
-	rm -f samples/versions_disk.img samples/versions_cli_disk.img samples/cli_wildcard_disk.img samples/file_alloc_disk.img samples/dir_order_disk.img samples/large_file_disk.img samples/cli_status_disk.img samples/cli_attrs_disk.img samples/record_attrs_disk.img samples/indexf_large_disk.img samples/text_var_disk.img samples/cli_label_disk.img samples/cli_label_orig.img
+	rm -f samples/versions_disk.img samples/versions_cli_disk.img samples/cli_wildcard_disk.img samples/cli_loop_disk.img samples/file_alloc_disk.img samples/dir_order_disk.img samples/large_file_disk.img samples/cli_status_disk.img samples/cli_attrs_disk.img samples/record_attrs_disk.img samples/indexf_large_disk.img samples/text_var_disk.img samples/cli_label_disk.img samples/cli_label_orig.img
 	rm -f $(TOOLS)
