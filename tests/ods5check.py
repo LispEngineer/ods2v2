@@ -452,6 +452,7 @@ def main():
         used_blocks = max(used_blocks, 0)
         where = 'dir %d (%s)' % (n, d['name'] if d else '?')
         lst = []
+        vl1 = []
         prevkey = None
         for bi in range(used_blocks):
             blk = data[bi * 512:(bi + 1) * 512]
@@ -494,6 +495,8 @@ def main():
                 if (size + 2 - (ent - pos)) % 8:
                     fnd.err('%s: record %r: odd tail length' % (where, nm))
                 vl = u16(blk, pos + 2)
+                if vl == 1 and not (n == 4 and (nm.upper().endswith('.SYS') or nm.upper() == '000000.DIR')):
+                    vl1.append(nm)
                 key = fold_name(nm if '.' in nm else nm + '.')
                 if v.level == 5 and not (flags & 0x40):
                     exp = stored_type_for(nm if '.' in nm else nm + '.')
@@ -521,6 +524,12 @@ def main():
                 nrec += 1
             if nrec == 0 and used_blocks > 1 and False:
                 fnd.err('%s block %d: empty block inside the EOF' % (where, bi + 1))
+        if vl1:
+            # every entry of a VMS-made volume has a version limit of 32767 or the directory's default (and explicit
+            # SET FILE/VERSION_LIMIT values, never 1: AXP1SYS has 40,000); ods2v2 wrote 1 on ODS-2 volumes until
+            # the fix, and VMS then purges version 1 of such a file as soon as it makes version 2
+            fnd.warn('%s: %d entries have version limit 1, e.g. %r: VMS purges version 1 when it makes version 2 '
+                     '(ods2v2 before the fix wrote this; SET FILE/VERSION_LIMIT=32767 puts it right)' % (where, len(vl1), vl1[0]))
         seen_nv = set()
         for ent in lst:
             key = (ent[0], ent[2])   # exact: the VMS-made asim8 ODS-5 disk has lp.COM and LP.COM in one directory

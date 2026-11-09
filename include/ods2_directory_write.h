@@ -67,6 +67,16 @@ bool ods2_insert_dir_entry_flags(uint8_t *block, size_t block_size,
                                  const char *name, uint16_t version, ods2_fid_t fid,
                                  unsigned level, uint8_t extra_flags);
 
+/* The same, with the entry's version limit (DIR$W_VERLIMIT): the default version limit of the directory it goes
+ * into, or 0 for none (stored as 32767, as VMS does). The functions above pass 0. */
+bool ods2_insert_dir_entry_vl(uint8_t *block, size_t block_size,
+                              const char *name, uint16_t version, ods2_fid_t fid,
+                              unsigned level, uint8_t extra_flags, uint16_t verlimit);
+
+/* Sets the version limit of the records named `name` in `block` (SET FILE/VERSION_LIMIT): the number of records
+ * changed, or -1 if the block is malformed (then nothing is changed). */
+int ods2_set_dir_entry_verlimit(uint8_t *block, size_t block_size, const char *name, uint16_t limit);
+
 /* Removes just the (`version`, FID) pair of `name` (case-insensitive)
  * from `block`, shrinking that record by 8 bytes and shifting all
  * following bytes (through the sentinel) back to close the gap. If

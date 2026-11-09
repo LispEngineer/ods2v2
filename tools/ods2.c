@@ -703,7 +703,7 @@ static void canonical_dir_path(ods2_volume_t *vol, char *path, size_t cap)
    at 256, so a VMS-made volume can hold more than ods2v2 creates (255) and more than VMS lists. The walk keeps
    the path in one growing string and a small frame per level, so that the depth is limited by memory and by
    this bound on the C stack only; a tree deeper than the bound is reported, never cut off silently. */
-#define WALK_MAX_DEPTH 4096
+#define WALK_MAX_DEPTH 2048
 #define MAX_DIR_VISITS 1000000
 
 /* A growing string. */
@@ -891,6 +891,13 @@ static void walk_directories(dir_walk_t *w, ods2_fid_t dir_fid, int depth)
         /* Is it really a directory? Checked via its own header's
            FH2$M_DIRECTORY bit (0x2000), not just the .DIR suffix. */
         r = ods2_read_header_fid(w->vol, entries[i].fid, sub_header);
+        if (!r.ok && r.problem != ods2_stale_entry) {
+            /* not a stale alias (a VMS state: the name is listed, nothing is below it) but a header that cannot
+               be read: a whole subtree would be missing, so it is said (and the exit status is 1) */
+            report_error("%%ODS2-E-DIRERR, [%s]: %s\n", w->abs.s, r.problem);
+            w->errors++;
+            goto next;
+        }
         if (!r.ok || !(((ods2_head_core_t *) sub_header)->filechar & 0x2000u)) {
             goto next;
         }
@@ -1469,6 +1476,89 @@ static void cmd_export(ods2_volume_t *vol, const ods2_parsed_path_t *p, const ch
             printf("; %d error%s: not everything was copied", x.errors + w.errors, x.errors + w.errors == 1 ? "" : "s");
         }
         printf("\n");
+    }
+}
+
+/* SET FILE/VERSION_LIMIT=n <spec>: the version limit of the directory entries the spec names (wildcards and [dir...]
+   work as in DIRECTORY). ods2v2 wrote 1 for the entries of ODS-2 volumes until it was fixed; VMS then purges version 1
+   when it makes version 2 of such a file (COPY, EDIT). 32767 is "no limit", what VMS writes. */
+typedef struct {
+    ods2_volume_t *vol;
+    uint16_t limit;
+    unsigned entries, records;     /* names looked at, directory records changed */
+    int errors;
+    char last_dir[ODS2_PATH_MAX];
+    char last_name[ODS2_DIR_MAX_NAME + 8];
+    bool have_last;
+} verlimit_ctx_t;
+
+static void verlimit_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spelling, const ods2_dir_entry_t *e)
+{
+    verlimit_ctx_t *x = (verlimit_ctx_t *) ctx_;
+    ods2_fid_t dfid;
+    unsigned changed = 0;
+    ods2_result_t r;
+
+    /* the reserved files and the master directory's own entry keep the limit VMS gave them (1) */
+    if (ods2_fid_number(e->fid) <= 10 && ods2_fid_number(e->fid) != 0 && e->fid.fid_nmx == 0) return;
+    /* one call per name (the walk calls the hook once per version) */
+    if (x->have_last && strcmp(x->last_dir, dir_spelling) == 0 && same_name(x->last_name, e->name)) return;
+    snprintf(x->last_dir, sizeof(x->last_dir), "%s", dir_spelling);
+    snprintf(x->last_name, sizeof(x->last_name), "%s", e->name);
+    x->have_last = true;
+    x->entries++;
+    r = ods2_lookup_path(vol, dir_spelling, &dfid);
+    if (r.ok) r = ods2_check_fid(dfid);
+    if (r.ok) r = ods2_set_entry_version_limit(vol, ods2_fid_number(dfid), e->name, x->limit, &changed);
+    if (!r.ok) {
+        report_error("%%ODS2-E-VERLIMIT, [%s]%s: %s\n", dir_spelling, e->name, r.problem);
+        x->errors++;
+        return;
+    }
+    x->records += changed;
+}
+
+static void cmd_set_version_limit(ods2_volume_t *vol, const ods2_parsed_path_t *p, uint16_t limit)
+{
+    verlimit_ctx_t x;
+    entry_hook_fn saved_hook = g_entry_hook;
+    void *saved_ctx = g_entry_hook_ctx;
+    bool saved_paths = g_paths_mode;
+    char effective[ODS2_PATH_MAX], spec[ODS2_PATH_MAX + 4], start[ODS2_PATH_MAX], pattern[ODS2_PATH_MAX + 4];
+    const char *rest;
+    dir_walk_t w;
+
+    memset(&x, 0, sizeof(x));
+    x.vol = vol;
+    x.limit = limit;
+    resolve_effective_path(p, effective, sizeof(effective));
+    snprintf(spec, sizeof(spec), "%s%s", effective, p->recursive ? "..." : "");
+    rest = ods2_dir_spec_split_prefix(spec, start, sizeof(start));
+    if (rest == NULL) {
+        report_error("%%ODS2-E-BADPATH, [%s]: invalid directory specification\n", spec);
+        return;
+    }
+    canonical_dir_path(vol, start, sizeof(start));
+    if (p->filename[0] == '\0') snprintf(pattern, sizeof(pattern), "*.*");
+    else if (ods5_find_unescaped(p->filename, '.') == NULL) snprintf(pattern, sizeof(pattern), "%s.*", p->filename);
+    else snprintf(pattern, sizeof(pattern), "%s", p->filename);
+    memset(&w, 0, sizeof(w));
+    w.vol = vol;
+    w.spec = rest;
+    w.pattern = pattern;
+    w.p = p;
+    g_entry_hook = verlimit_entry;
+    g_entry_hook_ctx = &x;
+    g_paths_mode = false;
+    walk_from(&w, start);
+    g_entry_hook = saved_hook;
+    g_entry_hook_ctx = saved_ctx;
+    g_paths_mode = saved_paths;
+    if (x.entries == 0 && w.errors == 0) {
+        fprintf(stderr, "%%ODS2-W-NOFILES, no files found\n");
+    } else {
+        printf("%%ODS2-I-VERLIMIT, %u name%s looked at, %u directory record%s changed to version limit %u\n",
+               x.entries, x.entries == 1 ? "" : "s", x.records, x.records == 1 ? "" : "s", (unsigned) limit);
     }
 }
 
@@ -2860,6 +2950,9 @@ static void print_help(void)
            "  SET DEFAULT path           set the current default directory\n"
            "  SHOW DEFAULT               show the current default directory\n"
            "  SET VOLUME/LABEL=name      relabel the volume (all home block copies)\n"
+           "  SET FILE/VERSION_LIMIT=n spec   the version limit of the entries a spec names (wildcards, [dir...]);\n"
+           "                             32767 or 0 = no limit, what VMS writes (volumes written by ods2v2 before\n"
+           "                             the fix carry 1: VMS purges version 1 when it makes version 2)\n"
            "  SHOW VOLUME                label, owner, cluster size, files, free space\n"
            "  HELP                       show this command list\n"
            "  EXIT / QUIT                leave the interactive shell\n"
@@ -3137,6 +3230,22 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
         }
         if (refuse_wild_dir(&p, "SYMLINK", link)) return true;
         cmd_symlink(vol, &p, target);
+        return true;
+    }
+    if (matches(tokens[0], "SET") && n > 1 && strncasecmp(tokens[1], "FILE/VERSION_LIMIT=", 19) == 0) {
+        /* SET FILE/VERSION_LIMIT=n <spec> */
+        ods2_parsed_path_t p;
+        char *end;
+        long limit = strtol(tokens[1] + 19, &end, 10);
+        if (n < 3 || *end != '\0' || limit < 0 || limit > 32767) {
+            report_error("%%ODS2-E-NOPARM, usage: SET FILE/VERSION_LIMIT=n <spec>   (n 0 to 32767; 0 is no limit)\n");
+            return true;
+        }
+        if (!ods2_parse_path(tokens[2], &p)) {
+            report_error("%%ODS2-E-BADPATH, could not parse %s\n", tokens[2]);
+            return true;
+        }
+        cmd_set_version_limit(vol, &p, (uint16_t) (limit == 0 ? 32767 : limit));
         return true;
     }
     if (matches(verb, "LINK") || (matches(tokens[0], "SET") && n > 1 && strncmp(tokens[1], "FILE/ENTER=", 11) == 0)) {

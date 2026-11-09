@@ -595,7 +595,7 @@ in every structural test.
 - A directory is limited to 65,536 blocks (32 MiB of records), the most one
   contiguous extent is allowed here (it is held in memory while it changes), and directories nest at most 255
   levels (a VMS volume can hold more: V7.3-2 made 400). Reading has no such limit: `DIR [...]`, `EXPORT` and the
-  other readers follow a tree down to 4,096 levels (a bound on the C stack; a deeper tree is reported with the
+  other readers follow a tree down to 2,048 levels (five times what VMS lists) (a bound on the C stack; a deeper tree is reported with the
   directory's name and entry count, never cut silently). `EXPORT` copies what the host's 4,096-character path limit
   allows and names every file or directory it could not copy (and counts the rest); the exit status is 1. On an
   ODS-2 volume `CREATE/DIRECTORY` and `IMPORT` warn from the 8th level below [000000], which OpenVMS VAX V7.3

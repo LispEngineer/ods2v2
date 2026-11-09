@@ -108,6 +108,10 @@ void ods2_dismount(ods2_volume_t *vol);
    exists. Reads any header, primary or extension (seg_num > 0). */
 /* The FID of a directory entry or header link, as something this code can follow: RVN 0 (a volume set is
    not supported), NMX 0 until 24-bit file numbers are. */
+/* The problem ods2_read_header_fid() gives for an entry whose file is gone (a stale alias: a VMS state, compare
+   r.problem with it, not an I/O or format error). */
+extern const char ods2_stale_entry[];
+
 ods2_result_t ods2_check_fid(ods2_fid_t fid);
 
 /* Reads the header the FID names; refuses a FID ods2_check_fid() refuses. Use this, not ods2_read_header()
@@ -471,6 +475,11 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
 ods2_result_t ods2_read_file_stream(ods2_volume_t *vol, const uint8_t *header,
                                      bool (*sink)(void *ctx, const uint8_t *data, size_t n),
                                      void *ctx, size_t *bytes_out, bool *sink_failed_out);
+
+/* SET FILE/VERSION_LIMIT: sets the version limit of the entries named `name` in the directory (all versions); *changed
+ * is the number of directory records changed. For volumes written before ods2v2 gave entries VMS's limit (32767). */
+ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
+                                           uint16_t limit, unsigned *changed);
 
 /* Inserts (name, version, fid) into the directory whose header is at
  * `dir_file_number`, trying each of its existing content blocks

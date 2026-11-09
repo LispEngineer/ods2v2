@@ -348,9 +348,20 @@ static const uint8_t *txn_find(const ods2_volume_t *vol, uint32_t lbn)
     }
 }
 
+/* Nothing at or past the end of the volume (SCB$L_VOLSIZE) is ever written. The check is made when a write is
+   buffered, so that an operation which would need such a block is refused with nothing written, and again at the
+   last moment (raw_write_block). */
+static const char write_past_volume[] = "a block at or past the end of the volume (the storage control block's "
+                                        "volume size) is never written: nothing there belongs to the volume";
+static bool lbn_in_volume(const ods2_volume_t *vol, uint32_t lbn)
+{
+    return vol->volsize == 0 || lbn < vol->volsize;
+}
+
 static ods2_result_t txn_add(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block)
 {
     struct ods2_txn *t = vol->txn;
+    if (!lbn_in_volume(vol, lbn)) return fail(write_past_volume);
     if (t->n == t->cap) {
         size_t cap = t->cap ? t->cap * 2 : 64;
         txn_write_t *w = realloc(t->w, cap * sizeof(*w));
@@ -383,7 +394,7 @@ static ods2_result_t read_block(ods2_volume_t *vol, uint32_t lbn, uint8_t *out, 
 /* The SIMH container footer (simh/simh, sim_disk.c: MIT-licensed): the last 512 bytes of a raw container, "simh",
    the simulator's name (64 bytes), the drive type (16), SectorSize, SectorCount, TransferElementSize (32-bit,
    big-endian), the creation time (28), FooterVersion (0), AccessFormat (1 SIMH, 2 RAW), ... and a CRC-32 of the
-   first 508 bytes in the last four. The signature and version 0 identify it here. */
+   first 508 bytes in the last four. The signature, version 0, the access format and the CRC identify it here. */
 static bool simh_footer_at_end(ods2_volume_t *vol, uint64_t *image_blocks, uint8_t foot[512])
 {
     long here = ftell(vol->fp), size;
@@ -398,7 +409,21 @@ static bool simh_footer_at_end(ods2_volume_t *vol, uint64_t *image_blocks, uint8
         return false;
     }
     (void) fseek(vol->fp, here, SEEK_SET);
-    return memcmp(foot, "simh", 4) == 0 && foot[124] == 0 && (foot[125] == 1 || foot[125] == 2);
+    if (memcmp(foot, "simh", 4) != 0 || foot[124] != 0 || (foot[125] != 1 && foot[125] != 2)) return false;
+    /* the CRC-32 (IEEE, as zlib: the simulator's eth_crc32) of the first 508 bytes, big-endian in the last four: a
+       block that merely starts with "simh" is not a footer */
+    {
+        uint32_t crc = 0xFFFFFFFFu, stored;
+        size_t i;
+        int b;
+        for (i = 0; i < 508; i++) {
+            crc ^= foot[i];
+            for (b = 0; b < 8; b++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+        crc ^= 0xFFFFFFFFu;
+        stored = ((uint32_t) foot[508] << 24) | ((uint32_t) foot[509] << 16) | ((uint32_t) foot[510] << 8) | foot[511];
+        return crc == stored;
+    }
 }
 
 int ods2_image_footer(ods2_volume_t *vol, char *msg, size_t cap)
@@ -516,10 +541,7 @@ static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uin
         if (error_at > 0 && ++attempts == error_at) return fail("could not write block (injected I/O error)");
     }
 #endif
-    if (vol->volsize != 0 && lbn >= vol->volsize) {
-        return fail("a block at or past the end of the volume (the storage control block's volume size) is never "
-                    "written: nothing there belongs to the volume");
-    }
+    if (!lbn_in_volume(vol, lbn)) return fail(write_past_volume);
     if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
         fwrite(block, 1, 512, vol->fp) != 512) {
         return fail("could not write block");
@@ -582,6 +604,9 @@ static bool header_lbn(ods2_volume_t *vol, unsigned file_number, uint32_t *lbn_o
    extended file number; finding the header by the low 16 bits alone read another file (review 8, R8-1).
    The file number is 24 bits (ods2_fid_number()). A relative volume number other than 0 names a file on
    another volume of a set: not supported. */
+const char ods2_stale_entry[] = "no such file: a dangling directory entry, a stale alias (the file it names was deleted; "
+                                "its file number may have been reused)";
+
 ods2_result_t ods2_check_fid(ods2_fid_t fid)
 {
     if (fid.fid_rvn != 0) {
@@ -603,8 +628,7 @@ ods2_result_t ods2_read_header_fid(ods2_volume_t *vol, ods2_fid_t fid, uint8_t *
        VMS). It must never resolve to the file that now has the number (F8). A header marked for delete is
        not a file either. */
     if (!ods2_header_is_file(header_out, fid)) {
-        return fail("no such file: a dangling directory entry, a stale alias (the file it names was deleted; "
-                    "its file number may have been reused)");
+        return fail(ods2_stale_entry);
     }
     return ok();
 }
@@ -724,6 +748,11 @@ static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_neede
 
     total_bytes = (size_t) bits_blocks * 512;
     total_bits = total_bytes * 8;
+    /* a cluster is available only if it lies wholly inside the volume (the bitmap's own tail bits, and a volume
+       whose SCB says less than its bitmap offers, must not give out blocks past VOLSIZE) */
+    if (vol->volsize != 0 && vol->home.cluster != 0 && total_bits > (size_t) (vol->volsize / vol->home.cluster)) {
+        total_bits = (size_t) (vol->volsize / vol->home.cluster);
+    }
     bitmap_data = malloc(total_bytes);
     if (bitmap_data == NULL) {
         return fail("could not allocate memory to read the storage bitmap");
@@ -1541,6 +1570,13 @@ static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_num
 
     r = ods2_find_free_file_number(vol, 1, MAX_FILE_NUMBER, &n, &seq);
     if (!r.ok) return r;
+    {
+        /* a header slot whose block lies past the end of the volume is no slot (a damaged SCB or index) */
+        uint32_t slot_lbn;
+        if (header_lbn(vol, n, &slot_lbn) && !lbn_in_volume(vol, slot_lbn)) {
+            return fail("no free file header lies inside the volume (the storage control block's volume size)");
+        }
+    }
     r = ods2_read_header(vol, 1, indexf_header);
     if (!r.ok) return r;
     /* INDEXF.SYS's own header is rewritten with a fresh checksum (and its backup with it): it must be sound
@@ -1981,6 +2017,9 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
        on ODS-2. */
     spec.efblk = 2;
     spec.ffbyte = 0;
+    /* a directory made in one with a default version limit passes it on (AXP1SYS: 114 of 114 directories under a
+       default of 3 carry 3), a directory in one without gets none */
+    spec.versions = parent_core->recattr.versions;
 
     {
         char ident[ODS5_MAX_LITERAL_NAME + 16]; /* dirname is already bounded
@@ -2992,6 +3031,7 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
     uint8_t dir_header[512];
     uint8_t *blocks = NULL;
     unsigned used, t;
+    uint16_t verlimit;
     ods2_result_t r;
 
     if (!vol->writable) {
@@ -3005,8 +3045,9 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
     if (!r.ok) return r;
 
     t = ods2_dir_choose_block(blocks, used, name);
-    if (ods2_insert_dir_entry_flags(blocks + (size_t) t * 512, 512, name, version, fid,
-                                    vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, extra_flags)) {
+    verlimit = ((const ods2_head_core_t *) dir_header)->recattr.versions;   /* the directory's default version limit */
+    if (ods2_insert_dir_entry_vl(blocks + (size_t) t * 512, 512, name, version, fid,
+                                 vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, extra_flags, verlimit)) {
         if (ods2_file_content_length(dir_header) == 0 || !dir_eof_standard(dir_header, used) ||
             !below_highwater(dir_header, t + 1)) {
             /* An end-of-file that didn't cover even block 1, or a block
@@ -3019,8 +3060,8 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
         uint8_t combined[1024];
         memcpy(combined, blocks + (size_t) t * 512, 512);
         memset(combined + 512, 0, 512);
-        if (!ods2_insert_dir_entry_flags(combined, sizeof(combined), name, version, fid,
-                                         vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, extra_flags)) {
+        if (!ods2_insert_dir_entry_vl(combined, sizeof(combined), name, version, fid,
+                                      vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, extra_flags, verlimit)) {
             free(blocks);
             return fail("internal error: a block plus one record overflowed 1024 "
                         "bytes (should be unreachable)");
@@ -3037,6 +3078,46 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
     }
     free(blocks);
     return r;
+}
+
+/* SET FILE/VERSION_LIMIT: the version limit of the directory entries named `name` in a directory, written block by
+   block in one transaction. *changed gets the number of records changed (0 when the name is not there or already
+   has the limit). */
+static ods2_result_t set_entry_version_limit_impl(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
+                                                  uint16_t limit, unsigned *changed)
+{
+    uint8_t dir_header[512];
+    uint8_t *blocks = NULL;
+    unsigned used, v;
+    ods2_result_t r;
+
+    *changed = 0;
+    if (!vol->writable) return not_writable(vol);
+    r = ods2_read_header(vol, dir_file_number, dir_header);
+    if (!r.ok) return r;
+    r = directory_header_ok(dir_header, dir_file_number);
+    if (!r.ok) return r;
+    r = load_directory(vol, dir_header, 0, &blocks, &used);
+    if (!r.ok) return r;
+    for (v = 0; v < used && r.ok; v++) {
+        int n = ods2_set_dir_entry_verlimit(blocks + (size_t) v * 512, 512, name, limit);
+        if (n < 0) { r = fail("a directory block is damaged: not changed"); break; }
+        if (n > 0) {
+            *changed += (unsigned) n;
+            r = ods2_write_file_block(vol, dir_header, v + 1, blocks + (size_t) v * 512);
+        }
+    }
+    free(blocks);
+    return r;
+}
+
+ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
+                                           uint16_t limit, unsigned *changed)
+{
+    ods2_result_t r;
+    TXN_BEGIN_OR_RETURN(vol);
+    r = set_entry_version_limit_impl(vol, dir_file_number, name, limit, changed);
+    return txn_end(vol, r);
 }
 
 ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_count)

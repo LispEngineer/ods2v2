@@ -224,6 +224,15 @@ case "$out" in *"W-SIMHFOOTER"*"inside the volume (8192 blocks)"*"last block of 
 check "footer inside the volume (the last block): warned, and the write is refused (exit 1)" "warned 1" "$msg $rc"
 check "... the image is unchanged" "$before" "$(md5sum < "$TMP/s2.img")"
 check "... it can still be read" 1 "$($ODS2 "$TMP/s2.img" 'DIR [000000]' 2>/dev/null | grep -c BITMAP.SYS)"
+# a block that only starts like a footer (the signature and the two bytes, but a wrong CRC) is not one: no message, a normal write mount
+cp "$TMP/s0.img" "$TMP/s4.img"; python3 -I "$TMP/foot.py" inside "$TMP/s4.img" 8192
+python3 -I - "$TMP/s4.img" <<'PY'
+import sys
+f = open(sys.argv[1], 'r+b'); f.seek(8192 * 512 - 1); b = f.read(1); f.seek(8192 * 512 - 1); f.write(bytes([b[0] ^ 0xff]))
+PY
+out=$($ODS2 "$TMP/s4.img" "COPY $TMP/hi.txt [000000]HI.TXT" 2>&1); rc=$?
+case "$out" in *SIMHFOOTER*) msg="$out" ;; *"I-COPIED"*) msg=written ;; *) msg="$out" ;; esac
+check "a last block with the signature but a wrong CRC is no footer: no message, the volume is written" "written 0" "$msg $rc"
 check "no footer: no SIMHFOOTER message" 0 "$($ODS2 "$TMP/s0.img" 'DIR [000000]' 2>&1 | grep -c SIMHFOOTER)"
 # nothing is written at or past the end of the volume (the storage control block's VOLSIZE), even if the bitmap
 # offers it: an SCB that says 2000 blocks on an 8192-block image whose first 2000 blocks the bitmap calls used
@@ -235,18 +244,27 @@ f.seek((base + 1) * 512); h = f.read(512)
 w0, w1 = struct.unpack_from('<HH', h, h[1] * 2); lbn = (((w0 >> 8) & 0x3f) << 16) | w1
 cl = struct.unpack_from('<H', home, 14)[0]
 f.seek(lbn * 512); scb = bytearray(f.read(512))
-struct.pack_into('<I', scb, 4, 2000)
+struct.pack_into('<I', scb, 4, int(sys.argv[2]))
 struct.pack_into('<H', scb, 510, sum(struct.unpack_from('<255H', scb, 0)) & 0xFFFF)
 f.seek(lbn * 512); f.write(scb)
-f.seek((lbn + 1) * 512); bm = bytearray(f.read(512))
-for c in range(2000 // cl): bm[c // 8] &= ~(1 << (c % 8))
+nbits = int(sys.argv[2]) // cl
+nblk = (nbits + 4095) // 4096
+f.seek((lbn + 1) * 512); bm = bytearray(f.read(512 * nblk))
+for c in range(nbits): bm[c // 8] &= ~(1 << (c % 8))
 f.seek((lbn + 1) * 512); f.write(bm)
 PY
-cp "$TMP/s0.img" "$TMP/s3.img"; python3 -I "$TMP/bound.py" "$TMP/s3.img"; before=$(md5sum < "$TMP/s3.img")
-out=$($ODS2 "$TMP/s3.img" "COPY $TMP/hi.txt [000000]HI.TXT" 2>&1); rc=$?
-case "$out" in *"lie at or past the end of the volume"*) msg=refused ;; *) msg="$out" ;; esac
-check "a file whose blocks would lie past VOLSIZE is refused (exit 1) ..." "refused 1" "$msg $rc"
-check "... and nothing is written" "$before" "$(md5sum < "$TMP/s3.img")"
+for vs in 2000 4200; do
+    cp "$TMP/s0.img" "$TMP/s3.img"; python3 -I "$TMP/bound.py" "$TMP/s3.img" $vs; before=$(md5sum < "$TMP/s3.img")
+    printf 'CREATE/DIRECTORY [X]\nDIR [000000]\n' > "$TMP/s3.scr"
+    out=$($ODS2 "$TMP/s3.img" "@$TMP/s3.scr" 2>&1); rc=$?
+    case "$out" in *"CREATEERR"*"BITMAP.SYS"*"WRITEFAIL"*) msg="DEAD: $out" ;; *"E-CREATEERR"*) msg=refused ;; *) msg="$out" ;; esac
+    check "SCB VOLSIZE $vs: CREATE/DIRECTORY is refused, exit 1" "refused 1" "$msg $rc"
+    check "... the script went on (no write_failed: nothing was half written) and listed the volume" 1 "$(echo "$out" | grep -c 'BITMAP.SYS')"
+    check "... nothing is written" "$before" "$(md5sum < "$TMP/s3.img")"
+    out=$($ODS2 "$TMP/s3.img" "COPY $TMP/hi.txt [000000]HI.TXT" 2>&1); rc=$?
+    case "$out" in *"E-COPYERR"*) msg=refused ;; *) msg="$out" ;; esac
+    check "SCB VOLSIZE $vs: COPY is refused, exit 1, nothing written" "refused 1 $before" "$msg $rc $(md5sum < "$TMP/s3.img")"
+done
 
 rm -rf "$TMP"
 [ "$fails" -eq 0 ] || { echo "$fails INITIALIZE check(s) failed"; exit 1; }

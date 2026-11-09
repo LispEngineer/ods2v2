@@ -714,6 +714,94 @@ out=$($ODS2 "$TMP/dpi.img" "IMPORT $TMP/impdeep [000000]" 2>&1); rc=$?
 case "$out" in *"2 directories deeper than 7 levels"*) msg=warned ;; *) msg="$out" ;; esac
 check "ODS-2: IMPORT of a tree 10 levels deep warns once, with the count" "warned 0" "$msg $rc"
 
+# ---- version limits (R1, physical VAX96, B320): ods2v2 wrote a version limit of 1 in the directory entries of ODS-2
+# volumes, so VMS purged version 1 of a file as soon as COPY or EDIT made version 2 (the F8 aliases of run 1 dangled
+# that way). Every VMS-made volume has 32767 there, or the directory's default version limit (its FAT$W_VERSIONS) when
+# it has one, and a directory made inside one with a default carries the default too.
+cat > "$TMP/vl.py" <<'PY'
+import struct, sys
+img, dnum, mode = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+def hdr(n):
+    f.seek((base + n - 1) * 512); return bytearray(f.read(512)), (base + n - 1) * 512
+def first_block(h):
+    w0, w1 = struct.unpack_from('<HH', h, h[1] * 2); return (((w0 >> 8) & 0x3f) << 16) | w1
+h, hpos = hdr(dnum)
+if mode == 'default':          # the directory's default version limit: FAT$W_VERSIONS (header offset 50)
+    struct.pack_into('<H', h, 50, int(sys.argv[4]))
+    struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+    f.seek(hpos); f.write(h); sys.exit(0)
+if mode == 'hdrversions':
+    print(struct.unpack_from('<H', h, 50)[0]); sys.exit(0)
+lbn = first_block(h)
+f.seek(lbn * 512); blk = bytearray(f.read(512)); pos = 0; out = []
+while pos + 6 <= 512:
+    size = struct.unpack_from('<H', blk, pos)[0]
+    if size in (0, 0xFFFF): break
+    name = bytes(blk[pos + 6:pos + 6 + blk[pos + 5]]).decode('latin-1')
+    if mode == 'show' and not name.endswith('.SYS') and name != '000000.DIR': out.append('%s=%d' % (name, struct.unpack_from('<H', blk, pos + 2)[0]))
+    if mode == 'set1' and not name.endswith('.SYS') and name != '000000.DIR': struct.pack_into('<H', blk, pos + 2, 1)
+    pos += size + 2
+if mode == 'set1': f.seek(lbn * 512); f.write(blk)
+print(' '.join(out))
+PY
+for level in 2 5; do
+    img="$TMP/vl$level.img"
+    $INIT "$img" 8192 --structure=$level --label=VERLIM >/dev/null 2>&1
+    echo x > "$TMP/vl.txt"
+    printf 'CREATE/DIRECTORY [D]\nCOPY %s [D]A.TXT\nCOPY %s [000000]B.TXT\n' "$TMP/vl.txt" "$TMP/vl.txt" > "$TMP/vls"
+    $ODS2 "$img" "@$TMP/vls" >/dev/null 2>&1
+    dnum=$($ODS2 "$img" 'DIR/FULL [000000]D.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+    check "ODS-$level: new entries carry version limit 32767 (no limit), as VMS writes them" "B.TXT=32767 D.DIR=32767 | A.TXT=32767" \
+        "$(python3 -I "$TMP/vl.py" "$img" 4 show | sed 's/ *$//') | $(python3 -I "$TMP/vl.py" "$img" $dnum show)"
+    check "ODS-$level: ods5check: no version limit warning" 0 "$(python3 -I tests/ods5check.py "$img" 2>&1 | grep -c 'version limit 1')"
+    # the volume as an older ods2v2 left it
+    python3 -I "$TMP/vl.py" "$img" 4 set1; python3 -I "$TMP/vl.py" "$img" $dnum set1
+    check "ODS-$level: an old volume (limit 1): ods5check warns in both directories" 2 "$(python3 -I tests/ods5check.py "$img" 2>&1 | grep -c 'version limit 1')"
+    out=$($ODS2 "$img" 'SET FILE/VERSION_LIMIT=32767 [000000...]*.*' 2>&1); rc=$?
+    case "$out" in *"VERLIMIT"*"3 directory records changed"*) msg=ok ;; *) msg="$out" ;; esac
+    check "ODS-$level: SET FILE/VERSION_LIMIT=32767 [000000...]*.* puts it right (3 records)" "ok 0" "$msg $rc"
+    check "ODS-$level: ... entries are 32767 again" "B.TXT=32767 D.DIR=32767 | A.TXT=32767" \
+        "$(python3 -I "$TMP/vl.py" "$img" 4 show | sed 's/ *$//') | $(python3 -I "$TMP/vl.py" "$img" $dnum show)"
+    check "ODS-$level: ... and ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
+    # a directory with a default version limit: new entries and new subdirectories take it
+    python3 -I "$TMP/vl.py" "$img" $dnum default 3
+    printf 'COPY %s [D]C.TXT\nCREATE/DIRECTORY [D.SUB]\n' "$TMP/vl.txt" > "$TMP/vls2"
+    $ODS2 "$img" "@$TMP/vls2" >/dev/null 2>&1
+    check "ODS-$level: a directory with default version limit 3: its new entries get 3" "A.TXT=32767 C.TXT=3 SUB.DIR=3" "$(python3 -I "$TMP/vl.py" "$img" $dnum show)"
+    subnum=$($ODS2 "$img" 'DIR/FULL [D]SUB.DIR' | sed -n 's/^ *File ID: *(\([0-9]*\),.*/\1/p')
+    check "ODS-$level: ... and the directory made in it passes the default on (FAT version limit 3)" 3 "$(python3 -I "$TMP/vl.py" "$img" $subnum hdrversions)"
+    check "ODS-$level: ... no checker error" "0 error(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1 | sed 's/, .*//')"
+done
+
+# ---- R12-4: a subdirectory entry whose header cannot be read is reported by the walk (and the exit status is 1), it is not
+# skipped in silence; a stale alias (a VMS state) stays quiet
+cat > "$TMP/badfid.py" <<'PY'
+import struct, sys
+img = sys.argv[1]
+f = open(img, 'r+b'); f.seek(512); home = f.read(512)
+base = struct.unpack_from('<I', home, 24)[0] + struct.unpack_from('<H', home, 32)[0]
+f.seek((base + 3) * 512); h = f.read(512)
+w0, w1 = struct.unpack_from('<HH', h, h[1] * 2); lbn = (((w0 >> 8) & 0x3f) << 16) | w1
+f.seek(lbn * 512); blk = bytearray(f.read(512)); pos = 0
+while pos + 6 <= 512:
+    size = struct.unpack_from('<H', blk, pos)[0]
+    if size in (0, 0xFFFF): break
+    if bytes(blk[pos + 6:pos + 6 + blk[pos + 5]]) == b'D.DIR':
+        ent = pos + 6 + blk[pos + 5]; ent += ent % 2
+        struct.pack_into('<H', blk, ent + 2, 60000)   # a file number the index file does not cover
+    pos += size + 2
+f.seek(lbn * 512); f.write(blk)
+PY
+img="$TMP/bf.img"
+$INIT "$img" 8192 --structure=5 --label=BADFID >/dev/null 2>&1
+printf 'CREATE/DIRECTORY [D]\nCREATE/DIRECTORY [D.E]\n' > "$TMP/bf.scr"; $ODS2 "$img" "@$TMP/bf.scr" >/dev/null 2>&1
+python3 -I "$TMP/badfid.py" "$img"
+out=$($ODS2 "$img" 'DIR [000000...]*.*' 2>&1); rc=$?
+case "$out" in *"E-DIRERR, [D]"*) msg=reported ;; *) msg="$(echo "$out" | grep -c DIRERR) $out" ;; esac
+check "DIR [000000...] with an unreadable subdirectory header: DIRERR names the directory, exit 1" "reported 1" "$msg $rc"
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"

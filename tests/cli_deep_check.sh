@@ -79,6 +79,18 @@ check "... no Linux path is longer than 4,000 characters and none was cut (the f
     "$([ "$longest" -lt 4000 ] && [ "$(cat $(find "$TMP/out1200" -name F700.TXT))" = 'deep 700' ] && echo ok)"
 rm -rf "$TMP/out1200"
 
+# ---- the bound of the walk (2,048 levels): a tree one level deeper than it is reported, not crashed on or cut silently ----
+$INIT "$TMP/d2100.img" 131072 --structure=5 --label=D2100 >/dev/null 2>&1
+out=$(ODS2_TEST_MAX_DIR_DEPTH=3000 $MAKE "$TMP/d2100.img" 2100 2000 2100 2>&1); rc=$?
+check "2,100 levels made" "made 2100 levels 0" "$out $rc"
+for bin in ./ods2 ./ods2_fault; do
+    out=$($bin "$TMP/d2100.img" 'DIR [000000...]F*.TXT' 2>&1); rc=$?
+    case "$out" in *"E-TOODEEP, [L1.L2."*"L2048] is more than 2048 levels deep: this directory ("*" entries) and everything below it are skipped"*) msg=named ;; *) msg="$(echo "$out" | tail -3)" ;; esac
+    check "$bin: DIR [000000...] on a 2,100-level tree: one TOODEEP naming the directory and its entry count, exit 1, no crash" "named 1 1" \
+        "$msg $rc $(echo "$out" | grep -c TOODEEP)"
+    check "$bin: ... the file at level 2000, above the bound, is listed" 1 "$(echo "$out" | grep -c '^F2000\.TXT')"
+done
+
 # ---- IMPORT into a deep tree and of a deep tree ----
 # a Linux tree 300 levels deep is imported up to the creation cap (255): the directories below it are reported
 mkdir -p "$TMP/imp"
