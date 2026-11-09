@@ -133,6 +133,8 @@ static bool vbn_to_lbn(const ods2_extent_t *extents, int extent_count,
 }
 
 /* Most extension headers the index file may chain (a loop stops here). */
+/* How deep directories may be nested (VMS: 255; DIR [...] and EXPORT stop there). */
+#define ODS2_MAX_DIR_DEPTH 255u
 #define ODS2_MAX_HEADER_SEGMENTS_MOUNT 64
 
 static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
@@ -1766,6 +1768,24 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
        avoids silently shadowing an existing directory. */
     r = directory_ready(vol, parent_header, ods2_fid_number(parent_core->fid));
     if (!r.ok) return r;
+    {
+        /* VMS nests directories at most 255 deep, and DIR [...] and EXPORT stop there: a tree made deeper
+           could not be walked again (F5). The depth of the parent is counted up the back links. */
+        unsigned depth = 0;
+        uint8_t up[512];
+        memcpy(up, parent_header, sizeof(up));
+        while (ods2_fid_number(((const ods2_head_core_t *) up)->fid) != 4) {
+            const ods2_head_core_t *uc = (const ods2_head_core_t *) up;
+            ods2_fid_t parent = uc->backlink;
+            if (++depth > ODS2_MAX_DIR_DEPTH + 1u) break;
+            r = ods2_read_header_fid(vol, parent, up);
+            if (!r.ok) return r;
+        }
+        if (depth + 1 > ODS2_MAX_DIR_DEPTH) {
+            return fail("directories can be nested at most 255 levels deep");
+        }
+    }
+    if (!r.ok) return r;
     r = name_available(vol, parent_header, dirname,
                        "a file or directory with this name already exists in the parent");
     if (!r.ok) return r;
@@ -2116,6 +2136,12 @@ static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_numb
 
     r = ods2_check_fid(target);
     if (!r.ok) return r;
+    /* the volume's own files cannot be given another name or link either (F3): a hard link would count into
+       INDEXF.SYS's header, an alias would make the master directory list a second name for it */
+    if (ods2_fid_number(target) >= 1 && ods2_fid_number(target) <= 10) {
+        return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
+                    "SECURITY.SYS): it cannot be linked");
+    }
     r = ods2_read_header(vol, ods2_fid_number(target), target_header);
     if (!r.ok) return r;
     if (ods2_fid_number(core->fid) != ods2_fid_number(target) || core->fid.fid_seq != target.fid_seq ||

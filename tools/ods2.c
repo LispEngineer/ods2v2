@@ -2736,23 +2736,30 @@ static void print_help(void)
 
 /* Splits `line` into up to MAX_TOKENS whitespace-separated tokens,
    modifying `line` in place (inserting nuls) - tokens[] point into it. */
+/* The tokens of a command line, or -1 for a line that cannot be taken exactly as typed: an unterminated quote
+   or more tokens than there is room for (the rest would be dropped without a word: F4). */
 static int tokenize(char *line, char *tokens[MAX_TOKENS])
 {
     int count = 0;
     char *p = line;
-    while (*p && count < MAX_TOKENS) {
+    while (*p) {
         while (*p && isspace((unsigned char) *p)) p++;
         if (!*p) break;
+        if (count == MAX_TOKENS) return -1;
         tokens[count++] = p;
         {
             /* "..." keeps white space inside one token (a Linux path with a
-               space, a name with a literal space); the quotes are dropped */
+               space, a name with a literal space); the quotes are dropped. A
+               quote after a ^ is the ^" of a name, not a quote: it stays in the
+               token and the name rules deal with it. */
             char *w = p;
             bool in_quote = false;
             while (*p && (in_quote || !isspace((unsigned char) *p))) {
+                if (*p == '^' && p[1] == '"') { *w++ = *p++; *w++ = *p++; continue; }
                 if (*p == '"') { in_quote = !in_quote; p++; continue; }
                 *w++ = *p++;
             }
+            if (in_quote) return -1;
             if (*p) p++;
             *w = '\0';
         }
@@ -2786,6 +2793,10 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
     const char *quals;      /* its qualifiers ("/ATTRIBUTES=..."), or NULL */
     size_t verb_len;
     int n = tokenize(line, tokens);
+    if (n < 0) {
+        report_error("%%ODS2-E-SYNTAX, the command has an unterminated quote or too many words: not run\n");
+        return true;
+    }
     if (n == 0) return true; /* blank line */
 
     /* COPY takes qualifiers on the command word itself
