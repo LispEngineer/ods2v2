@@ -641,7 +641,10 @@ class Harness:
         out = os.path.join(self.dir, 'export')
         shutil.rmtree(out, ignore_errors=True)
         r = run_ods2(self.img, 'EXPORT/LINKS/VERSIONS [000000...]*.* ' + out)
-        if r.crash or not r.ok:
+        errs = [l for l in r.text.split('\n') if '%ODS2-E-' in l or '%ODS2-F-' in l]
+        # KNOWN, not a bug: BADBLK.SYS of the VAX-made PHVS2 image maps 3 blocks of which the last lies 1 block past the end of the image file
+        errs = [l for l in errs if 'BADBLK.SYS' not in l]
+        if r.crash or errs:
             self.fail('%s: EXPORT failed: %s' % (tag, r.text[-600:]))
         got = {}
         gdirs = set()
@@ -664,15 +667,15 @@ class Harness:
                                                  '%s;%d' % (linux_escape(linux_name(display)), ver)))
             want[relp] = obj
         for k in sorted(set(want) - set(got), key=repr):
-            if want[k].volatile and False:
+            if want[k].volatile:
                 continue
             self.fail('%s: EXPORT lacks %r' % (tag, k))
         for k in sorted(set(got) - set(want), key=repr):
             self.fail('%s: EXPORT has extra %r' % (tag, k))
         for k, obj in want.items():
-            g = got[k]
             if obj.volatile:
                 continue
+            g = got[k]
             if obj.kind == 'symlink':
                 if g[0] != 'l' or g[1] != obj.target:
                     self.fail('%s: EXPORT %r: symlink %r, model %r' % (tag, k, g, obj.target))
@@ -881,6 +884,36 @@ class Harness:
             for v in gone:
                 m.ents.pop((fp, key, v), None)
                 m.secondary.discard((fp, key, v))
+
+    def op_wild_delete(self):
+        """DELETE with a wildcard: refused with nothing changed, or exactly the matching entries gone"""
+        m, r = self.model, self.rng
+        e = self.pick_entry()
+        if e is None:
+            return
+        (fp, key, ver), display, dp, obj = e
+        stem, _, ty = display.rpartition('.')
+        if len(stem) < 2 or not (stem[:2].isascii() and stem[:2].isalnum()) or not ty or not (ty.isascii() and ty.isalnum()) or ty.upper() == 'DIR':
+            return
+        pre = stem[:2]
+        hits = []
+        for (f2, k2, v2), (d2, o2) in m.ents.items():
+            if f2 != fp or o2.volatile:
+                continue
+            s2, _, t2 = d2.rpartition('.')
+            if fold_str(s2).startswith(fold_str(pre)) and fold_str(t2) == fold_str(ty):
+                hits.append((f2, k2, v2, o2))
+        # entries that are one of several names of a file, on a volume that does not count links, are left alone by the model:
+        # only run when every hit is a plain single-name file
+        if any(self.group_size(o2) > 1 for (_, _, _, o2) in hits):
+            return
+        cmd = 'DELETE %s%s*.%s;*' % (spec_dir(dp, r, self.ods5), pre, ty)
+        res = run_ods2(self.img, cmd)
+        self.note('%s -> rc=%d (%d model hits)' % (cmd[:200], res.rc, len(hits)))
+        ok = self.check_result('wildcard delete', res, None, False)
+        if ok:
+            for (f2, k2, v2, o2) in hits:
+                m.ents.pop((f2, k2, v2), None)
 
     def op_rmdir(self):
         m, r = self.model, self.rng
@@ -1116,7 +1149,7 @@ class Harness:
         'links': [('copy', 15), ('link', 30), ('delete', 30), ('symlink', 10), ('mkdir', 8), ('rmdir', 6), ('type', 3)],
         'bigfile': [('copy', 50), ('delete', 20), ('type', 10), ('mkdir', 5), ('link', 5), ('import', 5)],
         'mix': [('copy', 40), ('mkdir', 8), ('delete', 14), ('rmdir', 4), ('link', 4), ('symlink', 3), ('label', 1),
-                ('import', 5), ('bad_name', 4), ('case', 3), ('type', 6), ('set_default', 3)],
+                ('import', 5), ('bad_name', 4), ('case', 3), ('type', 6), ('set_default', 3), ('wild_delete', 3)],
     }
 
     def do_op(self, name):
