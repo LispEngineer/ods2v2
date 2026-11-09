@@ -1,7 +1,7 @@
 #!/bin/sh
 # MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
 # fuzz_campaign.sh OUTFILE ITERATIONS SEED - fuzz_write.py on several VMS-made images in parallel (project root)
-out=${1:-fuzz-write}   # a directory: one result file per image; iters=${2:-2000}; seed=${3:-1}
+out=${1:-fuzz-write}; iters=${2:-2000}; seed=${3:-1}
 mkdir -p "$out"
 W=${STRESS_WORK:-$HOME/tmp/ods5-st/work}
 # at most 6 jobs at a time, each in a 4 GB scope (24 GB total); never uncapped

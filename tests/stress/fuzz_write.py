@@ -43,7 +43,7 @@ def digest(path):
     for k, fid in v.files.items():
         fi = v.info.get(fid) if fid else None
         ents[k] = (fi.size, fi.md5, fi.special) if fi else None
-    return {'ents': ents, 'dirs': set(v.dirs), 'free': v.free_clusters, 'problems': len(v.problems)}
+    return {'ents': ents, 'fids': dict(v.files), 'dirs': set(v.dirs), 'free': v.free_clusters, 'problems': len(v.problems)}
 
 
 def mutate_bitmap(path, rng):
@@ -146,6 +146,8 @@ def main():
                     for k, v in before['ents'].items():
                         if k == target or v is None or k[0] in alias_dirs or (target and (k[1], k[2]) == (target[1], target[2]) and k[0] in alias_dirs):
                             continue
+                        if (target and after['ents'].get(k) is None and before['fids'].get(k) == before['fids'].get(target)):
+                            continue    # another name of the deleted file (an alias whose primary link went): dangling, as VMS leaves it
                         if after['ents'].get(k) != v and not (k[1].upper().endswith('.SYS') and k[0] == ()):
                             why = 'DONE but another file changed: %r %r -> %r' % (k, v, after['ents'].get(k))
                             break
