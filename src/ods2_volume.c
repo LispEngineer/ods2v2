@@ -133,6 +133,8 @@ static bool vbn_to_lbn(const ods2_extent_t *extents, int extent_count,
 }
 
 /* Most extension headers the index file may chain (a loop stops here). */
+/* How deep directories may be nested (VMS: 255; DIR [...] and EXPORT stop there). */
+#define ODS2_MAX_DIR_DEPTH 255u
 #define ODS2_MAX_HEADER_SEGMENTS_MOUNT 64
 
 static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
@@ -356,17 +358,30 @@ static ods2_result_t read_block(ods2_volume_t *vol, uint32_t lbn, uint8_t *out, 
     return ok();
 }
 
-static void txn_begin(ods2_volume_t *vol)
+/* Opens a change. It fails, and the operation with it, if the buffer cannot be had (R9-1: running unbuffered
+   would be the old, unsafe way) or if an earlier write to this image failed (R9-2). */
+static ods2_result_t txn_begin(ods2_volume_t *vol)
 {
-    if (!vol->writable) return;
-    if (vol->txn_depth++ == 0) {
-        vol->txn = calloc(1, sizeof(*vol->txn));
-        if (vol->txn != NULL) {
-            memcpy(vol->txn->saved_extents, vol->indexf_extents, sizeof(vol->txn->saved_extents));
-            vol->txn->saved_extent_count = vol->indexf_extent_count;
+    if (!vol->writable) return ok();
+    if (vol->txn_depth == 0) {
+        if (vol->write_failed) {
+            return fail("an earlier write to the disk image failed: nothing more is written through this "
+                        "mount (run ANALYZE/DISK_STRUCTURE/REPAIR on VMS if the image is in doubt)");
         }
+#ifdef ODS2_FAULT_INJECTION
+        vol->txn = getenv("ODS2_FAULT_NOMEM_TXN") != NULL ? NULL : calloc(1, sizeof(*vol->txn));
+#else
+        vol->txn = calloc(1, sizeof(*vol->txn));
+#endif
+        if (vol->txn == NULL) return fail("out of memory: the change cannot be prepared, nothing is written");
+        memcpy(vol->txn->saved_extents, vol->indexf_extents, sizeof(vol->txn->saved_extents));
+        vol->txn->saved_extent_count = vol->indexf_extent_count;
     }
+    vol->txn_depth++;
+    return ok();
 }
+
+#define TXN_BEGIN_OR_RETURN(vol) do { ods2_result_t b_ = txn_begin(vol); if (!b_.ok) return b_; } while (0)
 
 static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block);
 
@@ -384,6 +399,14 @@ static ods2_result_t txn_end(ods2_volume_t *vol, ods2_result_t r)
     if (t == NULL) return r;
     if (r.ok) {
         for (i = 0; i < t->n && r.ok; i++) r = raw_write_block(vol, t->w[i].lbn, t->w[i].data);
+        if (!r.ok) {
+            /* part of the change is on the disk and the rest is not: nothing more is written through this
+               mount (R9-2), and the INDEXF.SYS cache goes back to what it was before the change, as the
+               disk may not have its new header */
+            vol->write_failed = true;
+            memcpy(vol->indexf_extents, t->saved_extents, sizeof(t->saved_extents));
+            vol->indexf_extent_count = t->saved_extent_count;
+        }
     } else {
         memcpy(vol->indexf_extents, t->saved_extents, sizeof(t->saved_extents));
         vol->indexf_extent_count = t->saved_extent_count;
@@ -396,6 +419,17 @@ static ods2_result_t txn_end(ods2_volume_t *vol, ods2_result_t r)
 
 static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block)
 {
+#ifdef ODS2_FAULT_INJECTION
+    {
+        /* ODS2_FAULT_ERROR_AT_WRITE=k: the k-th write of the process fails (an I/O error), the process goes on */
+        static long attempts, error_at = -2;
+        if (error_at == -2) {
+            const char *e = getenv("ODS2_FAULT_ERROR_AT_WRITE");
+            error_at = (e != NULL && *e != '\0') ? atol(e) : -1;
+        }
+        if (error_at > 0 && ++attempts == error_at) return fail("could not write block (injected I/O error)");
+    }
+#endif
     if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
         fwrite(block, 1, 512, vol->fp) != 512) {
         return fail("could not write block");
@@ -416,6 +450,7 @@ ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *
         return not_writable(vol);
     }
     if (vol->txn != NULL) return txn_add(vol, lbn, block);
+    if (vol->write_failed) return fail("an earlier write to the disk image failed: nothing more is written");
     return raw_write_block(vol, lbn, block);
 }
 
@@ -1701,7 +1736,7 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
 ods2_result_t ods2_create_directory(ods2_volume_t *vol, const uint8_t *parent_header,
                                      const char *name, ods2_fid_t *new_fid_out)
 {
-    txn_begin(vol);
+    TXN_BEGIN_OR_RETURN(vol);
     return txn_end(vol, create_directory_impl(vol, parent_header, name, new_fid_out));
 }
 
@@ -1753,6 +1788,24 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
        behavior (CREATE/DIRECTORY on an existing name fails) and
        avoids silently shadowing an existing directory. */
     r = directory_ready(vol, parent_header, parent_core->fid.fid_num);
+    if (!r.ok) return r;
+    {
+        /* VMS nests directories at most 255 deep, and DIR [...] and EXPORT stop there: a tree made deeper
+           could not be walked again (F5). The depth of the parent is counted up the back links. */
+        unsigned depth = 0;
+        uint8_t up[512];
+        memcpy(up, parent_header, sizeof(up));
+        while (((const ods2_head_core_t *) up)->fid.fid_num != 4) {
+            const ods2_head_core_t *uc = (const ods2_head_core_t *) up;
+            ods2_fid_t parent = uc->backlink;
+            if (++depth > ODS2_MAX_DIR_DEPTH + 1u) break;
+            r = ods2_read_header(vol, parent.fid_num, up);
+            if (!r.ok) return r;
+        }
+        if (depth + 1 > ODS2_MAX_DIR_DEPTH) {
+            return fail("directories can be nested at most 255 levels deep");
+        }
+    }
     if (!r.ok) return r;
     r = name_available(vol, parent_header, dirname,
                        "a file or directory with this name already exists in the parent");
@@ -2075,7 +2128,7 @@ static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_numb
 ods2_result_t ods2_create_link(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
                                ods2_fid_t target)
 {
-    txn_begin(vol);
+    TXN_BEGIN_OR_RETURN(vol);
     return txn_end(vol, create_link_impl(vol, dir_file_number, name, target));
 }
 
@@ -2105,6 +2158,12 @@ static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_numb
     if (target.fid_rvn != 0 || target.fid_nmx != 0) {
         return fail("the file to link to is named by a relative volume number or an extended file number, "
                     "which ods2v2 does not follow");
+    }
+    /* the volume's own files cannot be given another name or link either (F3): a hard link would count into
+       INDEXF.SYS's header, an alias would make the master directory list a second name for it */
+    if (target.fid_num >= 1 && target.fid_num <= 10) {
+        return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
+                    "SECURITY.SYS): it cannot be linked");
     }
     r = ods2_read_header(vol, target.fid_num, target_header);
     if (!r.ok) return r;
@@ -2248,7 +2307,7 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
                                  const ods2_record_attrs_t *attrs, unsigned special,
                                  ods2_fid_t *new_fid_out)
 {
-    txn_begin(vol);
+    TXN_BEGIN_OR_RETURN(vol);
     return txn_end(vol, create_file_impl(vol, parent_header, name, src, attrs, special, new_fid_out));
 }
 
@@ -2754,7 +2813,7 @@ ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_n
                                           const char *name, uint16_t version, ods2_fid_t fid)
 {
     ods2_result_t r;
-    txn_begin(vol);
+    TXN_BEGIN_OR_RETURN(vol);
     r = insert_into_directory(vol, dir_file_number, name, version, fid, 0);
     return txn_end(vol, r);
 }
@@ -2981,7 +3040,7 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
                                        const char *name, int version, uint16_t *version_out,
                                        ods2_delete_info_t *info)
 {
-    txn_begin(vol);
+    TXN_BEGIN_OR_RETURN(vol);
     return txn_end(vol, delete_version_impl(vol, dir_file_number, name, version, version_out, info));
 }
 
@@ -3148,6 +3207,14 @@ static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_n
        map, an extension header that cannot be read) leaves the file as it was. */
     r = ods2_decode_all_extents(vol, target_header, extents, ODS2_MAX_EXTENTS, &extent_count);
     if (!r.ok) return r;
+    for (i = 0; i < extent_count; i++) {
+        /* ods2_free_blocks() refuses an extent that is not whole clusters: refuse here, before anything is
+           buffered (R9-6) */
+        if (extents[i].lbn % vol->home.cluster != 0 || extents[i].block_count % vol->home.cluster != 0) {
+            return fail("an extent of this file is not a whole number of clusters at a cluster boundary "
+                        "(damaged map): not changed");
+        }
+    }
     {
         ods2_fid_t next = target_core->ext_fid;
         while (next.fid_num != 0) {

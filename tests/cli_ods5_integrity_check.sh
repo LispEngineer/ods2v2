@@ -481,6 +481,76 @@ for level in 2 5; do
     done
 done
 
+# ---- F3: LINK / SET FILE/ENTER to a reserved file is refused (file numbers 1-10), hard link or alias
+for spec in "2 plain" "5 plain" "5 hardlinks"; do
+    set -- $spec
+    level=$1; kind=$2
+    img="$TMP/lk$level$kind.img"
+    opts=""; [ "$kind" = hardlinks ] && opts="--hardlinks"
+    $INIT "$img" 8192 --structure=$level --label=LINKRES $opts >/dev/null 2>&1
+    before=$(md5sum < "$img")
+    bad=0
+    for name in INDEXF.SYS BITMAP.SYS BADBLK.SYS 000000.DIR CORIMG.SYS VOLSET.SYS CONTIN.SYS BACKUP.SYS BADLOG.SYS SECURITY.SYS; do
+        out=$($ODS2 "$img" "LINK [000000]ALIAS$name [000000]$name" 2>&1); rc=$?
+        case "$out" in *"reserved"*) ;; *) bad=$((bad + 1)); echo "      LINK to $name: exit $rc: $out" ;; esac
+        [ $rc -eq 1 ] || bad=$((bad + 1))
+    done
+    check "ODS-$level $kind: LINK to each of the ten reserved files is refused (exit 1, 'reserved')" 0 "$bad"
+    check "ODS-$level $kind: the image is byte for byte unchanged" "$before" "$(md5sum < "$img")"
+done
+
+# ---- F4: a name is never changed silently: ^" is refused (VMS refuses the quote character), an unterminated
+# quote or a command with more words than the tokenizer holds is not run
+for level in 2 5; do
+    img="$TMP/qt$level.img"
+    $INIT "$img" 8192 --structure=$level --label=QUOTES >/dev/null 2>&1
+    printf 'x\n' > "$TMP/u.txt"
+    before=$(md5sum < "$img")
+    for cmd in "COPY $TMP/u.txt [000000]quote^\".q" "COPY $TMP/u.txt [000000]quote\"x.q" "COPY $TMP/u.txt [000000]a b c d e f g h i j.q"; do
+        out=$($ODS2 "$img" "$cmd" 2>&1); rc=$?
+        check "ODS-$level: '$cmd' is refused (exit 1) and nothing is created" "1 $before" "$rc $(md5sum < "$img")"
+    done
+done
+
+# ---- F5: directories nest at most 255 levels (VMS's limit; DIR [...] and EXPORT stop there)
+for level in 2 5; do
+    img="$TMP/dp$level.img"
+    $INIT "$img" 16384 --structure=$level --label=DEEPDIR >/dev/null 2>&1
+    : > "$TMP/deep.ods2"
+    path=A; i=1
+    while [ $i -le 256 ]; do echo "CREATE/DIRECTORY [$path]" >> "$TMP/deep.ods2"; path="$path.A"; i=$((i+1)); done
+    out=$($ODS2 "$img" "@$TMP/deep.ods2" 2>&1)
+    check "ODS-$level: 255 levels are made, the 256th is refused" "255 created, 1 refused" \
+        "$(echo "$out" | grep -c 'CREATED') created, $(echo "$out" | grep -c 'at most 255 levels') refused"
+    check "ODS-$level: the checker finds nothing wrong" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" | tail -1)"
+    check "ODS-$level: DIR [...] still walks the whole tree" "255" "$($ODS2 "$img" 'DIR [...]*.*' 2>&1 | grep -c '^Directory ')"
+done
+
+# ---- review 9: R9-1 a change that cannot get its buffer fails instead of writing unbuffered; R9-2 after a write
+# that fails part way (an I/O error at commit) no more is written through the mount and a script stops
+# (ods2_fault: ODS2_FAULT_NOMEM_TXN=1 makes the buffer allocation fail, ODS2_FAULT_ERROR_AT_WRITE=k the k-th write)
+for level in 2 5; do
+    img="$TMP/mm$level.img"
+    $INIT "$img" 8192 --structure=$level --label=NOMEM >/dev/null 2>&1
+    printf 'x\n' > "$TMP/u.txt"
+    $ODS2 "$img" "COPY $TMP/u.txt [000000]KEEP.TXT" >/dev/null 2>&1
+    before=$(md5sum < "$img")
+    for cmd in "DELETE [000000]KEEP.TXT" "COPY $TMP/u.txt [000000]NEW.TXT" "CREATE/DIRECTORY [NEWD]" "LINK [000000]LNK.TXT [000000]KEEP.TXT"; do
+        out=$(ODS2_FAULT_NOMEM_TXN=1 ./ods2_fault "$img" "$cmd" 2>&1); rc=$?
+        case "$out" in *"out of memory"*) msg=refused ;; *) msg="$out" ;; esac
+        check "ODS-$level: '$cmd' without a buffer fails (exit 1, out of memory) and writes nothing" "1 refused $before" "$rc $msg $(md5sum < "$img")"
+    done
+    printf 'COPY %s [000000]ONE.TXT\nCOPY %s [000000]TWO.TXT\n' "$TMP/u.txt" "$TMP/u.txt" > "$TMP/two.ods2"
+    out=$(ODS2_FAULT_ERROR_AT_WRITE=3 ./ods2_fault "$img" "@$TMP/two.ods2" 2>&1); rc=$?
+    check "ODS-$level: a write that fails during the commit stops the script (exit 1, WRITEFAIL)" "1 yes no" \
+        "$rc $(echo "$out" | grep -q WRITEFAIL && echo yes) $(echo "$out" | grep -q 'TWO.TXT' && echo yes || echo no)"
+    check "ODS-$level: the second command's file was not made" "1" "$(./ods2 "$img" 'TYPE [000000]TWO.TXT' >/dev/null 2>&1; echo $?)"
+    # in the same process a further change is refused outright
+    printf 'COPY %s [000000]ONE.TXT\n' "$TMP/u.txt" > "$TMP/one.ods2"
+    out=$(ODS2_FAULT_ERROR_AT_WRITE=3 ./ods2_fault "$img" "@$TMP/one.ods2" 2>&1)
+    check "ODS-$level: and a later process works again, the old leak being a leak" "KEEP.TXT" "$(./ods2 "$img" 'DIR [000000]KEEP.TXT' 2>&1 | grep -o KEEP.TXT | head -1)"
+done
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_ods5_integrity_check: $fails FAILED"
