@@ -39,6 +39,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/file.h>
+#include <strings.h>
 #include <stdlib.h>
 
 static ods2_result_t ok(void)
@@ -3313,6 +3314,62 @@ static ods2_result_t remove_directory_entry(ods2_volume_t *vol, unsigned dir_fil
 ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const char *name)
 {
     return ods2_delete_version(vol, dir_file_number, name, ODS2_VERSION_HIGHEST, NULL);
+}
+
+/* The disk geometry (sectors x tracks) a device type reports for a volume of `blocks` blocks, which the storage
+   control block must record for OpenVMS VAX V7.3's ANALYZE (cylinders = ceil(blocks / (sectors * tracks)) always).
+   Measured by ods5-vms2 (CORPUS section 16); `*measured` is false when this size was not one of the measured
+   points and the answer is a prediction (confirm with SHOW DEVICE/FULL on the target).
+     ld      the LD driver's containers: sectors and tracks grow with the size (LD is no fixed geometry): measured at
+             2048, 20480, 204800, 1000001, 1024000, 2097152, 4000000 and 4190000 blocks; otherwise the largest
+             sectors x tracks not above the square root of the size, grown from the fourth root (fits seven of the eight)
+     ra      SIMH MSCP units: RA82 57 x 15 (measured to 4,194,304 blocks), RA92 73 x 13 (measured at 8,388,608 and
+             33,554,432); the type changes somewhere between 4 and 8 Mi blocks (taken at 4,194,304 here)
+     scsi    a physical SCSI disk: 63 x 255 (AXP1SYS)
+     axpbox  AXPbox SCSI units: 96 x 96 (the blank-volume library)
+     rz      Alpha virtual disks on ASIM5 (RZ58): 32 x 16 */
+bool ods2_target_geometry(const char *target, uint64_t blocks, uint32_t *sectors, uint32_t *tracks, bool *measured)
+{
+    static const struct { uint64_t n; uint32_t s, t; } ld[] = {
+        { 2048, 7, 6 }, { 20480, 12, 11 }, { 204800, 21, 21 }, { 1000001, 32, 31 }, { 1024000, 32, 31 },
+        { 2097152, 38, 38 }, { 4000000, 44, 45 }, { 4190000, 45, 45 },
+    };
+    static const uint64_t ra_measured[] = { 131072, 1049298, 2097152, 4194304, 8388608, 33554432 };
+    size_t i;
+    bool m = false;
+
+    if (strcasecmp(target, "ld") == 0) {
+        for (i = 0; i < sizeof(ld) / sizeof(ld[0]); i++) {
+            if (ld[i].n == blocks) { *sectors = ld[i].s; *tracks = ld[i].t; if (measured) *measured = true; return true; }
+        }
+        {
+            uint64_t root = 0, r4 = 0;
+            uint32_t sec, trk;
+            while ((root + 1) * (root + 1) <= blocks) root++;           /* integer square root */
+            while ((r4 + 1) * (r4 + 1) <= root) r4++;                    /* and fourth root */
+            sec = trk = (uint32_t) (r4 < 1 ? 1 : r4);
+            if ((uint64_t) (sec + 1) * trk <= root) sec++;
+            if ((uint64_t) sec * (trk + 1) <= root) trk++;
+            *sectors = sec; *tracks = trk;
+        }
+        if (measured) *measured = false;
+        return true;
+    }
+    if (strcasecmp(target, "ra") == 0 || strcasecmp(target, "ra82") == 0 || strcasecmp(target, "ra92") == 0 ||
+        strcasecmp(target, "rq") == 0) {
+        if (strcasecmp(target, "ra92") == 0 || (strcasecmp(target, "ra82") != 0 && blocks > 4194304)) {
+            *sectors = 73; *tracks = 13;
+        } else {
+            *sectors = 57; *tracks = 15;
+        }
+        for (i = 0; i < sizeof(ra_measured) / sizeof(ra_measured[0]); i++) if (ra_measured[i] == blocks) m = true;
+        if (measured) *measured = m;
+        return true;
+    }
+    if (strcasecmp(target, "scsi") == 0) { *sectors = 63; *tracks = 255; if (measured) *measured = true; return true; }
+    if (strcasecmp(target, "axpbox") == 0) { *sectors = 96; *tracks = 96; if (measured) *measured = true; return true; }
+    if (strcasecmp(target, "rz") == 0) { *sectors = 32; *tracks = 16; if (measured) *measured = true; return true; }
+    return false;
 }
 
 /* The storage control block (BITMAP.SYS, VBN 1) as OpenVMS reads it. VAX V7.3's ANALYZE/DISK_STRUCTURE (VERIFY X-17)

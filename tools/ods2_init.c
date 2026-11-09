@@ -61,7 +61,7 @@ int main(int argc, char **argv)
 
     if (argc < 3) {
         fprintf(stderr, "usage: %s <new-image> <size> [--label=NAME] [--structure=2|5] [--hardlinks] "
-                        "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N] [--geometry=SECTORS,TRACKS]\n"
+                        "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N] [--geometry=SECTORS,TRACKS | --target=ld|ra|scsi|axpbox|rz]\n"
                         "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 256\n", argv[0]);
         return 2;
     }
@@ -91,6 +91,17 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--access-dates") == 0) opt.volchar |= ODS5_VC_ACCESSTIMES;
         else if (strcmp(argv[i], "--no-special-files") == 0) opt.volchar |= ODS5_VC_NO_SPECIAL_FILES;
         else if (strcmp(argv[i], "--nohighwater") == 0) opt.volchar |= ODS5_VC_NOHIGHWATER;
+        else if (starts(argv[i], "--target=")) {
+            /* --target=ld|ra|ra82|ra92|rq|scsi|axpbox|rz: the geometry that device type reports for this size */
+            bool measured = false;
+            if (!ods2_target_geometry(argv[i] + 9, opt.blocks, &opt.sectors, &opt.tracks, &measured)) {
+                fprintf(stderr, "unknown target %s (ld, ra, ra82, ra92, rq, scsi, axpbox, rz)\n", argv[i] + 9);
+                return 2;
+            }
+            fprintf(stderr, "ods2_init: target %s, %llu blocks: geometry %u x %u%s\n", argv[i] + 9,
+                    (unsigned long long) opt.blocks, opt.sectors, opt.tracks,
+                    measured ? "" : " (predicted: not a measured size; confirm with SHOW DEVICE/FULL on the target)");
+        }
         else if (starts(argv[i], "--geometry=")) {
             /* --geometry=SECTORS,TRACKS: the geometry the SCB records (cylinders follow from the size) */
             unsigned se = 0, tr = 0;

@@ -2606,6 +2606,23 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
             }
             if (keyword(name, name_len, "GEOMETRY", 3)) {
                 /* /GEOMETRY=sectors,tracks: the geometry the SCB records (the device's own: VAX V7.3 compares) */
+                char nm[16];
+                if (value != NULL && value != q && !isdigit((unsigned char) *value) && (size_t) (q - value) < sizeof(nm)) {
+                    /* a device type: the geometry it reports for this volume's size */
+                    bool measured = false;
+                    uint32_t ps = 0, pt = 0;
+                    memcpy(nm, value, (size_t) (q - value));
+                    nm[q - value] = '\0';
+                    if (vol->volsize == 0 || !ods2_target_geometry(nm, vol->volsize, &ps, &pt, &measured)) {
+                        report_error("%%ODS2-E-VALREQ, /GEOMETRY=%s: unknown device type (ld, ra, ra82, ra92, rq, scsi, axpbox, "
+                                     "rz) or sectors,tracks\n", nm);
+                        return;
+                    }
+                    geo_s = ps; geo_t = pt;
+                    if (!measured) fprintf(stderr, "%%ODS2-W-PREDICTED, %s geometry for %u blocks is a prediction (not a "
+                                           "measured size): confirm with SHOW DEVICE/FULL on the target\n", nm, (unsigned) vol->volsize);
+                    continue;
+                }
                 char *end1 = NULL, *end2 = NULL;
                 unsigned long a = value ? strtoul(value, &end1, 10) : 0, b = (end1 && *end1 == ',') ? strtoul(end1 + 1, &end2, 10) : 0;
                 if (value == NULL || value == q || end1 == NULL || *end1 != ',' || end2 == NULL || end2 != q ||
