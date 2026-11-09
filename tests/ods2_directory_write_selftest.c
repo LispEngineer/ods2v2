@@ -448,6 +448,23 @@ int main(void)
     }
 
 
+    /* --- removing a pair only if its FID is the one given (an interrupted split lists an entry twice) --- */
+    {
+        uint8_t fb[512];
+        ods2_fid_t f1, f2;
+        uint8_t copy[512];
+        memset(fb, 0, sizeof(fb));
+        f1.fid_num = 7; f1.fid_seq = 1; f1.fid_rvn = 0; f1.fid_nmx = 0;
+        f2 = f1; f2.fid_num = 8;
+        assert(ods2_insert_dir_entry(fb, sizeof(fb), "TWICE.TXT", 1, f1));
+        memcpy(copy, fb, sizeof(fb));
+        assert(!ods2_remove_dir_version_fid(fb, sizeof(fb), "TWICE.TXT", 1, &f2));   /* another file's FID: untouched */
+        assert(memcmp(fb, copy, sizeof(fb)) == 0);
+        assert(ods2_remove_dir_version_fid(fb, sizeof(fb), "TWICE.TXT", 1, &f1));
+        assert(ods2_dir_block_is_empty(fb));
+        printf("PASS: removing an entry by name, version and FID leaves another FID's entry alone\n");
+    }
+
     /* --- damaged blocks (review 6, finding 3): the write-side parsers trust nothing in the block ---
        Each block is a 512-byte heap allocation, so ASan sees any read or write past it. A record whose name
        count runs past the end of the block, or whose size word does, is refused: insert and remove return

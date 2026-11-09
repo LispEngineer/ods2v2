@@ -74,6 +74,7 @@ def tree(img, tag):
 # every write, a name being listed twice for a moment (F2): the checker reports that as duplicate entries and
 # a block out of order. Allowed for those operations only; a name missing is never allowed (the tree compare).
 SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order']
+SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
                  'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT}
 
@@ -88,6 +89,12 @@ def check(img, op=None):
         else:
             bad.append(l)
     return bad, leaks
+
+
+def dup_names(img):
+    """the (name, version) of every entry the checker finds listed twice in one directory"""
+    rc, text = run(CHECK + [img])
+    return sorted(set(re.findall(r"dir \d+ \([^)]*\): two entries for '([^']+)';(\d+)", text.replace('\n', '\n') if False else text)))
 
 
 def fid_of(img, path):
@@ -279,6 +286,23 @@ def main():
                         prob.append('after COPY: file %s lost' % p)
                 if rc3 == 0 and files2.get('ZZ.DAT;1') != md5(followup):
                     prob.append('the COPY after the fault does not read back')
+                # a name listed twice (the residue of an interrupted split): one DELETE takes all of its entries
+                if name in SPLIT_OPS:
+                    trial2 = os.path.join(WORK, 'trial2.img')
+                    shutil.copyfile(trial, trial2)
+                    for nm, ver in dup_names(trial2):
+                        rcd, outd = ods2(trial2, 'DELETE [FULL]%s;%s' % (nm, ver))
+                        listed = ods2(trial2, 'DIR [FULL]%s' % nm)[1]
+                        if rcd != 0 or nm.upper() in listed.upper().replace(' ', '') and ';' in listed:
+                            prob.append('DELETE of the duplicated name %s;%s: exit %d, still listed or failed: %s'
+                                        % (nm, ver, rcd, outd.strip()[:100]))
+                    bad3, leaks3 = check(trial2, None)
+                    left = [b for b in bad3 + leaks3 if 'two entries for' in b or 'not in use' in b]
+                    if left:
+                        prob.append('after DELETE of the duplicated names: ' + left[0][:120])
+                    trial2_warn = run(CHECK + [trial2])[1]
+                    if 'dangling' in trial2_warn:
+                        prob.append('a dangling entry is left after DELETE of a duplicated name')
                 if prob:
                     bad_here += 1
                     failures += 1
