@@ -44,7 +44,7 @@ DEV_TOOLS = read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
 $(BUILD)/ods2_make_loop: tests/ods2_make_loop.c $(VOLUME_SRCS) include/ods2_volume.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_make_loop.c $(VOLUME_SRCS) -o $@
 
-TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_dir_eof_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest $(BUILD)/ods5_names_selftest $(BUILD)/ods5_directory_selftest $(BUILD)/ods5_header_selftest $(BUILD)/ods5_indexf_chain_selftest $(BUILD)/ods5_write_selftest $(BUILD)/ods5_review_selftest $(BUILD)/ods2_records_selftest $(BUILD)/ods2_acl_selftest
+TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_dir_eof_selftest $(BUILD)/ods2_verlimit_selftest $(BUILD)/ods2_fid_selftest $(BUILD)/ods2_integrity_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest $(BUILD)/ods5_names_selftest $(BUILD)/ods5_directory_selftest $(BUILD)/ods5_header_selftest $(BUILD)/ods5_indexf_chain_selftest $(BUILD)/ods5_write_selftest $(BUILD)/ods5_review_selftest $(BUILD)/ods2_records_selftest $(BUILD)/ods2_acl_selftest
 
 .PHONY: all test test-large tools dev-tools release clean starter-volume
 
@@ -143,6 +143,15 @@ $(BUILD)/ods2_file_alloc_selftest: tests/ods2_file_alloc_selftest.c $(VOLUME_SRC
 
 $(BUILD)/ods2_dir_order_selftest: tests/ods2_dir_order_selftest.c $(VOLUME_SRCS) include/ods2_volume.h include/ods2_directory.h samples/synthetic_disk.img | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_dir_order_selftest.c $(VOLUME_SRCS) -o $@
+
+$(BUILD)/ods2_integrity_selftest: tests/ods2_integrity_selftest.c $(VOLUME_SRCS) include/ods2_volume.h samples/synthetic_disk.img | $(BUILD)
+	$(CC) $(CFLAGS) -DODS2_FAULT_INJECTION $(SANFLAGS) tests/ods2_integrity_selftest.c $(VOLUME_SRCS) -o $@
+
+$(BUILD)/ods2_fid_selftest: tests/ods2_fid_selftest.c $(VOLUME_SRCS) include/ods2_volume.h samples/synthetic_disk.img | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_fid_selftest.c $(VOLUME_SRCS) -o $@
+
+$(BUILD)/ods2_verlimit_selftest: tests/ods2_verlimit_selftest.c $(VOLUME_SRCS) include/ods2_volume.h samples/synthetic_disk.img | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_verlimit_selftest.c $(VOLUME_SRCS) -o $@
 
 $(BUILD)/ods2_dir_eof_selftest: tests/ods2_dir_eof_selftest.c $(VOLUME_SRCS) include/ods2_volume.h include/ods2_directory.h samples/synthetic_disk.img | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_dir_eof_selftest.c $(VOLUME_SRCS) -o $@
@@ -260,6 +269,12 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@$(BUILD)/ods2_dir_order_selftest
 	@echo "--- ods2_dir_eof_selftest ---"
 	@$(BUILD)/ods2_dir_eof_selftest
+	@echo "--- ods2_verlimit_selftest ---"
+	@$(BUILD)/ods2_verlimit_selftest
+	@echo "--- ods2_fid_selftest ---"
+	@$(BUILD)/ods2_fid_selftest
+	@echo "--- ods2_integrity_selftest ---"
+	@$(BUILD)/ods2_integrity_selftest
 	@echo "--- ods2_large_file_selftest ---"
 	@$(BUILD)/ods2_large_file_selftest
 	@echo "--- ods2_record_attrs_selftest ---"
@@ -310,6 +325,10 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_ods5_init_check.sh
 	@echo "--- cli_nmx_check (file numbers above 65535) ---"
 	@sh tests/cli_nmx_check.sh
+	@echo "--- cli_verlimit_check ---"
+	@sh tests/cli_verlimit_check.sh
+	@echo "--- cli_lock_check ---"
+	@sh tests/cli_lock_check.sh
 	@echo "--- cli_ods5_integrity_check ---"
 	@sh tests/cli_ods5_integrity_check.sh
 	@echo "--- cli_deep_check (trees deeper than 255 levels) ---"
@@ -363,5 +382,5 @@ release: test
 clean:
 	rm -rf $(BUILD)
 	rm -f samples/synthetic_disk.img samples/synthetic_disk_working.img samples/synthetic_disk_v0.img
-	rm -f samples/versions_disk.img samples/versions_cli_disk.img samples/cli_wildcard_disk.img samples/cli_loop_disk.img samples/file_alloc_disk.img samples/dir_order_disk.img samples/dir_eof_disk.img samples/large_file_disk.img samples/cli_status_disk.img samples/cli_attrs_disk.img samples/record_attrs_disk.img samples/indexf_large_disk.img samples/text_var_disk.img samples/cli_label_disk.img samples/cli_label_orig.img
+	rm -f samples/versions_disk.img samples/versions_cli_disk.img samples/cli_wildcard_disk.img samples/cli_loop_disk.img samples/file_alloc_disk.img samples/dir_order_disk.img samples/dir_eof_disk.img samples/large_file_disk.img samples/cli_status_disk.img samples/cli_attrs_disk.img samples/record_attrs_disk.img samples/indexf_large_disk.img samples/text_var_disk.img samples/cli_label_disk.img samples/cli_label_orig.img samples/verlimit_disk.img samples/fid_disk.img samples/integrity_disk.img samples/cli_verlimit_disk.img samples/cli_lock_disk.img
 	rm -f $(TOOLS) ods2_fault ods2_deep_make
