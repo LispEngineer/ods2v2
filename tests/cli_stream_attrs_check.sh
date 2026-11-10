@@ -115,8 +115,8 @@ for level in 2 5; do
     $ODS2 "$img" "EXPORT [000000]LONG.TXT $TMP/before.txt" >/dev/null 2>&1
     check "$t: ods5check warns of the 1500-byte record in a file with MRS 512, and only of that one" "1 1" \
         "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*LONG.TXT.*whose longest record is 1500 bytes has LRL 512 and MRS 512') $(python3 -I tests/ods5check.py "$img" | grep -c '^WARN')"
-    check "$t: the warning says what fails (TYPE, COPY, and CHECKSUM on V7.3, V7.3-2: RSZ, RTB), that CONVERT drops the record and block I/O reads the file" "1" \
-        "$(python3 -I tests/ods5check.py "$img" | grep -c 'TYPE, COPY and (V7.3, V7.3-2) CHECKSUM fail (%RMS-F-RSZ, %RMS-W-RTB); CONVERT drops the record; block I/O and COPY to disk work')"
+    check "$t: the MRS-state warning says what fails (TYPE RSZ, COPY to NL: RTB, CHECKSUM on V7.3, V7.3-2), that CONVERT drops the record and block I/O reads the file" "1" \
+        "$(python3 -I tests/ods5check.py "$img" | grep -c 'TYPE (%RMS-F-RSZ), COPY to NL: (%RMS-W-RTB) and (V7.3, V7.3-2) CHECKSUM (RTB) fail, CONVERT drops the record; block I/O and COPY to disk work')"
     out=$($ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]*.TXT' 2>&1); rc=$?
     case "$out" in *"RECSIZES, 2 files looked at, 2 stream files changed"*) msg=repaired ;; *) msg="$out" ;; esac
     check "$t: SET FILE/ATTRIBUTES=(MRS:0) [000000]*.TXT: both files repaired, exit 0" "repaired 0" "$msg $rc"
@@ -159,6 +159,12 @@ for level in 2 5; do
     python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]HALF.TXT')" 512 0
     check "$t: Stream_LF with MRS 0 and LRL 512 and a 900-byte record: ods5check warns" "1" \
         "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*HALF.TXT.*longest record is 900 bytes has LRL 512 and MRS 0')"
+    check "$t: the half-repair state's warning (MRS 0, LRL below the record) says TYPE and CONVERT work and does not say TYPE fails" "1 0" \
+        "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*HALF.TXT.*(a record is longer than the LRL): COPY to NL: (%RMS-W-RTB) and (V7.3, V7.3-2) CHECKSUM (RTB) fail; TYPE and CONVERT work') $(python3 -I tests/ods5check.py "$img" | grep '^WARN.*HALF.TXT' | grep -c 'TYPE (%RMS-F-RSZ)')"
+    python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]HALF.TXT')" 512 4000
+    check "$t: an MRS that is enough with an LRL below the record: a warning that says the combination was not measured" "1" \
+        "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*HALF.TXT.*has LRL 512 and MRS 4000 (a record is longer than the LRL; this combination was not measured): if RMS sizes its buffer from the LRL, COPY to NL: and CHECKSUM fail (RTB); if from the MRS, the file reads')"
+    python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]HALF.TXT')" 512 0
     out=$($ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]HALF.TXT' 2>&1)
     case "$out" in *"RECSIZES, 1 file looked at, 1 stream file changed"*) msg=repaired ;; *) msg="$out" ;; esac
     check "$t: the repair fixes MRS-0 files with a short LRL too: MRS 0, LRL 900" "repaired Stream_LF, maximum 0 bytes, longest 900 bytes" "$msg $(rec "$img" '[000000]HALF.TXT')"
