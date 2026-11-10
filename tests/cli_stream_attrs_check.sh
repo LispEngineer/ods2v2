@@ -168,6 +168,18 @@ for level in 2 5; do
     case "$out" in *", 0 stream files changed"*) msg=unchanged ;; *) msg="$out" ;; esac
     check "$t: MRS 0 and LRL 4000 for a 900-byte record: left alone, and ods5check has no warning for it" "unchanged 0" \
         "$msg $(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*HALF.TXT')"
+    # LRL 0 with MRS 0 (no LRL recorded; VMS-made files are like this): CHECKSUM/FILE gives RTB on V7.3 and V7.3-2 for a long line
+    # (measured with 2000 bytes); 512 is the threshold chosen here. A line of at most 512 bytes: no warning; the repair sets LRL.
+    python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]HALF.TXT')" 0 0
+    check "$t: Stream_LF with LRL 0 and MRS 0 and a 900-byte record: ods5check warns (CHECKSUM/FILE on V7.3)" "1" \
+        "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*HALF.TXT.*LRL 0 and MRS 0 holds a record of 900 bytes: CHECKSUM/FILE fails on V7.3 and V7.3-2')"
+    $ODS2 "$img" "COPY $TMP/short.txt [000000]SHORT.TXT" >/dev/null 2>&1
+    python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]SHORT.TXT')" 0 0
+    check "$t: ... with a 5-byte record: no warning" "0" "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*SHORT.TXT')"
+    $ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]HALF.TXT' >/dev/null 2>&1
+    $ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]SHORT.TXT' >/dev/null 2>&1
+    check "$t: ... the repair sets the LRL of both: 900 and 5" "Stream_LF, maximum 0 bytes, longest 900 bytes Stream_LF, maximum 0 bytes, longest 5 bytes" \
+        "$(rec "$img" '[000000]HALF.TXT') $(rec "$img" '[000000]SHORT.TXT')"
     # a damaged file written as the old code did (lone LF, LRL = 600): the checker sees the 601-byte record
     python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]LF600.TXT')" 600 0
     check "$t: an STM file with LRL 600 and a 601-byte record (the old COPY's output): ods5check warns" "1" \
@@ -180,7 +192,7 @@ for level in 2 5; do
     bn=$(fid_num "$img" '[000000]BIG.DAT')
     python3 "$TMP/damage.py" "$img" "$bn" 32767 0 5
     check "$t: Stream_LF, MRS 0, LRL 32767, a 40,000-byte record (VMS's own state): no warning, an info line with -v" "0 1" \
-        "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*BIG.DAT') $(python3 -I tests/ods5check.py -v "$img" | grep -c 'BIG.DAT.*longer than any record length can be')"
+        "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*BIG.DAT') $(python3 -I tests/ods5check.py -v "$img" | grep -c 'BIG.DAT.*a record longer than 32,767 bytes: no VMS version tested')"
     out=$($ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]BIG.DAT' 2>&1); rc=$?
     case "$out" in *"0 stream files changed"*) msg=skipped ;; *) msg="$out" ;; esac
     check "$t: ... the repair skips it silently: 0 changed, no RECSIZES error, exit 0" "skipped 0 0" "$msg $(echo "$out" | grep -c 'E-RECSIZES') $rc"
