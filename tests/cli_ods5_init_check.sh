@@ -245,6 +245,59 @@ $ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=nonesuch" >/dev/null 2>&1; check "an un
 $INIT "$TMP/tg2.img" 3000000 --target=ld >/dev/null 2>"$TMP/tg2.err"
 check "an unmeasured size says it is a prediction" 1 "$(grep -c prediction "$TMP/tg2.err")"
 
+# --target=ld: the geometry LDDRIVER V8.3 reports for a container of each size (SHOW DEVICE/FULL on VAX V7.3, CORPUS 16 and 30;
+# 16384 and 131072 are the sizes B325's ANALYZE accepted). ANALYZE compares sectors and tracks one by one: 20,001 blocks drew
+# CHKSCB with 12 x 11 and 262,144 with 23 x 22 (VMS: 11 x 12 and 22 x 23). One image per size (2048 is below the 8192 blocks
+# ods2_init makes; it is in the table all the same).
+ld_fail=""
+for row in 10000:10:10:100 16384:11:11:136 16385:11:11:136 18000:12:11:137 20000:11:12:152 20001:11:12:152 20002:11:12:152 \
+           20479:12:11:156 20480:12:11:156 20481:12:11:156 65536:16:16:256 100000:18:17:327 131072:19:19:364 131073:19:19:364 \
+           200000:21:21:454 204800:21:21:465 250000:22:22:517 262143:22:23:519 262144:22:23:519 262145:22:23:519 \
+           300000:23:23:568 500000:26:27:713 524288:27:26:747 1000000:32:31:1009 1000001:32:31:1009 1024000:32:31:1033 \
+           2097152:38:38:1453 4000000:44:45:2021 4000001:44:45:2021 4190000:45:45:2070; do
+    IFS=: read -r nb ws wt wc <<EOF
+$row
+EOF
+    $INIT "$TMP/ldg.img" "$nb" --structure=2 --label=LDG --target=ld >/dev/null 2>"$TMP/ldg.err"
+    got=$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/ldg.img" show)
+    [ "$got" = "513 $nb 1 $ws $wt $wc" ] || ld_fail="$ld_fail $nb(want $ws x $wt x $wc, got: $got)"
+    if [ -s "$TMP/ldg.err" ]; then ld_fail="$ld_fail $nb(warned: $(head -c 80 "$TMP/ldg.err"))"; fi
+    rm -f "$TMP/ldg.img"
+done
+check "--target=ld at the 30 sizes VMS reported or accepted (B325: 20,001 = 11 x 12, 262,144 = 22 x 23): the SCB holds exactly that, no warning" "" "$ld_fail"
+# a size that is not in the table: the product from the rule, the order a guess, said to be one (k*(k+1) products only)
+$INIT "$TMP/ldu.img" 25000 --target=ld >/dev/null 2>"$TMP/ldu.err"
+check "an unmeasured ld size with an ambiguous order (25,000 blocks: product 156 = 12 x 13): says the order follows no rule, CHKSCB, and --geometry" "1 1 1" \
+    "$(grep -c 'follows no rule' "$TMP/ldu.err") $(grep -c CHKSCB "$TMP/ldu.err") $(grep -c -- '--geometry=SECTORS,TRACKS' "$TMP/ldu.err")"
+$INIT "$TMP/ldk.img" 22000 --target=ld >/dev/null 2>"$TMP/ldk.err"
+check "an unmeasured ld size whose product is k*k (22,000 blocks: 12 x 12; the volume is made): the plain prediction note only" "1 0 1" \
+    "$(grep -c prediction "$TMP/ldk.err") $(grep -c 'follows no rule' "$TMP/ldk.err") $([ -s "$TMP/ldk.img" ] && echo 1 || echo 0)"
+out=$($ODS2 "$TMP/ldu.img" "SET VOLUME/GEOMETRY=ld" 2>&1)
+check "SET VOLUME/GEOMETRY=ld on the 25,000-block image: PREDICTED once, with the order note" "1 1" \
+    "$(echo "$out" | grep -c 'PREDICTED') $(echo "$out" | grep -c 'follows no rule')"
+out=$($ODS2 "$TMP/ldk.img" "SET VOLUME/GEOMETRY=ld" 2>&1)
+check "SET VOLUME/GEOMETRY=ld on the 22,000-block image (12 x 12): PREDICTED once, without the order note" "1 0" \
+    "$(echo "$out" | grep -c 'PREDICTED') $(echo "$out" | grep -c 'follows no rule')"
+
+# HARDLINKS on a volume whose reserved files 1-10 have link count 0 (INITIALIZE, then SET VOLUME/VOLUME_CHARACTERISTICS=HARDLINKS
+# on V8.4: ANALYZE says %ANALDISK-W-LINKCOUNT "linkcount set at 0 when it should be 1"): the checker warns too. The image is a
+# plain ODS-5 one with the HARDLINKS bit set in the home block by hand (ods2v2 cannot set it afterwards).
+$INIT "$TMP/hlc.img" 16384 --structure=5 --label=HLC >/dev/null 2>&1
+python3 -I - "$TMP/hlc.img" <<'PY'
+import sys, struct
+f = open(sys.argv[1], 'r+b'); f.seek(512); b = bytearray(f.read(512))
+struct.pack_into('<H', b, 42, struct.unpack_from('<H', b, 42)[0] | 0x40)
+struct.pack_into('<H', b, 58, sum(struct.unpack_from('<29H', b, 0)) & 0xffff)
+struct.pack_into('<H', b, 510, sum(struct.unpack_from('<255H', b, 0)) & 0xffff)
+f.seek(512); f.write(b)
+PY
+out=$(python3 -I tests/ods5check.py "$TMP/hlc.img" 2>&1)
+check "ods5check: HARDLINKS volume, reserved files 1-10 with link count 0: ten warnings (file 1 first), no error" \
+    "10 yes 0 error(s), 10 warning(s)" \
+    "$(echo "$out" | grep -c 'link count 0 on a volume with HARDLINKS') $(echo "$out" | grep -q '^WARN   file 1: link count 0 on a volume with HARDLINKS' && echo yes) $(echo "$out" | tail -1)"
+$INIT "$TMP/hlc2.img" 16384 --structure=5 --label=HLC2 --hardlinks >/dev/null 2>&1
+check "ods5check: ods2_init --hardlinks (reserved files with link count 1): clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/hlc2.img" 2>&1 | tail -1)"
+
 # ods2_init says which geometry it wrote, and how to fit a VAX
 out=$($INIT "$TMP/pg.img" 1G --structure=2 2>&1)
 check "ods2_init (default): prints the geometry and the VAX advice" "1 1 1" \

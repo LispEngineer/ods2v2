@@ -444,6 +444,11 @@ def main():
                 if cl in owner and owner[cl] != n:
                     fnd.err('%s: cluster %d (LBN %d) also owned by file %d' % (where, cl, cl * v.cluster, owner[cl]))
                 owner[cl] = n
+        if n <= 10 and v.level == 5 and (v.volchar & 0x40) and u16(b, 74) < 1:
+            # the reserved files (their headers are structure level 2.1 even on ODS-5): V8.4 INITIALIZE with /HARDLINKS gives
+            # them count 1; a volume made by INITIALIZE and then SET VOLUME/VOLUME_CHARACTERISTICS=HARDLINKS keeps 0, and V8.4
+            # ANALYZE prints %ANALDISK-W-LINKCOUNT "linkcount set at 0 when it should be 1" (reported by ods5-vms3)
+            fnd.warn('%s: link count 0 on a volume with HARDLINKS (V8.4 ANALYZE: %%ANALDISK-W-LINKCOUNT, the count should be 1)' % where)
         if b[7] == 5:
             # FH2$W_LINKCOUNT as VMS V8.4 writes it (measured on VMS-made images only: ODS5T/ODS5T6 with
             # HARDLINKS: 1 or more; ASIM8ODS5, AXP2ODS5 and the archive images without: 0)

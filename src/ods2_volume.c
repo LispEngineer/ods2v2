@@ -3656,10 +3656,13 @@ ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const ch
 /* The disk geometry (sectors x tracks) a device type reports for a volume of `blocks` blocks, which the storage
    control block must record for OpenVMS VAX V7.3's ANALYZE (cylinders = ceil(blocks / (sectors * tracks)) always).
    Measured by ods5-vms2 (CORPUS section 16) and in the corpus; `*measured` is false when this size was not one of
-   the sizes measured for the geometry returned, and the answer is a prediction (confirm with SHOW DEVICE/FULL).
-     ld      the LD driver's containers: sectors and tracks grow with the size (LD is no fixed geometry): measured at
-             2048, 20480, 204800, 1000001, 1024000, 2097152, 4000000 and 4190000 blocks; otherwise the largest
-             sectors x tracks not above the square root of the size, grown from the fourth root (fits seven of the eight)
+   the sizes measured (or accepted by ANALYZE) for the geometry returned, and the answer is a prediction (confirm with SHOW DEVICE/FULL).
+     ld      the LD driver's containers (LDDRIVER V8.3, VAX V7.3): measured at 29 sizes (CORPUS 16 and 30). The product
+             sectors x tracks is the largest k*k or k*(k+1) not above the square root of the size (fits all 29) and
+             cylinders = ceil(blocks / product); the ORDER of the two (11 x 12 or 12 x 11) follows no rule found in the
+             29 sizes (20,000 to 20,002 give 11 x 12, 18,000 and 20,479 to 20,481 give 12 x 11), and ANALYZE draws CHKSCB
+             if it is the wrong way round (B325: 20,001 and 262,144 blocks). Only the table sizes are certain; any
+             other size gets the product and a guessed order (sectors first), reported as a prediction
      ra      SIMH MSCP units: RA82 57 x 15 (measured to 4,194,304 blocks), RA92 73 x 13 (measured at 8,388,608 and
              33,554,432); the type changes somewhere between 4 and 8 Mi blocks (taken at 4,194,304 here)
      scsi    a physical SCSI disk: 63 x 255 (AXP1SYS)
@@ -3668,8 +3671,37 @@ ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const ch
 bool ods2_target_geometry(const char *target, uint64_t blocks, uint32_t *sectors, uint32_t *tracks, bool *measured)
 {
     static const struct { uint64_t n; uint32_t s, t; } ld[] = {
-        { 2048, 7, 6 }, { 20480, 12, 11 }, { 204800, 21, 21 }, { 1000001, 32, 31 }, { 1024000, 32, 31 },
-        { 2097152, 38, 38 }, { 4000000, 44, 45 }, { 4190000, 45, 45 },
+        { 2048, 7, 6 },
+        { 10000, 10, 10 },
+        { 16384, 11, 11 },      /* this and 131072: ANALYZE on VAX96 accepted these (B325), SHOW DEVICE not run */
+        { 16385, 11, 11 },
+        { 18000, 12, 11 },
+        { 20000, 11, 12 },
+        { 20001, 11, 12 },
+        { 20002, 11, 12 },
+        { 20479, 12, 11 },
+        { 20480, 12, 11 },
+        { 20481, 12, 11 },
+        { 65536, 16, 16 },
+        { 100000, 18, 17 },
+        { 131072, 19, 19 },
+        { 131073, 19, 19 },
+        { 200000, 21, 21 },
+        { 204800, 21, 21 },
+        { 250000, 22, 22 },
+        { 262143, 22, 23 },
+        { 262144, 22, 23 },
+        { 262145, 22, 23 },
+        { 300000, 23, 23 },
+        { 500000, 26, 27 },
+        { 524288, 27, 26 },
+        { 1000000, 32, 31 },
+        { 1000001, 32, 31 },
+        { 1024000, 32, 31 },
+        { 2097152, 38, 38 },
+        { 4000000, 44, 45 },
+        { 4000001, 44, 45 },
+        { 4190000, 45, 45 },
     };
     /* the sizes each fixed geometry was measured at (the geometry of these types is believed to be the same at
        other sizes, but that is a belief, and a size outside the list is called a prediction) */
@@ -3721,6 +3753,28 @@ bool ods2_target_geometry(const char *target, uint64_t blocks, uint32_t *sectors
 #undef SET_LIST
     for (i = 0; i < n; i++) if (list[i] == blocks) m = true;
     if (measured) *measured = m;
+    return true;
+}
+
+/* The warning a caller prints when ods2_target_geometry reported a prediction (measured false): what is predicted and what
+   to do about it. Returns false (and writes nothing) when `measured` is true. For the LD driver at a size that is not in
+   the table and whose sectors and tracks differ, the order is a guess (see ods2_target_geometry): VAX V7.3 ANALYZE
+   compares sectors and tracks one by one. */
+bool ods2_target_geometry_warning(const char *target, uint64_t blocks, uint32_t sectors, uint32_t tracks, bool measured,
+                                  char *msg, size_t cap)
+{
+    if (measured || msg == NULL || cap == 0) return false;
+    if (strcasecmp(target, "ld") == 0 && sectors != tracks) {
+        snprintf(msg, cap, "the ld geometry for %llu blocks is a prediction (not a measured size): the product %u x %u comes from "
+                 "the rule that fits every measured size, but whether the LD driver gives %u sectors x %u tracks or %u x %u follows no rule "
+                 "found (20,000 blocks: 11 x 12; 20,479: 12 x 11), and VAX V7.3 ANALYZE reports CHKSCB for the wrong order. "
+                 "Check with LD CONNECT and SHOW DEVICE/FULL, and give the answer as --geometry=SECTORS,TRACKS "
+                 "(SET VOLUME/GEOMETRY=SECTORS,TRACKS)", (unsigned long long) blocks, sectors, tracks, sectors, tracks,
+                 tracks, sectors);
+    } else {
+        snprintf(msg, cap, "the %s geometry for %llu blocks is a prediction (not a measured size): confirm with SHOW "
+                 "DEVICE/FULL on the target", target, (unsigned long long) blocks);
+    }
     return true;
 }
 

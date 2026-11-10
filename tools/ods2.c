@@ -2790,8 +2790,12 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
                         return;
                     }
                     geo_s = ps; geo_t = pt;
-                    if (!measured) fprintf(stderr, "%%ODS2-W-PREDICTED, %s geometry for %u blocks is a prediction (not a "
-                                           "measured size): confirm with SHOW DEVICE/FULL on the target\n", nm, (unsigned) vol->volsize);
+                    {
+                        char warn[900];
+                        if (ods2_target_geometry_warning(nm, vol->volsize, ps, pt, measured, warn, sizeof(warn))) {
+                            fprintf(stderr, "%%ODS2-W-PREDICTED, %s\n", warn);
+                        }
+                    }
                     continue;
                 }
                 char *end1 = NULL, *end2 = NULL;
