@@ -503,6 +503,10 @@ ods2_result_t ods2_read_file_stream(ods2_volume_t *vol, const uint8_t *header,
  * volume of `blocks` blocks; *measured is false for a size that was not measured (a prediction). False: unknown target. */
 bool ods2_target_geometry(const char *target, uint64_t blocks, uint32_t *sectors, uint32_t *tracks, bool *measured);
 
+/* The warning to print when *measured came back false (false, nothing written, when it was true). */
+bool ods2_target_geometry_warning(const char *target, uint64_t blocks, uint32_t sectors, uint32_t tracks, bool measured,
+                                  char *msg, size_t cap);
+
 /* SET VOLUME/PARTIAL_CLUSTER: gives the blocks past the last whole cluster to BADBLK.SYS as VMS INITIALIZE does (for
  * volumes made by an older ods2_init); *changed says whether anything was written. */
 ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed);

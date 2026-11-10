@@ -104,9 +104,11 @@ int main(int argc, char **argv)
                 return 2;
             }
             geo_source = argv[i] + 9;
-            if (!measured) {
-                fprintf(stderr, "ods2_init: the %s geometry for %llu blocks is a prediction (not a measured size): confirm "
-                        "with SHOW DEVICE/FULL on the target\n", argv[i] + 9, (unsigned long long) opt.blocks);
+            {
+                char warn[900];
+                if (ods2_target_geometry_warning(argv[i] + 9, opt.blocks, opt.sectors, opt.tracks, measured, warn, sizeof(warn))) {
+                    fprintf(stderr, "ods2_init: %s\n", warn);
+                }
             }
         }
         else if (starts(argv[i], "--geometry=")) {

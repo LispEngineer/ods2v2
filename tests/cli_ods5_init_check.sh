@@ -245,6 +245,36 @@ $ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=nonesuch" >/dev/null 2>&1; check "an un
 $INIT "$TMP/tg2.img" 3000000 --target=ld >/dev/null 2>"$TMP/tg2.err"
 check "an unmeasured size says it is a prediction" 1 "$(grep -c prediction "$TMP/tg2.err")"
 
+# --target=ld: the geometry LDDRIVER V8.3 reports for a container of each size (SHOW DEVICE/FULL on VAX V7.3, CORPUS 16 and 30;
+# 16384 and 131072 are the sizes B325's ANALYZE accepted). ANALYZE compares sectors and tracks one by one: 20,001 blocks drew
+# CHKSCB with 12 x 11 and 262,144 with 23 x 22 (VMS: 11 x 12 and 22 x 23). One image per size (2048 is below the 8192 blocks
+# ods2_init makes; it is in the table all the same).
+ld_fail=""
+for row in 10000:10:10:100 16384:11:11:136 16385:11:11:136 18000:12:11:137 20000:11:12:152 20001:11:12:152 20002:11:12:152 \
+           20479:12:11:156 20480:12:11:156 20481:12:11:156 65536:16:16:256 100000:18:17:327 131072:19:19:364 131073:19:19:364 \
+           200000:21:21:454 204800:21:21:465 250000:22:22:517 262143:22:23:519 262144:22:23:519 262145:22:23:519 \
+           300000:23:23:568 500000:26:27:713 524288:27:26:747 1000000:32:31:1009 1000001:32:31:1009 1024000:32:31:1033 \
+           2097152:38:38:1453 4000000:44:45:2021 4000001:44:45:2021 4190000:45:45:2070; do
+    IFS=: read -r nb ws wt wc <<EOF
+$row
+EOF
+    $INIT "$TMP/ldg.img" "$nb" --structure=2 --label=LDG --target=ld >/dev/null 2>"$TMP/ldg.err"
+    got=$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/ldg.img" show)
+    [ "$got" = "513 $nb 1 $ws $wt $wc" ] || ld_fail="$ld_fail $nb(want $ws x $wt x $wc, got: $got)"
+    if [ -s "$TMP/ldg.err" ]; then ld_fail="$ld_fail $nb(warned: $(head -c 80 "$TMP/ldg.err"))"; fi
+    rm -f "$TMP/ldg.img"
+done
+check "--target=ld at the 30 sizes VMS reported or accepted (B325: 20,001 = 11 x 12, 262,144 = 22 x 23): the SCB holds exactly that, no warning" "" "$ld_fail"
+# a size that is not in the table: the product from the rule, the order a guess, said to be one (k*(k+1) products only)
+$INIT "$TMP/ldu.img" 25000 --target=ld >/dev/null 2>"$TMP/ldu.err"
+check "an unmeasured ld size with an ambiguous order (25,000 blocks: product 156 = 12 x 13): says the order follows no rule, CHKSCB, and --geometry" "1 1 1" \
+    "$(grep -c 'follows no rule' "$TMP/ldu.err") $(grep -c CHKSCB "$TMP/ldu.err") $(grep -c -- '--geometry=SECTORS,TRACKS' "$TMP/ldu.err")"
+$INIT "$TMP/ldu.img" 22000 --target=ld >/dev/null 2>"$TMP/ldu2.err"
+check "an unmeasured ld size whose product is k*k (22,000 blocks: 12 x 12): the plain prediction note only" "1 0" \
+    "$(grep -c prediction "$TMP/ldu2.err") $(grep -c 'follows no rule' "$TMP/ldu2.err")"
+out=$($ODS2 "$TMP/ldu.img" "SET VOLUME/GEOMETRY=ld" 2>&1)
+check "SET VOLUME/GEOMETRY=ld on the same size: the same note, as a warning" "1" "$(echo "$out" | grep -c 'PREDICTED')"
+
 # ods2_init says which geometry it wrote, and how to fit a VAX
 out=$($INIT "$TMP/pg.img" 1G --structure=2 2>&1)
 check "ods2_init (default): prints the geometry and the VAX advice" "1 1 1" \
