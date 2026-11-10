@@ -162,8 +162,8 @@ for level in 2 5; do
     check "$t: the half-repair state's warning (MRS 0, LRL below the record) says TYPE and CONVERT work and does not say TYPE fails" "1 0" \
         "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*HALF.TXT.*(a record is longer than the LRL): COPY to NL: (%RMS-W-RTB) and (V7.3, V7.3-2) CHECKSUM (RTB) fail; TYPE and CONVERT work') $(python3 -I tests/ods5check.py "$img" | grep '^WARN.*HALF.TXT' | grep -c 'TYPE (%RMS-F-RSZ)')"
     python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]HALF.TXT')" 512 4000
-    check "$t: an MRS that is enough with an LRL below the record: a warning that says the combination was not measured" "1" \
-        "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*HALF.TXT.*has LRL 512 and MRS 4000 (a record is longer than the LRL; this combination was not measured): if RMS sizes its buffer from the LRL, COPY to NL: and CHECKSUM fail (RTB); if from the MRS, the file reads')"
+    check "$t: an MRS that is enough with an LRL below the record (MRS 4000, LRL 512, a 900-byte line): no message at all (RMS applies the MRS when it is not 0: read fully on V8.4 and VAX V7.3)" "0" \
+        "$(python3 -I tests/ods5check.py -v "$img" | grep -c 'HALF.TXT')"
     python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]HALF.TXT')" 512 0
     out=$($ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]HALF.TXT' 2>&1)
     case "$out" in *"RECSIZES, 1 file looked at, 1 stream file changed"*) msg=repaired ;; *) msg="$out" ;; esac
