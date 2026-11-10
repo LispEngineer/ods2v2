@@ -2360,7 +2360,9 @@ bool ods2_stream_format(uint8_t rtype)
 }
 
 /* The longest record of stream content: STMLF ends a record at LF (a CR before it stays in the record), STM at CR LF
-   (the CR is not part of the record; a lone LF does not end one), STMCR at CR. */
+   (the CR is not part of the record; a lone LF does not end one), STMCR at CR. (The CLI's scan of a host file for COPY ends a
+   Stream record at any LF, the CR before it not counted: tools/ods2.c host_stats_t. Which is VMS's is an open question,
+   ODS5_FORMAT_NOTES 15.27; a larger LRL than RMS's longest record is harmless, MRS being 0.) */
 size_t ods2_longest_record(uint8_t rtype, const uint8_t *data, size_t len)
 {
     size_t i, cur = 0, longest = 0;
@@ -2407,6 +2409,11 @@ ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_h
             own.rsize = (uint16_t) longest;
             return ods2_create_file_attrs(vol, parent_header, name, content, content_len, &own, new_fid_out);
         }
+    } else if (attrs->rtype == ODS2_RFM_UDF && attrs->rsize == 0 && attrs->maxrec == 0 && content_len != 0) {
+        /* UDF given no LRL: the length, as ods2_create_file() and COPY give it */
+        ods2_record_attrs_t own = *attrs;
+        own.rsize = (uint16_t) (content_len > 32767 ? 32767 : content_len);
+        return ods2_create_file_attrs(vol, parent_header, name, content, content_len, &own, new_fid_out);
     }
     ctx.data = content;
     ctx.pos = 0;
@@ -2509,6 +2516,11 @@ static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_numb
     if (hardlinks) {
         r = header_ok_for_write(target_header, ods2_fid_number(target)); /* its link count is rewritten */
         if (!r.ok) return r;
+    }
+    if (!vol->ods5 && (core->filechar & 0x2000u) && link_name[0] == '-') {
+        /* (a link to a directory is refused just below; this keeps the rule of ods2_valid_dir_name if that is ever allowed) */
+        return fail("an ODS-2 directory name cannot start with '-': DCL reads it as the parent directory, so VMS could not "
+                    "reach anything inside it (%RMS-F-SYN; ODS-2 has no '^' escape)");
     }
     if (core->filechar & 0x2000u) {
         return fail("a link to a directory is not made here");

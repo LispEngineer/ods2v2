@@ -250,6 +250,10 @@ int main(void)
             assert(ods2_create_file_attrs(&vol, root, "OWN.TXT", longline, sizeof(longline), &a, &fid).ok);
             assert(ods2_read_header(&vol, fid.fid_num, h).ok);
             assert(core->recattr.rsize == 1500 && core->recattr.maxrec == 0);
+            a = attrs(ODS2_RFM_UDF, 0, 0, 0);                     /* UDF with no LRL: the length, as ods2_create_file gives */
+            assert(ods2_create_file_attrs(&vol, root, "UDFOWN.DAT", longline, 777, &a, &fid).ok);
+            assert(ods2_read_header(&vol, fid.fid_num, h).ok);
+            assert(core->recattr.rsize == 777 && core->recattr.maxrec == 0);
             assert(ods2_longest_record(ODS2_RFM_STMCR, (const uint8_t *) "ab\rcdef\rg", 10) == 4);
             assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "ab\r\ncd\nef\r\n", 12) == 5);
             printf("PASS: a stream record longer than MRS or LRL is refused; LRL 0 becomes the longest record\n");

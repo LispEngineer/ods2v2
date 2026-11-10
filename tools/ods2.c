@@ -2068,6 +2068,11 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
  * for CR-only line ends (no LF at all); anything else becomes fixed 512-byte records with no carriage control
  * and an exact end-of-file byte, as VMS binary FTP makes it. (Before, every file was Stream_LF with MRS 512,
  * which VMS V7.3-2 cannot read when a "line" of a binary file is longer than 512 bytes: %RMS-W-RTB.) */
+/* Record terminators, as this scan counts them (review 19, R19-2: two definitions of a Stream record end, to be settled by a
+ * VMS measurement, see ODS5_FORMAT_NOTES 15.27): Stream_LF ends a record at LF (a CR before it stays in the record); Stream_CR at
+ * CR; Stream (STM) here at LF, the CR before it not counted (longest_crlf). The library (ods2_longest_record), SET
+ * FILE/ATTRIBUTES=(MRS:0) and ods5check end a Stream record only at CR LF - a lone LF does not end one there - so for a file
+ * with mixed line ends they can compute a larger LRL than this scan does. */
 typedef struct {
     size_t total, nul, badctl, lf, crlf, cr, longest_lf, longest_crlf, longest_cr;
 } host_stats_t;

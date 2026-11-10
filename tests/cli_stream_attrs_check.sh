@@ -113,6 +113,8 @@ for level in 2 5; do
     $ODS2 "$img" "EXPORT [000000]LONG.TXT $TMP/before.txt" >/dev/null 2>&1
     check "$t: ods5check warns of the 1500-byte record in a file with MRS 512, and only of that one" "1 1" \
         "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*LONG.TXT.*maximum record size 512 holds a record of 1500 bytes') $(python3 -I tests/ods5check.py "$img" | grep -c '^WARN')"
+    check "$t: the warning says what fails (record-mode reads: TYPE, COPY, CHECKSUM), that block I/O reads the file and that VMS system-disk files carry these attributes too" "1" \
+        "$(python3 -I tests/ods5check.py "$img" | grep -c 'record-mode reads with a buffer sized from the MRS fail (TYPE, COPY, CHECKSUM: %RMS-W-RTB on VAX V7.3); block I/O still reads the file; files on a VMS system disk carry these attributes too (AXP1SYS: four; the transfer tool not recorded)')"
     out=$($ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]*.TXT' 2>&1); rc=$?
     case "$out" in *"RECSIZES, 2 files looked at, 2 stream files changed"*) msg=repaired ;; *) msg="$out" ;; esac
     check "$t: SET FILE/ATTRIBUTES=(MRS:0) [000000]*.TXT: both files repaired, exit 0" "repaired 0" "$msg $rc"
