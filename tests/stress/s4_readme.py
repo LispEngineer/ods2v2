@@ -18,7 +18,7 @@ WHAT = {
     's4-f2-fresh': 'ods2_init volume, 150 random operations (directories up to 7 deep, files 0..6 MB, deletes, aliases, relabel)',
     's4-f5-hl': 'ods2_init volume, 150 random operations: spaces, dots, ISO Latin-1, UCS-2, 236-character names, hard links, symbolic links, IMPORT trees',
     's4-f5-nohl': 'the same without HARDLINKS (aliases, link count 0), cluster 3 (100002 blocks)',
-    's4-vms5-heavy': 'VMS-made and VMS-written w1c-f5-after-asim12, then 250 more ods2v2 operations (deletes of VMS files, new trees, links); label S4VMS5',
+    's4-vms5-heavy': 'the VMS-made ODS-5 corpus volume asim12-ods5t (V8.4-2L2 INITIALIZE, HARDLINKS) + 250 ods2v2 operations (deletes of VMS files, new trees, links); label S4VMS5',
     's4-vms2-heavy': 'V7.3-2-made ODS2T6 corpus volume (asim6-ods2t6), then 250 more operations; label S4VMS2',
     's4-full': 'filled to the brim: 0 free blocks (last COPY refused, then 1-3 byte files until nothing fit)',
     's4-full2': 'the same on ODS-2',

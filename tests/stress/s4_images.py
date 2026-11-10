@@ -19,7 +19,7 @@ SPECS = {
     's4-f2-fresh':   ('mix', 'f2', 4101, 150, None, {'size': 131072, 'cluster': 4}, 'fresh ODS-2 (ods2_init), 150 random operations: directories, files of 0..6 MB, deletes, aliases, relabel'),
     's4-f5-hl':      ('mix', 'f5', 4102, 150, None, {'size': 131072, 'hl': True, 'cluster': 4}, 'fresh ODS-5 with HARDLINKS: names with spaces, dots, ISO Latin-1, UCS-2, 236-char names, hard links, symbolic links, IMPORT trees'),
     's4-f5-nohl':    ('mix', 'f5', 4103, 150, None, {'size': 100002, 'hl': False, 'cluster': 3}, 'fresh ODS-5 without HARDLINKS (aliases), cluster 3 (100002 blocks: a whole number of clusters, V8.4 ANALYZE objects to a partial last cluster)'),
-    's4-vms5-heavy': ('mix', 'vms:w1c-f5-after-asim12', 4104, 250, None, {}, 'a VMS-made and VMS-written ODS-5 image (w1c-f5-after-asim12) with 250 further ods2v2 operations'),
+    's4-vms5-heavy': ('mix', 'vms:asim12-ods5t-20261108', 4104, 250, None, {}, 'the VMS-made ODS-5 corpus volume (asim12-ods5t, V8.4, HARDLINKS) with 250 further ods2v2 operations'),
     's4-vms2-heavy': ('mix', 'vms:asim6-ods2t6-20261108', 4105, 250, None, {}, 'the V7.3-2-made ODS-2 corpus volume (asim6-ods2t6) with 250 further ods2v2 operations'),
     's4-full':       ('fill', 'f5', 4106, 1, 'full', {'size': 16384, 'hl': True, 'cluster': 2}, 'ODS-5 volume filled to the brim (the last copy refused, 1-3 byte files until nothing fits)'),
     's4-full2':      ('fill', 'f2', 4107, 1, 'full', {'size': 20001, 'cluster': 3}, 'ODS-2 volume filled to the brim (20001 blocks = 6667 clusters of 3)'),
