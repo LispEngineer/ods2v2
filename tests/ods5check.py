@@ -553,12 +553,9 @@ def main():
                      'LRL): COPY to NL: (%%RMS-W-RTB) and (V7.3, V7.3-2) CHECKSUM (RTB) fail; TYPE and CONVERT work; block I/O and '
                      'COPY to disk work; SET FILE/ATTRIBUTES=(MRS:0) repairs it (LRL the longest record)' %
                      (n, d['name'] if d else '?', kind, longest, lrl))
-        elif lrl != 0 and longest > lrl:
-            # a non-zero MRS that is enough, an LRL below the record: not measured; the LRL is held against the record
-            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d (a record is longer than the '
-                     'LRL; this combination was not measured): if RMS sizes its buffer from the LRL, COPY to NL: and CHECKSUM '
-                     'fail (RTB); if from the MRS, the file reads; SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
-                     (n, d['name'] if d else '?', kind, longest, lrl, maxrec))
+        # (a non-zero MRS that is enough with an LRL below the record, e.g. MRS 4000, LRL 512, a 900-byte line: no message; measured on V8.4
+        # and VAX V7.3, CORPUS 29: TYPE, COPY, CHECKSUM, CONVERT, SEARCH, BACKUP and READ read it fully - RMS applies the MRS when it
+        # is not 0)
 
     # --- directories ---
     dirs = [n for n, (b, d) in prim.items() if u32(b, 52) & 0x2000]
