@@ -703,7 +703,7 @@ static void canonical_dir_path(ods2_volume_t *vol, char *path, size_t cap)
    at 256, so a VMS-made volume can hold more than ods2v2 creates (255) and more than VMS lists. The walk keeps
    the path in one growing string and a small frame per level, so that the depth is limited by memory and by
    this bound on the C stack only; a tree deeper than the bound is reported, never cut off silently. */
-#define WALK_MAX_DEPTH 2048
+#define WALK_MAX_LEVELS 2048     /* levels below the directory the walk starts at (the creation cap is the same) */
 #define MAX_DIR_VISITS 1000000
 
 /* A growing string. */
@@ -796,9 +796,9 @@ static void walk_directories(dir_walk_t *w, ods2_fid_t dir_fid, int depth)
         w->errors++;
         return;
     }
-    if (depth >= WALK_MAX_DEPTH) {
+    if (depth > WALK_MAX_LEVELS) {
         report_error("%%ODS2-E-TOODEEP, [%s] is more than %d levels deep: this directory (%d entries) and "
-                     "everything below it are skipped\n", w->abs.s, WALK_MAX_DEPTH, count);
+                     "everything below it are skipped\n", w->abs.s, WALK_MAX_LEVELS, count);
         w->errors++;
         free(entries);
         return;
@@ -1562,20 +1562,105 @@ static void cmd_set_version_limit(ods2_volume_t *vol, const ods2_parsed_path_t *
     }
 }
 
-/* The deepest directory OpenVMS VAX V7.3 reaches on an ODS-2 volume is 7 levels below [000000] (measured: deeper
-   ones give %RMS-F-DIR and DIRECTORY [...] silently stops at 7); Alpha V7.3-2 and later reach far more. ods2v2
-   creates them (up to 255 levels) but says so. Returns true when it warned. */
+/* SET FILE/ATTRIBUTES=(MRS:0) <spec>: repairs Stream, Stream_LF and Stream_CR files whose MRS is not 0 or whose LRL is below
+   their longest record (ods2v2 gave every explicit-format stream file MRS 512, and once gave a Stream file an LRL one short;
+   record-mode reads then fail: %RMS-W-RTB): MRS 0 and LRL the file's own longest record (at most 32767), as VMS makes such
+   files. A file already in that state is left alone, silently. The data is not touched. */
+typedef struct {
+    unsigned files, changed;
+    int errors;
+} recsize_ctx_t;
+
+static void recsize_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spelling, const ods2_dir_entry_t *e)
+{
+    recsize_ctx_t *x = (recsize_ctx_t *) ctx_;
+    unsigned changed = 0;
+    ods2_result_t r;
+
+    if (ods2_fid_number(e->fid) <= 10 && ods2_fid_number(e->fid) != 0 && e->fid.fid_nmx == 0) return;
+    x->files++;
+    r = ods2_set_stream_record_sizes(vol, e->fid, &changed);
+    if (!r.ok) {
+        report_error("%%ODS2-E-RECSIZES, [%s]%s;%u: %s\n", dir_spelling, e->name, (unsigned) e->version, r.problem);
+        x->errors++;
+        return;
+    }
+    x->changed += changed;
+}
+
+static void cmd_set_record_sizes(ods2_volume_t *vol, const ods2_parsed_path_t *p)
+{
+    recsize_ctx_t x;
+    entry_hook_fn saved_hook = g_entry_hook;
+    void *saved_ctx = g_entry_hook_ctx;
+    bool saved_paths = g_paths_mode;
+    char effective[ODS2_PATH_MAX], spec[ODS2_PATH_MAX + 4], start[ODS2_PATH_MAX], pattern[ODS2_PATH_MAX + 4];
+    const char *rest;
+    dir_walk_t w;
+
+    memset(&x, 0, sizeof(x));
+    resolve_effective_path(p, effective, sizeof(effective));
+    snprintf(spec, sizeof(spec), "%s%s", effective, p->recursive ? "..." : "");
+    rest = ods2_dir_spec_split_prefix(spec, start, sizeof(start));
+    if (rest == NULL) {
+        report_error("%%ODS2-E-BADPATH, [%s]: invalid directory specification\n", spec);
+        return;
+    }
+    canonical_dir_path(vol, start, sizeof(start));
+    if (p->filename[0] == '\0') snprintf(pattern, sizeof(pattern), "*.*");
+    else if (ods5_find_unescaped(p->filename, '.') == NULL) snprintf(pattern, sizeof(pattern), "%s.*", p->filename);
+    else snprintf(pattern, sizeof(pattern), "%s", p->filename);
+    memset(&w, 0, sizeof(w));
+    w.vol = vol;
+    w.spec = rest;
+    w.pattern = pattern;
+    w.p = p;
+    g_entry_hook = recsize_entry;
+    g_entry_hook_ctx = &x;
+    g_paths_mode = false;
+    walk_from(&w, start);
+    g_entry_hook = saved_hook;
+    g_entry_hook_ctx = saved_ctx;
+    g_paths_mode = saved_paths;
+    if (x.files == 0 && w.errors == 0) {
+        fprintf(stderr, "%%ODS2-W-NOFILES, no files found\n");
+    } else {
+        printf("%%ODS2-I-RECSIZES, %u file%s looked at, %u stream file%s changed to MRS 0 and LRL the longest record\n",
+               x.files, x.files == 1 ? "" : "s", x.changed, x.changed == 1 ? "" : "s");
+    }
+}
+
+/* Warnings for a directory made deep. The deepest directory OpenVMS VAX V7.3 reaches on an ODS-2 volume is 7 levels below
+   [000000] (measured: deeper ones give %RMS-F-DIR and DIRECTORY [...] silently stops at 7); Alpha V7.3-2 and later create
+   10,000 levels without refusal. But VMS's own wildcard descent [...] stops at 256 directories on V7.3-2 and 512 on V8.4 and
+   V8.4-2L2 (%RMS-F-DIR), and BACKUP cannot save files that deep (FTLNTSAVED). ods2v2 creates up to 2,048 levels (the depth
+   its own DIR [...] and EXPORT read back) and says so past 256, and past 7 on an ODS-2 volume. Counts what it warned
+   about in *vax_warned and *deep_warned; prints when `print`. */
 #define ODS2_VAX_V73_MAX_LEVELS 7u
-static bool warn_if_too_deep_for_vax(ods2_volume_t *vol, const uint8_t *parent_header, const char *shown)
+#define ODS2_VMS_WILDCARD_LEVELS 256u
+static void warn_deep(ods2_volume_t *vol, const uint8_t *parent_header, const char *shown, bool print, int *vax_warned,
+                      int *deep_warned)
 {
     unsigned depth = 0;
 
-    if (vol->ods5 || !ods2_directory_depth(vol, parent_header, &depth).ok) return false;
-    if (depth + 1 <= ODS2_VAX_V73_MAX_LEVELS) return false;
-    fprintf(stderr, "%%ODS2-W-DEEPDIR, [%s] is %u levels below [000000]: OpenVMS VAX V7.3 cannot reach a "
-                    "directory deeper than %u levels on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
-                    "later can\n", shown, depth + 1, ODS2_VAX_V73_MAX_LEVELS);
-    return true;
+    if (!ods2_directory_depth(vol, parent_header, &depth).ok) return;
+    depth += 1;     /* the level of the directory being made */
+    if (!vol->ods5 && depth > ODS2_VAX_V73_MAX_LEVELS) {
+        if (vax_warned != NULL) (*vax_warned)++;
+        if (print) {
+            fprintf(stderr, "%%ODS2-W-DEEPDIR, [%s] is %u levels below [000000]: OpenVMS VAX V7.3 cannot reach a "
+                            "directory deeper than %u levels on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
+                            "later can\n", shown, depth, ODS2_VAX_V73_MAX_LEVELS);
+        }
+    }
+    if (depth > ODS2_VMS_WILDCARD_LEVELS) {
+        if (deep_warned != NULL) (*deep_warned)++;
+        if (print) {
+            fprintf(stderr, "%%ODS2-W-DEEPDIR256, [%s] is %u levels below [000000]: VMS's own wildcard [...] stops at 256 "
+                            "directories (V7.3-2) or 512 (V8.4) with %%RMS-F-DIR, and BACKUP cannot save files in it "
+                            "(FTLNTSAVED)\n", shown, depth);
+        }
+    }
 }
 
 static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p)
@@ -1619,7 +1704,7 @@ static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p
         return;
     }
     printf("%%ODS2-I-CREATED, created [%s]\n", effective_path);
-    warn_if_too_deep_for_vax(vol, parent_header, effective_path);
+    warn_deep(vol, parent_header, effective_path, true, NULL, NULL);
 }
 
 /* A host file opened for COPY, read in order a chunk at a time
@@ -1737,6 +1822,7 @@ typedef enum { FMT_AUTO = 0, FMT_STMLF, FMT_STM, FMT_STMCR, FMT_FIX512, FMT_UDF 
 typedef struct {
     bool convert;   /* /CONVERT: host text lines -> VAR records */
     bool mrs_given; /* MRS:n was given */
+    bool lrl_given; /* LRL:n was given */
     bool attrs_given; /* /ATTRIBUTES was given: the record attributes are the user's, no choosing */
     host_format_t format; /* /FORMAT=: FMT_AUTO chooses per file (see choose_format) */
 } copy_options_t;
@@ -1929,6 +2015,7 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
     }
 
     opts->mrs_given = mrs_given;
+    opts->lrl_given = lrl_given;
     if (opts->attrs_given && opts->format != FMT_AUTO) {
         report_error("%%ODS2-E-CONFQUAL, /FORMAT and /ATTRIBUTES both choose the record format: give one\n");
         return false;
@@ -1964,6 +2051,13 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
         else if (lrl_given && !mrs_given) a->maxrec = a->rsize;
         else if (!mrs_given && !lrl_given) a->rsize = a->maxrec = 512;
     }
+    /* A stream or undefined-format file has no maximum record size of its own: MRS 0, as VMS makes such files, unless MRS
+       was given. (The default of 512 left in MRS made RMS refuse any such file with a longer line: %RMS-W-RTB.) The
+       longest record (LRL) is the file's own, known when the host file is read: complete_stream_attrs(). */
+    if (!opts->convert && (a->rtype == ODS2_RFM_STM || a->rtype == ODS2_RFM_STMLF || a->rtype == ODS2_RFM_STMCR ||
+                           a->rtype == ODS2_RFM_UDF)) {
+        if (!mrs_given) a->maxrec = 0;
+    }
     return true;
 }
 
@@ -1975,6 +2069,10 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
  * for CR-only line ends (no LF at all); anything else becomes fixed 512-byte records with no carriage control
  * and an exact end-of-file byte, as VMS binary FTP makes it. (Before, every file was Stream_LF with MRS 512,
  * which VMS V7.3-2 cannot read when a "line" of a binary file is longer than 512 bytes: %RMS-W-RTB.) */
+/* The longest record of the host file in each stream format, by the rules RMS applies (measured on V8.4 and VAX V7.3:
+ * ODS5_FORMAT_NOTES 15.28, ods2_reclen_feed in the library): Stream_LF ends at LF (a CR before it stays in the record),
+ * Stream_CR at CR, Stream (STM) at LF, FF or VT (that byte stays in the record) or at CR LF (stripped). `longest_crlf` is the
+ * STM figure (the name is the old one). */
 typedef struct {
     size_t total, nul, badctl, lf, crlf, cr, longest_lf, longest_crlf, longest_cr;
 } host_stats_t;
@@ -1985,8 +2083,12 @@ static bool scan_host_file(FILE *f, host_stats_t *s)
     size_t n, i, cur = 0, cur_cr = 0;
     bool prev_cr = false;
 
+    ods2_reclen_t stm;
+
     memset(s, 0, sizeof(*s));
+    ods2_reclen_init(&stm, ODS2_RFM_STM);
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        ods2_reclen_feed(&stm, buf, n);
         for (i = 0; i < n; i++) {
             uint8_t c = buf[i];
             s->total++;
@@ -2004,7 +2106,6 @@ static bool scan_host_file(FILE *f, host_stats_t *s)
                 s->lf++;
                 if (prev_cr) s->crlf++;
                 if (cur > s->longest_lf) s->longest_lf = cur;
-                if ((prev_cr ? cur - 1 : cur) > s->longest_crlf) s->longest_crlf = prev_cr ? cur - 1 : cur;
                 cur = 0;
                 prev_cr = false;
             } else {
@@ -2015,7 +2116,7 @@ static bool scan_host_file(FILE *f, host_stats_t *s)
     }
     if (ferror(f)) return false;
     if (cur > s->longest_lf) s->longest_lf = cur;
-    if (cur > s->longest_crlf) s->longest_crlf = cur;
+    s->longest_crlf = ods2_reclen_longest(&stm);
     if (cur_cr > s->longest_cr) s->longest_cr = cur_cr;
     return fseek(f, 0, SEEK_SET) == 0;
 }
@@ -2066,6 +2167,45 @@ static bool choose_format(const copy_options_t *opts, FILE *f, size_t length, od
         attrs->rsize = attrs->maxrec = 512;
         *partial_fix = true;
         break;
+    }
+    return true;
+}
+
+/* /ATTRIBUTES names the record format but not the file's own record sizes: for a stream file the longest record (LRL)
+ * is the longest line of the host file (LF, CR LF or CR ends as the format says) and MRS is 0 unless it was given; for an
+ * undefined-format file LRL is the length. A size the user gave that is smaller than a line of the file is refused: RMS
+ * would refuse to read such a file back (%RMS-W-RTB, record too large for the user's buffer). */
+static bool complete_stream_attrs(const copy_options_t *opts, FILE *f, size_t length, ods2_record_attrs_t *attrs,
+                                  const char *path)
+{
+    host_stats_t s;
+    size_t longest;
+
+    if (attrs->rtype == ODS2_RFM_UDF) {
+        if (!opts->lrl_given) attrs->rsize = (uint16_t) (length > 32767 ? 32767 : length);
+        return true;
+    }
+    if (attrs->rtype != ODS2_RFM_STM && attrs->rtype != ODS2_RFM_STMLF && attrs->rtype != ODS2_RFM_STMCR) return true;
+    if (!scan_host_file(f, &s)) {
+        report_error("%%ODS2-E-READERR, error reading %s\n", path);
+        return false;
+    }
+    longest = attrs->rtype == ODS2_RFM_STMCR ? s.longest_cr : (attrs->rtype == ODS2_RFM_STM ? s.longest_crlf : s.longest_lf);
+    if (longest > 32767) {
+        report_error("%%ODS2-E-LINETOOLONG, %s: a line of %zu bytes is longer than a stream record can be (32767)\n",
+                     path, longest);
+        return false;
+    }
+    if (!opts->lrl_given) attrs->rsize = (uint16_t) longest;
+    if (attrs->rsize < longest) {
+        report_error("%%ODS2-E-RECTOOLONG, %s: a line of %zu bytes is longer than LRL:%u - RMS would refuse to read the file "
+                     "(RMS-W-RTB)\n", path, longest, (unsigned) attrs->rsize);
+        return false;
+    }
+    if (attrs->maxrec != 0 && attrs->maxrec < longest) {
+        report_error("%%ODS2-E-RECTOOLONG, %s: a line of %zu bytes is longer than MRS:%u - RMS would refuse to read the file "
+                     "(RMS-W-RTB)\n", path, longest, (unsigned) attrs->maxrec);
+        return false;
     }
     return true;
 }
@@ -2207,6 +2347,9 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
             fclose(in.f);
             return;
         }
+    } else if (!opts->convert && !complete_stream_attrs(opts, in.f, in.length, &attrs, local_file)) {
+        fclose(in.f);
+        return;
     }
     {
         char effective_dir[ODS2_PATH_MAX];
@@ -2373,7 +2516,7 @@ static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods
 typedef struct {
     ods2_volume_t *vol;
     int files, dirs, links, errors, skipped;
-    int deep;                            /* directories deeper than OpenVMS VAX V7.3 reaches (ODS-2) */
+    int deep, deep256;                   /* directories deeper than OpenVMS VAX V7.3 reaches (ODS-2) / than VMS's [...] walks */
     unsigned long long bytes;
     const copy_options_t *opts;          /* /FORMAT, /ATTRIBUTES */
     const ods2_record_attrs_t *attrs_in; /* the /ATTRIBUTES given */
@@ -2390,43 +2533,55 @@ static void import_decode_name(const char *linux_name, char *out, size_t cap)
     if (ods5_unescape_from_linux(linux_name, out, cap) == (size_t) -1) snprintf(out, cap, "%s", linux_name);
 }
 
-#define IMPORT_MAX_DEPTH 500
+#define IMPORT_MAX_DEPTH 2048   /* the creation cap; the host's 4,096-character path limit stops a tree sooner */
 
 static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_file_number, int depth)
 {
     struct dirent **list = NULL;
     int count, i;
+    struct import_bufs {
+        char path[ODS2_PATH_MAX * 2], literal[ODS2_PATH_MAX], shown[ODS2_PATH_MAX], dirname[ODS2_PATH_MAX + 8];
+        uint8_t dir_header[512], existing[512];
+        char target[ODS5_SYMLINK_MAX + 2];
+    } *b;
 
-    /* a bounded C stack: each level holds about 8 KB of path buffers (the Linux path limit is 4,096, the
-       tree would be cut by it long before this) */
+    /* a bounded C stack: the big buffers of a level are on the heap (one block per directory, freed when it is done), so
+       a frame is small and 2,048 levels fit the stack with room to spare */
     if (depth > IMPORT_MAX_DEPTH) {
         report_error("%%ODS2-E-DEEP, %s: directories nested more than %d levels: this directory and "
                      "everything below it are skipped\n", local_dir, IMPORT_MAX_DEPTH);
         st->errors++;
         return;
     }
+    b = malloc(sizeof(*b));
+    if (b == NULL) {
+        report_error("%%ODS2-E-NOMEM, out of memory importing %s\n", local_dir);
+        st->errors++;
+        return;
+    }
     count = scandir(local_dir, &list, NULL, import_name_cmp);
     if (count < 0) {
+        free(b);
         report_error("%%ODS2-E-OPENIN, could not read directory %s: %s\n", local_dir, strerror(errno));
         st->errors++;
         return;
     }
     for (i = 0; i < count; i++) {
         const char *entry = list[i]->d_name;
-        char path[ODS2_PATH_MAX * 2], literal[ODS2_PATH_MAX], shown[ODS2_PATH_MAX];
-        uint8_t dir_header[512];
+        char *path = b->path, *literal = b->literal, *shown = b->shown;
+        uint8_t *dir_header = b->dir_header;
         struct stat sb;
         ods2_result_t r;
         ods2_fid_t fid;
 
         if (strcmp(entry, ".") == 0 || strcmp(entry, "..") == 0) continue;
-        if (snprintf(path, sizeof(path), "%s/%s", local_dir, entry) >= (int) sizeof(path)) {
+        if (snprintf(path, sizeof(b->path), "%s/%s", local_dir, entry) >= (int) sizeof(b->path)) {
             report_error("%%ODS2-E-PATHTOOLONG, %s/%s: the path is too long: skipped\n", local_dir, entry);
             st->errors++;
             continue;
         }
-        import_decode_name(entry, literal, sizeof(literal));
-        display_name(literal, shown, sizeof(shown));
+        import_decode_name(entry, literal, sizeof(b->literal));
+        display_name(literal, shown, sizeof(b->shown));
         if (lstat(path, &sb) != 0) {
             report_error("%%ODS2-E-OPENIN, %s: %s\n", path, strerror(errno));
             st->errors++;
@@ -2439,11 +2594,11 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             continue;
         }
         if (S_ISDIR(sb.st_mode)) {
-            char dirname[ODS2_PATH_MAX + 8];
-            snprintf(dirname, sizeof(dirname), "%s.DIR", literal);
+            char *dirname = b->dirname;
+            snprintf(dirname, sizeof(b->dirname), "%s.DIR", literal);
             if (ods2_lookup_name(st->vol, dir_header, dirname, &fid).ok) {
                 /* already there: put the files into it, if it is a directory */
-                uint8_t existing[512];
+                uint8_t *existing = b->existing;
                 ods2_result_t fr = ods2_check_fid(fid);
                 if (!fr.ok) {
                     report_error("%%ODS2-E-DIRERR, %s: %s\n", shown, fr.problem);
@@ -2464,13 +2619,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
                     continue;
                 }
                 st->dirs++;
-                {
-                    unsigned d = 0;
-                    if (!st->vol->ods5 && ods2_directory_depth(st->vol, dir_header, &d).ok &&
-                        d + 1 > ODS2_VAX_V73_MAX_LEVELS) {
-                        st->deep++;
-                    }
-                }
+                warn_deep(st->vol, dir_header, shown, false, &st->deep, &st->deep256);
             }
             import_tree(st, path, ods2_fid_number(fid), depth + 1);
         } else if (S_ISREG(sb.st_mode)) {
@@ -2498,6 +2647,11 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             src.problem = in.problem;
             if (st->opts->attrs_given) {
                 attrs = *st->attrs_in;
+                if (!complete_stream_attrs(st->opts, in.f, in.length, &attrs, path)) {
+                    fclose(in.f);
+                    st->errors++;
+                    continue;
+                }
             } else if (!choose_format(st->opts, in.f, in.length, &attrs, &src.partial_fix_ok, path)) {
                 fclose(in.f);
                 st->errors++;
@@ -2513,8 +2667,8 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             st->files++;
             st->bytes += in.length;
         } else if (S_ISLNK(sb.st_mode)) {
-            char target[ODS5_SYMLINK_MAX + 2];
-            ssize_t n = readlink(path, target, sizeof(target) - 1);
+            char *target = b->target;
+            ssize_t n = readlink(path, target, sizeof(b->target) - 1);
             if (n <= 0 || n > ODS5_SYMLINK_MAX) {
                 report_error("%%ODS2-E-SYMLINK, %s: cannot read the link or its target is too long\n", shown);
                 st->errors++;
@@ -2535,6 +2689,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
     }
     for (i = 0; i < count; i++) free(list[i]);
     free(list);
+    free(b);
 }
 
 static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods2_parsed_path_t *p,
@@ -2561,6 +2716,11 @@ static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods
         fprintf(stderr, "%%ODS2-W-DEEPDIR, %d director%s deeper than %u levels below [000000] created: OpenVMS "
                         "VAX V7.3 cannot reach them on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
                         "later can\n", st.deep, st.deep == 1 ? "y" : "ies", ODS2_VAX_V73_MAX_LEVELS);
+    }
+    if (st.deep256 > 0) {
+        fprintf(stderr, "%%ODS2-W-DEEPDIR256, %d director%s deeper than %u levels below [000000] created: VMS's own wildcard "
+                        "[...] stops at 256 directories (V7.3-2) or 512 (V8.4) with %%RMS-F-DIR, and BACKUP cannot save "
+                        "files in them\n", st.deep256, st.deep256 == 1 ? "y" : "ies", ODS2_VMS_WILDCARD_LEVELS);
     }
     printf("%%ODS2-I-IMPORTED, %d file%s (%llu bytes), %d director%s, %d symbolic link%s imported "
            "from %s; %d skipped, %d error%s\n", st.files, st.files == 1 ? "" : "s", st.bytes,
@@ -2591,6 +2751,7 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
 {
     const char *label = NULL;
     unsigned geo_s = 0, geo_t = 0;
+    bool partial = false;
     int i;
 
     for (i = 1; i < n; i++) {
@@ -2603,6 +2764,11 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
             if (*q == '=') {
                 value = ++q;
                 while (*q && *q != '/') q++;
+            }
+            if (keyword(name, name_len, "PARTIAL_CLUSTER", 3)) {
+                /* /PARTIAL_CLUSTER: give the blocks past the last whole cluster to BADBLK.SYS, as VMS INITIALIZE does */
+                partial = true;
+                continue;
             }
             if (keyword(name, name_len, "GEOMETRY", 3)) {
                 /* /GEOMETRY=sectors,tracks: the geometry the SCB records (the device's own: VAX V7.3 compares) */
@@ -2641,7 +2807,7 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
             }
             if (!keyword(name, name_len, "LABEL", 3)) {
                 report_error("%%ODS2-E-IVQUAL, unrecognized qualifier /%.*s - SET VOLUME "
-                             "takes /LABEL=name or /GEOMETRY=sectors,tracks\n", (int) name_len, name);
+                             "takes /LABEL=name, /GEOMETRY=sectors,tracks or /PARTIAL_CLUSTER\n", (int) name_len, name);
                 return;
             }
             if (value == NULL || value == q) {
@@ -2664,6 +2830,17 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
             return;
         }
     }
+    if (partial) {
+        bool changed = false;
+        ods2_result_t pr = ods2_assign_partial_cluster(vol, &changed);
+        if (!pr.ok) {
+            report_error("%%ODS2-E-PARTIAL, %s\n", pr.problem);
+            return;
+        }
+        printf(changed ? "%%ODS2-I-PARTIAL, the blocks past the last whole cluster now belong to BADBLK.SYS\n"
+                       : "%%ODS2-I-PARTIAL, nothing to do (the size is a whole number of clusters, or BADBLK.SYS owns them)\n");
+        if (geo_s == 0 && label == NULL) return;
+    }
     if (geo_s != 0) {
         ods2_result_t gr = ods2_set_volume_geometry(vol, geo_s, geo_t);
         if (!gr.ok) {
@@ -2678,7 +2855,7 @@ static void cmd_set_volume(ods2_volume_t *vol, char **tokens, int n)
         if (label == NULL) return;
     }
     if (label == NULL) {
-        report_error("%%ODS2-E-NOPARM, usage: SET VOLUME/LABEL=name or /GEOMETRY=sectors,tracks\n");
+        report_error("%%ODS2-E-NOPARM, usage: SET VOLUME/LABEL=name, /GEOMETRY=sectors,tracks or /PARTIAL_CLUSTER\n");
         return;
     }
     {
@@ -2999,11 +3176,16 @@ static void print_help(void)
            "  SET DEFAULT path           set the current default directory\n"
            "  SHOW DEFAULT               show the current default directory\n"
            "  SET VOLUME/LABEL=name      relabel the volume (all home block copies)\n"
+           "  SET VOLUME/PARTIAL_CLUSTER   give the blocks past the last whole cluster to BADBLK.SYS, as VMS INITIALIZE\n"
+           "                             does (volumes made by an older ods2_init: V8.4 ANALYZE says ALLOCCLR)\n"
            "  SET VOLUME/GEOMETRY=sectors,tracks   record the disk geometry of the device the volume will be used on\n"
            "                             (OpenVMS VAX V7.3 ANALYZE compares it with the device: CHKSCB)\n"
            "  SET FILE/VERSION_LIMIT=n spec   the version limit of the entries a spec names (wildcards, [dir...]);\n"
            "                             32767 or 0 = no limit, what VMS writes (volumes written by ods2v2 before\n"
            "                             the fix carry 1: VMS purges version 1 when it makes version 2)\n"
+           "  SET FILE/ATTRIBUTES=(MRS:0) spec   stream files made with a maximum record size (ods2v2 once gave every\n"
+           "                             Stream_LF file 512): MRS 0 and LRL the longest record, as VMS makes them\n"
+           "                             (RMS refused to read such a file with a longer line: RMS-W-RTB)\n"
            "  SHOW VOLUME                label, owner, cluster size, files, free space\n"
            "  HELP                       show this command list\n"
            "  EXIT / QUIT                leave the interactive shell\n"
@@ -3297,6 +3479,28 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
             return true;
         }
         cmd_set_version_limit(vol, &p, (uint16_t) (limit == 0 ? 32767 : limit));
+        return true;
+    }
+    if (matches(tokens[0], "SET") && n > 1 && strncasecmp(tokens[1], "FILE/ATTRIBUTES=", 16) == 0) {
+        /* SET FILE/ATTRIBUTES=(MRS:0) <spec>: the only attribute change implemented */
+        ods2_parsed_path_t p;
+        const char *v = tokens[1] + 16;
+        char norm[32];
+        size_t k = 0;
+        for (; *v != '\0' && k + 1 < sizeof(norm); v++) {
+            if (*v != '(' && *v != ')') norm[k++] = (char) toupper((unsigned char) *v);
+        }
+        norm[k] = '\0';
+        if (n < 3 || (strcmp(norm, "MRS:0") != 0 && strcmp(norm, "MRS=0") != 0)) {
+            report_error("%%ODS2-E-NOPARM, usage: SET FILE/ATTRIBUTES=(MRS:0) <spec>   (the only change implemented: it makes "
+                         "stream files that were made with a maximum record size 512 readable by RMS again)\n");
+            return true;
+        }
+        if (!ods2_parse_path(tokens[2], &p)) {
+            report_error("%%ODS2-E-BADPATH, could not parse %s\n", tokens[2]);
+            return true;
+        }
+        cmd_set_record_sizes(vol, &p);
         return true;
     }
     if (matches(verb, "LINK") || (matches(tokens[0], "SET") && n > 1 && strncmp(tokens[1], "FILE/ENTER=", 11) == 0)) {

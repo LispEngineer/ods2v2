@@ -270,6 +270,146 @@ rm -f "$TMP"/r?.img
 out=$($ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=1,1" 2>&1)
 check "SET VOLUME/GEOMETRY with more than 65,535 cylinders warns (CYLWRAP)" 1 "$(echo "$out" | grep -c CYLWRAP)"
 
+# ---- file dates are the local time of the VMS system (FUTCREDAT / FUTREVDAT on VMS when they are not): the writer stamps
+# the zone of TZ (ODS2_TZ names the VMS machine's zone when it is another), never UTC by default; ods2_init says which zone,
+# and ods5check warns of dates ahead of the host that runs it. (A batch builder that sets TZ=UTC for reproducibility
+# writes dates 5 hours ahead of an EST VMS machine.)
+echo hi > "$TMP/tz.txt"
+TZ=Pacific/Honolulu $INIT "$TMP/tzh.img" 8192 --structure=2 --label=TZH >"$TMP/tzh.out" 2>&1
+TZ=Pacific/Honolulu $ODS2 "$TMP/tzh.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+TZ=UTC $INIT "$TMP/tzu.img" 8192 --structure=2 --label=TZU >"$TMP/tzu.out" 2>&1
+TZ=UTC $ODS2 "$TMP/tzu.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+ODS2_TZ=Pacific/Honolulu TZ=UTC $INIT "$TMP/tzo.img" 8192 --structure=2 --label=TZO >"$TMP/tzo.out" 2>&1
+ODS2_TZ=Pacific/Honolulu TZ=UTC $ODS2 "$TMP/tzo.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+check "ods2_init says the zone its dates are in (TZ=Pacific/Honolulu: HST, -1000)" "1 1" \
+    "$(grep -c 'I-TIME' "$TMP/tzh.out") $(grep -c -- '-1000' "$TMP/tzh.out")"
+check "... and that ODS2_TZ overrides TZ (it names the VMS machine's zone)" "1" "$(grep -c 'ODS2_TZ=Pacific/Honolulu' "$TMP/tzo.out")"
+check "ods5check (run in Honolulu time) on a volume written in Honolulu time: no future date" "0 error(s), 0 warning(s)" \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzh.img" 2>&1 | tail -1)"
+check "ods5check on a volume written with TZ=UTC (10 hours ahead of Honolulu): warns, names ODS2_TZ" "yes" \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzu.img" 2>&1 | grep -q 'hours in the future.*ODS2_TZ' && echo yes)"
+check "ODS2_TZ=Pacific/Honolulu over TZ=UTC writes Honolulu dates: no future date" "0 error(s), 0 warning(s)" \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzo.img" 2>&1 | tail -1)"
+# ---- the trailing partial cluster (physical/package B on V8.4: ALLOCCLR "blocks incorrectly marked allocated" for the
+# blocks past the last whole cluster). VMS gives it to BADBLK.SYS: one extent at floor(VOLSIZE/cluster) * cluster, a whole
+# cluster (what lies past the volume's end is unreadable), HIBLK = cluster, EFBLK = cluster + 1, fixed 512-byte records,
+# HIGHWATER = cluster + 1; its bit in the bitmap is clear (V7.3 INITIALIZE, VAX and Alpha blank-volume library, an Alpha
+# V8.4 system disk, and V8.4-2L2 INITIALIZE of 20,000 blocks /CLUSTER_SIZE=3: BADBLK.SYS = (19998, 3)). When the size is a
+# multiple of the cluster BADBLK.SYS is empty.
+cat > "$TMP/badblk.py" <<'PY'
+import struct, subprocess, sys, os
+ods2, img = sys.argv[1], sys.argv[2]
+f = open(img, 'rb'); f.seek(512); home = f.read(512)
+cl = struct.unpack_from('<H', home, 14)[0]; ibl = struct.unpack_from('<I', home, 24)[0]; ibs = struct.unpack_from('<H', home, 32)[0]
+f.seek((ibl + ibs + 2) * 512); h = f.read(512)
+def sw(o): a, b = struct.unpack_from('<HH', h, o); return (a << 16) | b
+mp = h[1] * 2; inuse = h[58]; p = mp; q = 0; ex = []
+while q < inuse:
+    w0 = struct.unpack_from('<H', h, p)[0]; fmt = (w0 >> 14) & 3
+    if fmt == 1: cnt = (w0 & 0xff) + 1; lbn = (((w0 >> 8) & 0x3f) << 16) | struct.unpack_from('<H', h, p + 2)[0]; p += 4; q += 2
+    elif fmt == 2: cnt = (w0 & 0x3fff) + 1; lbn = struct.unpack_from('<I', h, p + 2)[0]; p += 6; q += 3
+    else: break
+    ex.append((lbn, cnt))
+print(cl, ex, sw(24), sw(28), struct.unpack_from('<I', h, 76)[0], h[20], struct.unpack_from('<H', h, 22)[0])
+PY
+for spec in "2 20000 3" "5 20000 3" "2 20000 4" "5 100000 3"; do
+    set -- $spec
+    $INIT "$TMP/pc.img" $2 --structure=$1 --cluster=$3 --label=PARTC >/dev/null 2>&1
+    rem=$(( $2 % $3 )); whole=$(( $2 / $3 * $3 ))
+    if [ $rem -ne 0 ]; then want="$3 [($whole, $3)] $3 $(( $3 + 1 )) $(( $3 + 1 )) 1 512"; else want="$3 [] 0 1 1 1 512"; fi
+    check "ODS-$1, $2 blocks, cluster $3 (remainder $rem): BADBLK.SYS maps the partial cluster as VMS does" "$want" \
+        "$(python3 -I "$TMP/badblk.py" $ODS2 "$TMP/pc.img" | sed 's/(\([0-9]*\), \([0-9]*\))/(\1, \2)/')"
+    check "... ods5check: clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/pc.img" 2>&1 | tail -1)"
+    rm -f "$TMP/pc.img"
+done
+# an old volume (BADBLK.SYS empty, the partial cluster allocated to nobody): ods5check warns, the rest is as before
+$INIT "$TMP/pc.img" 20000 --structure=2 --cluster=3 --label=PARTC >/dev/null 2>&1
+python3 -I - "$TMP/pc.img" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b'); f.seek(512); home = f.read(512)
+ibl = struct.unpack_from('<I', home, 24)[0]; ibs = struct.unpack_from('<H', home, 32)[0]
+f.seek((ibl + ibs + 2) * 512); h = bytearray(f.read(512))
+struct.pack_into('<HH', h, 24, 0, 0); struct.pack_into('<HH', h, 28, 0, 1)   # HIBLK 0, EFBLK 1
+h[58] = 0                                                                     # no retrieval pointers
+struct.pack_into('<I', h, 76, 1)                                              # HIGHWATER 1
+for i in range(h[1] * 2, 510): h[i] = 0
+struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+f.seek((ibl + ibs + 2) * 512); f.write(h)
+PY
+out=$(python3 -I tests/ods5check.py "$TMP/pc.img" 2>&1)
+check "an old volume (BADBLK.SYS empty): ods5check warns that the partial cluster is owned by nobody" "0 error(s), 1 warning(s) yes" \
+    "$(echo "$out" | tail -1) $(echo "$out" | grep -q 'partial cluster.*BADBLK.SYS' && echo yes)"
+out=$($ODS2 "$TMP/pc.img" "SET VOLUME/PARTIAL_CLUSTER" 2>&1); rc=$?
+case "$out" in *"now belong to BADBLK.SYS"*) msg=assigned ;; *) msg="$out" ;; esac
+check "SET VOLUME/PARTIAL_CLUSTER on the old volume: BADBLK.SYS gets the partial cluster" "assigned 0" "$msg $rc"
+check "... the same header as ods2_init makes now, and ods5check is clean" "3 [(19998, 3)] 3 4 4 1 512 0 error(s), 0 warning(s)" \
+    "$(python3 -I "$TMP/badblk.py" $ODS2 "$TMP/pc.img") $(python3 -I tests/ods5check.py "$TMP/pc.img" 2>&1 | tail -1)"
+out=$($ODS2 "$TMP/pc.img" "SET VOLUME/PARTIAL_CLUSTER" 2>&1)
+check "... and a second run has nothing to do" yes "$(echo "$out" | grep -q 'nothing to do' && echo yes)"
+rm -f "$TMP/pc.img"
+
+# R17-1: SET VOLUME/PARTIAL_CLUSTER refuses an SCB that is not one (the starter volume's all-ones placeholder, a damaged
+# one) and a partial cluster outside the image: nothing is written
+$INIT "$TMP/pcs.img" 20000 --structure=2 --cluster=3 --label=PCSCB >/dev/null 2>&1
+python3 -I - "$TMP/pcs.img" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b'); f.seek(512); home = f.read(512)
+ibl = struct.unpack_from('<I', home, 24)[0]; ibs = struct.unpack_from('<H', home, 32)[0]
+# BADBLK.SYS emptied, as in an old volume
+f.seek((ibl + ibs + 2) * 512); h = bytearray(f.read(512))
+struct.pack_into('<HH', h, 24, 0, 0); struct.pack_into('<HH', h, 28, 0, 1); h[58] = 0; struct.pack_into('<I', h, 76, 1)
+for i in range(h[1] * 2, 510): h[i] = 0
+struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xFFFF)
+f.seek((ibl + ibs + 2) * 512); f.write(h)
+# the SCB overwritten with the placeholder (all ones / 0xAAAA), as the starter volume has
+f.seek((ibl + ibs + 1) * 512); h2 = f.read(512)
+mp = h2[1] * 2; w0, w1 = struct.unpack_from('<HH', h2, mp); lbn = (((w0 >> 8) & 0x3f) << 16) | w1
+f.seek(lbn * 512); f.write(b'\xff' * 512)
+PY
+before=$(md5sum < "$TMP/pcs.img")
+out=$($ODS2 "$TMP/pcs.img" "SET VOLUME/PARTIAL_CLUSTER" 2>&1); rc=$?
+case "$out" in *"E-PARTIAL"*"storage control block"*) msg=refused ;; *) msg="$out" ;; esac
+check "SET VOLUME/PARTIAL_CLUSTER on a placeholder SCB: refused (exit 1), nothing written" "refused 1 $before" "$msg $rc $(md5sum < "$TMP/pcs.img")"
+rm -f "$TMP/pcs.img"
+if [ -f samples/empty_ods2_volume.dsk.gz ]; then
+    zcat samples/empty_ods2_volume.dsk.gz > "$TMP/starter.img" 2>/dev/null
+    before=$(md5sum < "$TMP/starter.img")
+    out=$($ODS2 "$TMP/starter.img" "SET VOLUME/PARTIAL_CLUSTER" 2>&1); rc=$?
+    case "$out" in *"nothing to do"*|*"E-PARTIAL"*) msg=ok ;; *) msg="$out" ;; esac
+    check "SET VOLUME/PARTIAL_CLUSTER on the starter volume (VMS-made, size a multiple of nothing or owned): no change" "ok $before" "$msg $(md5sum < "$TMP/starter.img")"
+    rm -f "$TMP/starter.img"
+fi
+
+# R17-4: the checker's future-date warning follows ODS2_TZ (the VMS system's zone) and names the clock as the other cause
+TZ=UTC $INIT "$TMP/tzf.img" 8192 --structure=2 --label=TZF >/dev/null 2>&1
+check "ods5check: dates written in UTC, host in Honolulu: warns; with ODS2_TZ=UTC (the VMS system's zone) it does not" "yes 0" \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzf.img" 2>&1 | grep -q 'hours in the future' && echo yes) $(ODS2_TZ=UTC TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzf.img" 2>&1 | grep -c 'hours in the future')"
+check "... the warning names both causes: the zone and the VMS machine's clock" yes \
+    "$(TZ=Pacific/Honolulu python3 -I tests/ods5check.py "$TMP/tzf.img" 2>&1 | grep 'hours in the future' | head -1 | grep -q "ODS2_TZ.*clock" && echo yes)"
+rm -f "$TMP/tzf.img"
+
+# the rule, pinned: with TZ set, a new file's Created date is that zone's wall-clock time, and it reads back as the same
+# time (DIR/FULL prints the stored local time unchanged)
+for zone in Pacific/Honolulu America/New_York Asia/Kolkata UTC; do
+    TZ=$zone $INIT "$TMP/tzr.img" 8192 --structure=2 --label=TZR >/dev/null 2>&1
+    want_before=$(TZ=$zone date +%d-%b-%Y' '%H:%M | tr a-z A-Z)
+    TZ=$zone $ODS2 "$TMP/tzr.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+    want_after=$(TZ=$zone date +%d-%b-%Y' '%H:%M | tr a-z A-Z)
+    got=$(TZ=$zone $ODS2 "$TMP/tzr.img" "DIR/FULL [000000]X.TXT" 2>&1 | sed -n 's/^ *Created: *\([0-9]*-[A-Z]*-[0-9]*\) \([0-9]*:[0-9]*\):.*/\1 \2/p')
+    case "$got" in "$want_before"|"$want_after") res=local ;; *) res="$got (wanted $want_before)" ;; esac
+    check "TZ=$zone: the Created date stored and read back is that zone's local time" local "$res"
+    rm -f "$TMP/tzr.img"
+done
+# every date the tools write is local: the home block, the reserved files, a new file and a new directory
+for zone in America/New_York Asia/Kolkata; do
+    TZ=$zone $INIT "$TMP/tzk.img" 8192 --structure=5 --label=TZK >/dev/null 2>&1
+    TZ=$zone $ODS2 "$TMP/tzk.img" "COPY $TMP/tz.txt [000000]X.TXT" >/dev/null 2>&1
+    TZ=$zone $ODS2 "$TMP/tzk.img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+    check "everything written under TZ=$zone is not ahead of $zone (reserved files, file, directory, ODS-5 dates)" "0 error(s), 0 warning(s)" \
+        "$(TZ=$zone python3 -I tests/ods5check.py "$TMP/tzk.img" 2>&1 | tail -1)"
+    rm -f "$TMP/tzk.img"
+done
+
 # a block that only starts like a footer (the signature and the two bytes, but a wrong CRC) is not one: no message, a normal write mount
 cp "$TMP/s0.img" "$TMP/s4.img"; python3 -I "$TMP/foot.py" inside "$TMP/s4.img" 8192
 python3 -I - "$TMP/s4.img" <<'PY'

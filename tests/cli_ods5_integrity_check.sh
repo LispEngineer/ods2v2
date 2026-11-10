@@ -514,18 +514,22 @@ for level in 2 5; do
     done
 done
 
-# ---- F5: directories nest at most 255 levels (VMS's limit; DIR [...] and EXPORT stop there)
+# ---- F5 (changed: VMS V7.3-2, V8.4 and V8.4-2L2 created 10,000 levels): directories nest at most 2,048 levels, the depth DIR [...]
+# and EXPORT read back; past 256 levels (where VMS's own wildcard [...] stops on V7.3-2, 512 on V8.4: %RMS-F-DIR, and BACKUP
+# cannot save such files) CREATE/DIRECTORY warns; on an ODS-2 volume it also warns past 7 (OpenVMS VAX V7.3)
 for level in 2 5; do
     img="$TMP/dp$level.img"
     $INIT "$img" 16384 --structure=$level --label=DEEPDIR >/dev/null 2>&1
     : > "$TMP/deep.ods2"
     path=A; i=1
-    while [ $i -le 256 ]; do echo "CREATE/DIRECTORY [$path]" >> "$TMP/deep.ods2"; path="$path.A"; i=$((i+1)); done
+    while [ $i -le 260 ]; do echo "CREATE/DIRECTORY [$path]" >> "$TMP/deep.ods2"; path="$path.A"; i=$((i+1)); done
     out=$($ODS2 "$img" "@$TMP/deep.ods2" 2>&1)
-    check "ODS-$level: 255 levels are made, the 256th is refused" "255 created, 1 refused" \
-        "$(echo "$out" | grep -c 'CREATED') created, $(echo "$out" | grep -c 'at most 255 levels') refused"
+    check "ODS-$level: 260 levels are made (the cap is 2,048), none refused" "260 created, 0 refused" \
+        "$(echo "$out" | grep -c 'CREATED') created, $(echo "$out" | grep -c 'at most') refused"
+    check "ODS-$level: the warning past 256 levels (VMS wildcard [...] stops there; BACKUP cannot save such files): levels 257-260" 4 \
+        "$(echo "$out" | grep -c 'W-DEEPDIR256')"
     check "ODS-$level: the checker finds nothing wrong" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" | tail -1)"
-    check "ODS-$level: DIR [...] still walks the whole tree" "255" "$($ODS2 "$img" 'DIR [...]*.*' 2>&1 | grep -c '^Directory ')"
+    check "ODS-$level: DIR [...] still walks the whole tree" "260" "$($ODS2 "$img" 'DIR [...]*.*' 2>&1 | grep -c '^Directory ')"
 done
 
 # ---- review 9: R9-1 a change that cannot get its buffer fails instead of writing unbuffered; R9-2 after a write

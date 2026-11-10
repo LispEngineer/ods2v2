@@ -421,10 +421,28 @@ const char *ods2_check_record_attrs(const ods2_record_attrs_t *attrs, size_t con
  * one carriage control; no unknown RAT bits. */
 const char *ods2_check_var_record_attrs(const ods2_record_attrs_t *attrs, size_t content_len);
 
+/* Is `rtype` a stream format (STM, STMLF, STMCR)? And the longest record of `len` bytes of stream content in that format:
+ * the LRL such a file is made with (MRS is 0). */
+bool ods2_stream_format(uint8_t rtype);
+size_t ods2_longest_record(uint8_t rtype, const uint8_t *data, size_t len);
+
+/* The record length rules of stream files as RMS applies them (see ods2_reclen_feed in ods2_volume.c): the longest record of
+ * content fed in order, in any pieces. */
+typedef struct {
+    uint8_t rtype;
+    size_t cur, longest;
+    bool prev_cr;
+} ods2_reclen_t;
+void ods2_reclen_init(ods2_reclen_t *s, uint8_t rtype);
+void ods2_reclen_feed(ods2_reclen_t *s, const uint8_t *data, size_t len);
+size_t ods2_reclen_longest(const ods2_reclen_t *s);
+
 /* ods2_create_file() with chosen record attributes, checked first by
  * ods2_check_record_attrs() - a file whose attributes don't fit its
- * content is refused, not created. ods2_create_file(..., rtype, ...)
- * is this with rattrib 0 and RSIZE = MRS = 512, unchecked, as before.
+ * content is refused, not created: so is a stream file with a record longer than its MRS (when not 0) or its LRL; an LRL of 0
+ * for a stream file becomes its longest record (for a UDF file with MRS 0, its length). ods2_create_file(..., rtype, ...) is
+ * this with rattrib 0 and: FIX - RSIZE = MRS = 512, unchecked, as before; stream (STM, STMLF, STMCR) - MRS 0 and RSIZE the
+ * longest record; UDF - MRS 0 and RSIZE the length.
  */
 ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_header,
                                       const char *name, const uint8_t *content,
@@ -458,6 +476,11 @@ typedef struct {
 
 /* ods2_create_file_attrs() with the content taken from `src` a chunk
  * at a time, so memory use stays the same whatever the file's size.
+ * The record attributes are used AS GIVEN: the library cannot scan a source it reads once, so for a stream file the caller
+ * supplies the LRL (the longest record) and MRS (0 unless wanted), and no check is made that no record is longer than
+ * either (ods2_create_file_attrs(), which has the content in memory, computes the LRL and refuses such a file; the CLI
+ * scans the host file first). A stream file made here with MRS 512 and a longer line cannot be read by TYPE, COPY or CHECKSUM
+ * on VMS (%RMS-W-RTB).
  * Everything is allocated (from src->length) before the first read;
  * if `src` fails part way, everything is given back and no file is
  * created. */
@@ -480,6 +503,10 @@ ods2_result_t ods2_read_file_stream(ods2_volume_t *vol, const uint8_t *header,
  * volume of `blocks` blocks; *measured is false for a size that was not measured (a prediction). False: unknown target. */
 bool ods2_target_geometry(const char *target, uint64_t blocks, uint32_t *sectors, uint32_t *tracks, bool *measured);
 
+/* SET VOLUME/PARTIAL_CLUSTER: gives the blocks past the last whole cluster to BADBLK.SYS as VMS INITIALIZE does (for
+ * volumes made by an older ods2_init); *changed says whether anything was written. */
+ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed);
+
 /* SET VOLUME/GEOMETRY: records the disk geometry `sectors` x `tracks` (cylinders = ceil(VOLSIZE / (sectors * tracks)),
  * BLKSIZE 1) in the storage control block, the geometry of the device the volume is to be used on. */
 ods2_result_t ods2_set_volume_geometry(ods2_volume_t *vol, uint32_t sectors, uint32_t tracks);
@@ -488,6 +515,12 @@ ods2_result_t ods2_set_volume_geometry(ods2_volume_t *vol, uint32_t sectors, uin
  * is the number of directory records changed. For volumes written before ods2v2 gave entries VMS's limit (32767). */
 ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
                                            uint16_t limit, unsigned *changed);
+
+/* SET FILE/ATTRIBUTES=(MRS:0): a sequential Stream, Stream_LF or Stream_CR file with a maximum record size (MRS) gets MRS 0
+ * and its own longest record as LRL, as VMS makes such files (RMS refuses to read one with a longer line: %RMS-W-RTB).
+ * Also a file whose LRL is below its longest record (COPY and CHECKSUM fail on it even with MRS 0). Only the file's header
+ * changes; *changed is 1 if it did, 0 if it needed nothing (another format, MRS 0 and LRL enough). */
+ods2_result_t ods2_set_stream_record_sizes(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed);
 
 /* Inserts (name, version, fid) into the directory whose header is at
  * `dir_file_number`, trying each of its existing content blocks

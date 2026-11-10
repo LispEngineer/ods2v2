@@ -135,9 +135,9 @@ static bool vbn_to_lbn(const ods2_extent_t *extents, int extent_count,
 
 /* Most extension headers the index file may chain (a loop stops here). */
 /* How deep directories may be nested (VMS: 255; DIR [...] and EXPORT stop there). */
-#define ODS2_MAX_DIR_DEPTH_DEFAULT 255u
+#define ODS2_MAX_DIR_DEPTH_DEFAULT 2048u
 /* The creation limit. The test binary (ods2_fault) can raise it with ODS2_TEST_MAX_DIR_DEPTH, to make the trees
-   deeper than 255 levels a VMS volume can hold (V7.3-2 made 400) that the readers must handle. */
+   deeper than 2,048 levels a VMS volume can hold (V7.3-2, V8.4 made 10,000) that the readers must handle. */
 static unsigned max_dir_depth(void)
 {
 #ifdef ODS2_FAULT_INJECTION
@@ -277,6 +277,34 @@ ods2_result_t ods2_mount_write(const char *path, ods2_volume_t *vol)
    file content in write_extents(), flushed first. ODS2_FAULT_COUNT=1 makes a mount for write print
    "ODS2_FAULT: n writes" to stderr when it is dismounted, so a harness can learn how many k there are. */
 static long fault_writes;
+
+/* Test builds only (tests/ods2_integrity_selftest.c, the upstream pull request's interruption tests, run against
+   this code). ods2_fault_after_writes: the (n+1)th write after it is set to n, and every one after it, fails, as if
+   the machine stopped there; -1 is off. While ods2_fault_journal_on is set every block written is kept with what it
+   replaced, so that the test can put the image back (ods2_fault_rollback) instead of copying a volume of 1.5 GB for
+   each interruption it tries. The writes counted are the ones a change makes at its commit, in the order it made them. */
+long ods2_fault_after_writes = -1;
+bool ods2_fault_journal_on = false;
+static struct { uint32_t lbn; uint8_t old[512]; } *fault_journal;
+static size_t fault_journal_n, fault_journal_cap;
+
+void ods2_fault_forget(void)
+{
+    fault_journal_n = 0;
+}
+
+void ods2_fault_rollback(ods2_volume_t *vol)
+{
+    while (fault_journal_n > 0) {
+        fault_journal_n--;
+        if (fseek(vol->fp, (long) fault_journal[fault_journal_n].lbn * 512, SEEK_SET) != 0 ||
+            fwrite(fault_journal[fault_journal_n].old, 1, 512, vol->fp) != 512) {
+            abort();
+        }
+    }
+    fflush(vol->fp);
+    vol->write_failed = false;   /* the image is as it was: this mount may write again (a fresh mount would) */
+}
 
 static void fault_point(void)
 {
@@ -543,6 +571,25 @@ static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uin
     }
 #endif
     if (!lbn_in_volume(vol, lbn)) return fail(write_past_volume);
+#ifdef ODS2_FAULT_INJECTION
+    if (ods2_fault_after_writes >= 0) {
+        if (ods2_fault_after_writes == 0) return fail("injected write failure");   /* and every write after it */
+        ods2_fault_after_writes--;
+    }
+    if (ods2_fault_journal_on) {
+        if (fault_journal_n == fault_journal_cap) {
+            fault_journal_cap = fault_journal_cap ? fault_journal_cap * 2 : 256;
+            fault_journal = realloc(fault_journal, fault_journal_cap * sizeof(*fault_journal));
+            if (fault_journal == NULL) abort();
+        }
+        fault_journal[fault_journal_n].lbn = lbn;
+        if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
+            fread(fault_journal[fault_journal_n].old, 1, 512, vol->fp) != 512) {
+            memset(fault_journal[fault_journal_n].old, 0, 512);
+        }
+        fault_journal_n++;
+    }
+#endif
     if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
         fwrite(block, 1, 512, vol->fp) != 512) {
         return fail("could not write block");
@@ -613,6 +660,9 @@ ods2_result_t ods2_check_fid(ods2_fid_t fid)
     if (fid.fid_rvn != 0) {
         return fail("volume sets are not supported (a directory entry names a file on another volume "
                     "of a set)");
+    }
+    if (ods2_fid_number(fid) == 0) {
+        return fail("a directory entry names file number 0, which is no file");
     }
     return ok();
 }
@@ -1384,6 +1434,10 @@ ods2_result_t ods2_find_free_file_number(ods2_volume_t *vol, unsigned start_from
         if (block[(bit % 4096u) / 8u] & (1u << (bit % 8u))) {
             continue; /* in use */
         }
+        /* A number whose low 16 bits are 0 (65536, 131072, ...) is never handed out: its FID_NUM would be 0, which means
+           "no file". VMS made 70,000 files on a volume and DUMP/HEADER of file 65536 gave %DUMP-E-BADHEADER while 65535
+           and 65537 were normal (ods5-vms2); the slot stays as it is. */
+        if ((n & 0xFFFFu) == 0) continue;
 
         if (header_vbn(vol, n) >= efblk) {
             *file_number_out = n; /* beyond the end-of-file: garbage */
@@ -1617,11 +1671,30 @@ static ods2_result_t allocate_file_number(ods2_volume_t *vol, unsigned *file_num
         if (!r.ok) return r;   /* the header may be on disk by now: the new extents are left as they are */
     }
 
+    /* The numbers the allocator skips (multiples of 65536: FID_NUM 0, "no file") are marked in use in the index bitmap
+       once the file numbers have passed them, as VMS does (a volume with 70,000 files made on V8.4: file 65536 has its bit
+       set and a header slot that was never written); the slot is left alone. */
+    {
+        unsigned m;
+        for (m = 65536u; m < n; m += 65536u) {
+            uint8_t bm[512];
+            unsigned bit = m - 1;
+            r = read_index_bitmap_block(vol, bit / 4096u, bm);
+            if (!r.ok) goto give_back_marked;
+            if (!(bm[(bit % 4096u) / 8u] & (1u << (bit % 8u)))) {
+                r = mark_index_bitmap(vol, m, true);
+                if (!r.ok) goto give_back_marked;
+            }
+        }
+    }
     r = mark_index_bitmap(vol, n, true);
     if (!r.ok) return r;
     *file_number_out = n;
     *seq_out = seq;
     return ok();
+
+give_back_marked:
+    return r;
 
 give_back:
     /* nothing of INDEXF.SYS's header was written: the extents taken for it are free again */
@@ -1825,6 +1898,7 @@ static ods2_result_t header_ok_for_write(const uint8_t *h, unsigned file_number)
         core->idoffset < 40 || core->idoffset > core->mpoffset || core->mpoffset > core->acoffset ||
         core->acoffset > core->rsoffset ||
         (size_t) core->idoffset * 2 + ident_need > (size_t) core->mpoffset * 2 ||
+        (size_t) core->mpoffset * 2 >= 510 ||
         ods2_fid_number(core->fid) != file_number || core->fid.fid_rvn != 0) {
         return fail("a file header is damaged (checksum, offsets or file number): it is not changed - "
                     "run ANALYZE/DISK_STRUCTURE/REPAIR on VMS");
@@ -1948,6 +2022,13 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
         }
         {
             const char *why;
+#ifdef ODS2_FAULT_INJECTION
+            /* test build only: ODS2_TEST_DASH_DIR=1 lets a name start with '-', to make the directories older versions made
+               (the checker's warning and the VMS-unreachable case are tested on them) */
+            if (name[0] == '-' && getenv("ODS2_TEST_DASH_DIR") != NULL) {
+                why = NULL;
+            } else
+#endif
             if (!ods2_valid_dir_name(name, &why)) return fail(why);
         }
         strcpy(dirname, name); /* at most 39 characters, checked above */
@@ -1967,7 +2048,7 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
         r = ods2_directory_depth(vol, parent_header, &depth);
         if (!r.ok) return r;
         if (depth + 1 > ODS2_MAX_DIR_DEPTH) {
-            return fail("directories can be nested at most 255 levels deep");
+            return fail("directories can be nested at most 2048 levels deep (the depth DIR [...] and EXPORT read back)");
         }
     }
     if (!r.ok) return r;
@@ -2273,6 +2354,72 @@ const char *ods2_check_var_record_attrs(const ods2_record_attrs_t *attrs, size_t
     return NULL;
 }
 
+bool ods2_stream_format(uint8_t rtype)
+{
+    return rtype == ODS2_RFM_STM || rtype == ODS2_RFM_STMLF || rtype == ODS2_RFM_STMCR;
+}
+
+/* The length of the records of stream content, as RMS reads them (measured on OpenVMS V8.4 and VAX V7.3, ods2v2-made and
+   VMS-made files alike, ODS5_FORMAT_NOTES 15.28):
+     Stream_LF (STMLF)  a record ends at LF; the LF is not part of it; a CR before the LF stays in the record.
+     Stream_CR (STMCR)  a record ends at CR; the CR is not part of it.
+     Stream (STM)       a record ends at LF, FF or VT, and that byte STAYS in the record ("abc" LF is a record of 4 bytes);
+                        it also ends at CR LF, which is stripped ("abc" CR LF is 3 bytes); a lone CR is data.
+   The last record may have no terminator. A file whose longest record is longer than its LRL (or MRS, when not 0) cannot be
+   read in record mode (%RMS-F-RSZ, %RMS-W-RTB). One state machine, fed any number of pieces in order, used by the CLI's
+   scan of a host file, the library, SET FILE/ATTRIBUTES=(MRS:0) and (in Python, the same rules) ods5check. */
+void ods2_reclen_init(ods2_reclen_t *s, uint8_t rtype)
+{
+    s->rtype = rtype;
+    s->cur = s->longest = 0;
+    s->prev_cr = false;
+}
+
+static void reclen_end(ods2_reclen_t *s, size_t len)
+{
+    if (len > s->longest) s->longest = len;
+    s->cur = 0;
+    s->prev_cr = false;
+}
+
+void ods2_reclen_feed(ods2_reclen_t *s, const uint8_t *data, size_t len)
+{
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        uint8_t c = data[i];
+        if (s->rtype == ODS2_RFM_STMCR) {
+            if (c == '\r') reclen_end(s, s->cur); else s->cur++;
+        } else if (s->rtype == ODS2_RFM_STM) {
+            if (c == '\n') {
+                /* CR LF: the CR (counted as data so far) is part of the terminator; a lone LF stays in the record */
+                reclen_end(s, s->prev_cr ? s->cur - 1 : s->cur + 1);
+            } else if (c == '\f' || c == '\v') {
+                reclen_end(s, s->cur + 1);
+            } else {
+                s->cur++;
+                s->prev_cr = (c == '\r');
+            }
+        } else {
+            if (c == '\n') reclen_end(s, s->cur); else s->cur++;
+        }
+    }
+}
+
+size_t ods2_reclen_longest(const ods2_reclen_t *s)
+{
+    return s->cur > s->longest ? s->cur : s->longest;
+}
+
+size_t ods2_longest_record(uint8_t rtype, const uint8_t *data, size_t len)
+{
+    ods2_reclen_t st;
+
+    ods2_reclen_init(&st, rtype);
+    ods2_reclen_feed(&st, data, len);
+    return ods2_reclen_longest(&st);
+}
+
 ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_header,
                                       const char *name, const uint8_t *content,
                                       size_t content_len, const ods2_record_attrs_t *attrs,
@@ -2280,6 +2427,29 @@ ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_h
 {
     memory_source_t ctx;
     ods2_content_source_t src;
+    if (ods2_stream_format(attrs->rtype)) {
+        /* RMS refuses a stream file read back with a record longer than its MRS or its LRL (%RMS-W-RTB) */
+        size_t longest = ods2_longest_record(attrs->rtype, content, content_len);
+        if (longest > 32767) return fail("a line is longer than a stream record can be (32767 bytes)");
+        if (attrs->maxrec != 0 && longest > attrs->maxrec) {
+            return fail("a record is longer than the maximum record size (MRS) given: VMS could not read the file back "
+                        "(RMS-W-RTB); use MRS 0");
+        }
+        if (attrs->rsize != 0 && longest > attrs->rsize) {
+            return fail("a record is longer than the longest record length (LRL) given: VMS could not read the file back "
+                        "(RMS-W-RTB)");
+        }
+        if (attrs->rsize == 0) {                  /* no LRL given: the file's own longest record, as VMS stores it */
+            ods2_record_attrs_t own = *attrs;
+            own.rsize = (uint16_t) longest;
+            return ods2_create_file_attrs(vol, parent_header, name, content, content_len, &own, new_fid_out);
+        }
+    } else if (attrs->rtype == ODS2_RFM_UDF && attrs->rsize == 0 && attrs->maxrec == 0 && content_len != 0) {
+        /* UDF given no LRL: the length, as ods2_create_file() and COPY give it */
+        ods2_record_attrs_t own = *attrs;
+        own.rsize = (uint16_t) (content_len > 32767 ? 32767 : content_len);
+        return ods2_create_file_attrs(vol, parent_header, name, content, content_len, &own, new_fid_out);
+    }
     ctx.data = content;
     ctx.pos = 0;
     src.length = content_len;
@@ -2381,6 +2551,12 @@ static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_numb
     if (hardlinks) {
         r = header_ok_for_write(target_header, ods2_fid_number(target)); /* its link count is rewritten */
         if (!r.ok) return r;
+    }
+    if (!vol->ods5 && (core->filechar & 0x2000u) && link_name[0] == '-') {
+        /* (a link to a directory is refused just below; this keeps the rule of ods2_valid_dir_name if that is ever allowed) */
+        return fail("an ODS-2 directory name cannot start with '-': VAX VMS (V7.3) reads a leading '-' as the parent "
+                    "directory and cannot reach files inside (%RMS-F-SYN; ODS-2 has no '^' escape); Alpha V8.4 can. "
+                    "Refused because an ODS-2 volume is the one that goes to VAXen");
     }
     if (core->filechar & 0x2000u) {
         return fail("a link to a directory is not made here");
@@ -2490,6 +2666,17 @@ ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
     attrs.rattrib = 0;
     attrs.rsize = 512;
     attrs.maxrec = 512;
+    if (ods2_stream_format(rtype)) {
+        /* A stream file has no maximum record size (MRS 0, as VMS makes it) and its longest record is its own: MRS 512 made
+           RMS refuse such a file with a longer line (%RMS-W-RTB, record too large for the user's buffer) */
+        size_t longest = ods2_longest_record(rtype, content, content_len);
+        if (longest > 32767) return fail("a line is longer than a stream record can be (32767 bytes)");
+        attrs.rsize = (uint16_t) longest;
+        attrs.maxrec = 0;
+    } else if (rtype == ODS2_RFM_UDF) {
+        attrs.rsize = (uint16_t) (content_len > 32767 ? 32767 : content_len);
+        attrs.maxrec = 0;
+    }
     {
         memory_source_t ctx;
         ods2_content_source_t src;
@@ -3118,6 +3305,156 @@ ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file
     ods2_result_t r;
     TXN_BEGIN_OR_RETURN(vol);
     r = set_entry_version_limit_impl(vol, dir_file_number, name, limit, changed);
+    return txn_end(vol, r);
+}
+
+/* SET FILE/ATTRIBUTES=(MRS:0): repairs a stream file made with a maximum record size (ods2v2 gave every explicit-format
+   stream file MRS 512 whatever its lines, and RMS refuses to read such a file with a longer line: %RMS-W-RTB). MRS becomes 0
+   and LRL the file's own longest record, as VMS makes such files; the file's data is not touched. Only a sound header of a
+   sequential Stream, Stream_LF or Stream_CR file is changed, and only if it is not already as VMS leaves such a file: MRS 0
+   and an LRL of at least the longest record, the record taken as at most 32767 bytes (a binary file with a longer "record" is
+   left by VMS with MRS 0 and LRL 32767, and is skipped silently in that state; with a non-zero MRS it gets MRS 0 and LRL
+   32767). *changed is 1 if the header was written. */
+static ods2_result_t set_stream_record_sizes_impl(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed)
+{
+    uint8_t h[512], blk[512];
+    ods2_head_core_t *core = (ods2_head_core_t *) h;
+    uint64_t bytes, done = 0;
+    unsigned vbn, rfm;
+    size_t longest;
+    ods2_reclen_t st;
+    uint16_t sum;
+    ods2_result_t r;
+
+    *changed = 0;
+    if (!vol->writable) return not_writable(vol);
+    r = ods2_read_header_fid(vol, fid, h);
+    if (!r.ok) return r;
+    r = header_ok_for_write(h, ods2_fid_number(fid));
+    if (!r.ok) return r;
+    rfm = core->recattr.rtype & 0x0Fu;
+    if ((core->recattr.rtype >> 4) != 0 || (rfm != ODS2_RFM_STM && rfm != ODS2_RFM_STMLF && rfm != ODS2_RFM_STMCR) ||
+        (core->filechar & 0x2000u)) {
+        return ok();
+    }
+    bytes = ((uint64_t) ods2_word_swap32(core->recattr.efblk) - 1) * 512u + core->recattr.ffbyte;
+    if (ods2_word_swap32(core->recattr.efblk) == 0) bytes = 0;
+    ods2_reclen_init(&st, (uint8_t) rfm);
+    for (vbn = 1; done < bytes; vbn++) {
+        size_t n = (bytes - done) < 512u ? (size_t) (bytes - done) : 512u;
+        r = ods2_read_file_block(vol, h, vbn, blk);
+        if (!r.ok) return r;
+        ods2_reclen_feed(&st, blk, n);
+        done += n;
+    }
+    longest = ods2_reclen_longest(&st);
+    if (longest > 32767) longest = 32767;        /* no record length can be more: VMS's state for such a binary file */
+    /* needs repair: a maximum record size (RMS reads with a buffer of that size), or a longest record length (LRL) below
+       the longest record (COPY and CHECKSUM then fail too, even with MRS 0: %RMS-W-RTB) */
+    if (core->recattr.maxrec == 0 && core->recattr.rsize >= longest) return ok();
+    core->recattr.maxrec = 0;
+    core->recattr.rsize = (uint16_t) longest;
+    sum = ods2_checksum(h, 255);
+    h[510] = (uint8_t) (sum & 0xff);
+    h[511] = (uint8_t) (sum >> 8);
+    r = ods2_write_header(vol, ods2_fid_number(fid), h);
+    if (r.ok) *changed = 1;
+    return r;
+}
+
+ods2_result_t ods2_set_stream_record_sizes(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed)
+{
+    ods2_result_t r;
+    TXN_BEGIN_OR_RETURN(vol);
+    r = set_stream_record_sizes_impl(vol, fid, changed);
+    return txn_end(vol, r);
+}
+
+/* SET VOLUME/PARTIAL_CLUSTER: gives the blocks past the volume's last whole cluster to BADBLK.SYS, as VMS INITIALIZE
+   does (ods2_init does since this was found: V8.4 ANALYZE called that cluster, allocated to nobody in an older ods2_init
+   volume, ALLOCCLR and the free count FREESPADRIFT). Only BADBLK.SYS's header (file 3) changes: one extent at
+   floor(VOLSIZE / cluster) * cluster, a whole cluster, HIBLK = cluster, EFBLK = cluster + 1, HIGHWATER = cluster + 1. Done only
+   when the size is not a multiple of the cluster, BADBLK.SYS is empty and the cluster's bit is not set (it is not free). */
+static ods2_result_t assign_partial_cluster_impl(ods2_volume_t *vol, bool *changed)
+{
+    uint8_t h[512];
+    ods2_head_core_t *core = (ods2_head_core_t *) h;
+    uint32_t c = vol->home.cluster, part;
+    size_t ptr;
+    uint16_t sum;
+    ods2_result_t r;
+
+    *changed = false;
+    if (!vol->writable) return not_writable(vol);
+    if (vol->volsize == 0 || c == 0) return fail("the storage control block's volume size is unreadable");
+    {
+        /* VOLSIZE is trusted only from a storage control block that is one: the starter volume's placeholder (all ones,
+           0xAAAA) or a damaged block would put an extent far outside the volume into BADBLK.SYS */
+        uint8_t bh0[512], scb[512];
+        long here = ftell(vol->fp), size;
+        r = ods2_read_header(vol, 2, bh0);
+        if (!r.ok) return r;
+        r = ods2_read_file_block(vol, bh0, 1, scb);
+        if (!r.ok) return r;
+        if ((scb[0] | (scb[1] << 8)) != (vol->ods5 ? 0x0501 : 0x0201)) {
+            return fail("BITMAP.SYS's storage control block is not one (its structure level is not the volume's): the "
+                        "volume size it gives is not believed, nothing is changed");
+        }
+        /* and the partial cluster must start inside the image */
+        if (fseek(vol->fp, 0, SEEK_END) != 0) return fail("could not size the image");
+        size = ftell(vol->fp);
+        (void) fseek(vol->fp, here, SEEK_SET);
+        if (vol->volsize % c != 0 && (uint64_t) (vol->volsize / c * c) >= (uint64_t) size / 512) {
+            return fail("the blocks past the last whole cluster lie outside the image: nothing is changed");
+        }
+    }
+    if (vol->volsize % c == 0) return ok();                          /* nothing past the last whole cluster */
+    part = vol->volsize / c * c;
+    r = ods2_read_header(vol, 3, h);
+    if (!r.ok) return r;
+    r = header_ok_for_write(h, 3);
+    if (!r.ok) return r;
+    if (core->map_inuse != 0 || ods2_word_swap32(core->recattr.hiblk) != 0) return ok();   /* BADBLK.SYS already owns blocks */
+    /* the cluster must not be free (its bit is clear, or lies beyond the bitmap) */
+    {
+        uint8_t bh[512], bb[512];
+        unsigned bit = part / c;
+        r = ods2_read_header(vol, 2, bh);
+        if (!r.ok) return r;
+        r = ods2_read_file_block(vol, bh, 2 + bit / 4096, bb);
+        if (!r.ok) {
+            /* the bitmap does not reach the cluster's bit: the SCB and the bitmap disagree about the volume */
+            return fail("the bitmap does not cover the cluster past the last whole one (the storage control block and "
+                        "BITMAP.SYS disagree): not assigned to BADBLK.SYS");
+        }
+        if ((bb[(bit % 4096) / 8] >> (bit % 8)) & 1) {
+            return fail("the cluster past the last whole one is marked free in the bitmap: not assigned to BADBLK.SYS");
+        }
+    }
+    ptr = ods2_retrieval_pointer_size(part, c);
+    if (ptr == 0 || (size_t) core->mpoffset * 2 + ptr > (size_t) core->acoffset * 2) {
+        return fail("BADBLK.SYS's header has no room for the retrieval pointer");
+    }
+    ods2_encode_retrieval_pointer(h + (size_t) core->mpoffset * 2, part, c);
+    core->map_inuse = (uint8_t) (ptr / 2);
+    core->recattr.hiblk = ods2_word_swap32(c);
+    core->recattr.efblk = ods2_word_swap32(c + 1);
+    core->recattr.ffbyte = 0;
+    core->highwater = c + 1;
+    sum = ods2_checksum(h, 255);
+    h[510] = (uint8_t) (sum & 0xff);
+    h[511] = (uint8_t) (sum >> 8);
+    r = ods2_write_header(vol, 3, h);
+    if (!r.ok) return r;
+    *changed = true;
+    return ok();
+}
+
+ods2_result_t ods2_assign_partial_cluster(ods2_volume_t *vol, bool *changed)
+{
+    ods2_result_t r;
+    TXN_BEGIN_OR_RETURN(vol);
+    r = assign_partial_cluster_impl(vol, changed);
     return txn_end(vol, r);
 }
 

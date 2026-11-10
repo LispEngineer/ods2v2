@@ -41,11 +41,29 @@ of every file points at a directory that lists it, header name = the directory
 entry of the primary link, link count where the volume keeps one).
 """
 import os
-import struct, sys
+import re
+import struct, sys, time
 
 u16 = lambda b, o: struct.unpack_from('<H', b, o)[0]
 u32 = lambda b, o: struct.unpack_from('<I', b, o)[0]
 u64 = lambda b, o: struct.unpack_from('<Q', b, o)[0]
+
+
+def stream_longest(rfm, data):
+    """The longest record of Stream (4), Stream_LF (5) or Stream_CR (6) content as RMS reads it (see ods2_reclen_feed in
+    src/ods2_volume.c): Stream_LF ends a record at LF, Stream_CR at CR (neither is part of the record); Stream at LF, FF or
+    VT (that byte stays in the record) or CR LF (stripped); the last record may have no terminator."""
+    if rfm == 5:
+        return max((len(x) for x in data.split(b'\n')), default=0)
+    if rfm == 6:
+        return max((len(x) for x in data.split(b'\r')), default=0)
+    longest = prev = 0
+    for m in re.finditer(rb'\r\n|[\n\f\v]', data):
+        ln = m.start() - prev if m.group() == b'\r\n' else m.end() - prev
+        if ln > longest:
+            longest = ln
+        prev = m.end()
+    return max(longest, len(data) - prev)
 
 
 def checksum(b, n=255):
@@ -145,6 +163,9 @@ def decode_map(b, fnd, where):
     if o != end:
         fnd.err('%s: map area pointers run past MAP_INUSE' % where)
     return ext
+
+
+FUTURE_SEEN = {}
 
 
 def parse_ident(b, fnd, where):
@@ -322,6 +343,10 @@ def main():
             deleted.add(n)
             if used:
                 fnd.err('header %d is deleted but its index bitmap bit is set' % n)
+        elif used and (n & 0xFFFF) == 0 and not any(b):
+            # file numbers whose low 16 bits are 0 (65536, 131072, ...) are never used (FID_NUM 0 means "no file"); VMS marks
+            # the number in use in the index bitmap and never writes its header slot (a volume of 70,000 files made on V8.4)
+            pass
         else:
             if used:
                 fnd.err('header %d: bitmap bit set but no valid header (checksum %04x/%04x, struclev %04x)'
@@ -351,6 +376,34 @@ def main():
             continue
         d = parse_ident(b, fnd, where)
         prim[n] = (b, d)
+        # A date is local time in the zone the VMS system runs in. One that is more than an hour ahead of this host's
+        # local time was most likely written as UTC by a host west of Greenwich (VMS then calls it FUTCREDAT /
+        # FUTREVDAT, and every such file sorts and purges as if from the future): the writer's zone (TZ, or ODS2_TZ for
+        # ods2v2) was not the VMS machine's. Compared with the host running this checker, so it is a warning.
+        if d is not None and not FUTURE_SEEN.get('done'):
+            # the zone: ODS2_TZ (the VMS system's, as for ods2v2) when set, else this host's
+            _tzsave = os.environ.get('TZ')
+            if os.environ.get('ODS2_TZ'):
+                os.environ['TZ'] = os.environ['ODS2_TZ']
+                time.tzset()
+            ahead = (time.time() + time.localtime().tm_gmtoff + 3506716800 + 3600) * 10000000
+            if os.environ.get('ODS2_TZ'):
+                if _tzsave is None: os.environ.pop('TZ', None)
+                else: os.environ['TZ'] = _tzsave
+                time.tzset()
+            for key in ('credate', 'revdate', 'accdate', 'attdate'):
+                if d.get(key, 0) > ahead:
+                    hrs = (d[key] - (ahead - 3600 * 10000000)) / 10000000 / 3600.0
+                    fnd.warn('%s: %s is %.1f hours in the future of this host (file dates are local time of the VMS '
+                             'system. Either the writer stamped another zone than the VMS machine runs in (a TZ=UTC script; '
+                             'run the checker with ODS2_TZ set to the VMS machine\'s zone to compare in that zone), or the '
+                             'VMS machine\'s clock is ahead of this host\'s, or the VMS system\'s zone is east of this host\'s)'
+                             % (where, key, hrs))
+                    FUTURE_SEEN['count'] = FUTURE_SEEN.get('count', 0) + 1
+                    break
+            if FUTURE_SEEN.get('count', 0) >= 3:
+                fnd.warn('(further files with future dates are not listed)')
+                FUTURE_SEEN['done'] = True
         # extension chain
         exts = decode_map(b, fnd, where)
         cur = b
@@ -440,7 +493,59 @@ def main():
             if not isfree and cl not in owner and cl not in pend_owned:
                 if starter_quirk and cl < 1100: continue
                 fnd.warn('cluster %d (LBN %d) is allocated but owned by no file (lost)' % (cl, cl * v.cluster))
+        if volsize % v.cluster != 0 and not starter_quirk:
+            # The blocks past the last whole cluster: VMS gives that partial cluster to BADBLK.SYS (one extent, a whole
+            # cluster starting at floor(VOLSIZE/cluster)*cluster, of which only the blocks inside the volume exist), so
+            # that no cluster is allocated to nobody. Measured on every VMS-made volume of such a size (V7.3, V8.4, V8.4-2L2).
+            # A volume that stops its bitmap at the last whole cluster and gives BADBLK.SYS nothing is the older ods2_init's:
+            # V8.4 ANALYZE calls the partial cluster incorrectly allocated (ALLOCCLR) and the free count drifted.
+            part = volsize // v.cluster * v.cluster
+            if not any(l <= part < l + c for l, c in file_extents.get(3, [])):
+                fnd.warn('the partial cluster at LBN %d (the %d blocks past the last whole cluster of %d) is not owned by '
+                         'BADBLK.SYS, as VMS INITIALIZE does: V8.4 ANALYZE reports ALLOCCLR and FREESPADRIFT' %
+                         (part, volsize - part, v.cluster))
         print('storage: %d clusters, %d free' % (nclusters, free))
+
+    # --- stream files whose longest record exceeds their LRL or MRS ---
+    # RMS reads a Stream, Stream_LF or Stream_CR file in record mode with a buffer of the LRL (RSIZE) or, when it is not 0, the
+    # MRS: a longer record fails (measured on VAX V7.3 and V8.4: TYPE %RMS-F-RSZ, COPY %RMS-W-RTB, CHECKSUM %RMS-W-RTB on the
+    # VAX; CONVERT silently drops the record; COPY to disk and BACKUP work). ods2v2 once gave such files MRS = LRL = 512.
+    # Record ends as RMS applies them (ods2_reclen_feed): Stream_LF at LF; Stream_CR at CR; Stream at LF, FF or VT (the byte
+    # stays in the record) or CR LF (stripped).
+    for n, (b, d) in sorted(prim.items()):
+        if n <= 10 or (u32(b, 52) & 0x2000) or (u32(b, 52) & 0x8000):
+            continue
+        rfm, org, maxrec, lrl = b[20] & 0xF, b[20] >> 4, u16(b, 36), u16(b, 22)
+        if org != 0 or rfm not in (4, 5, 6):
+            continue
+        size = (swap32(u32(b, 28)) - 1) * 512 + u16(b, 32)
+        if size <= 0 or size > (1 << 28):
+            continue
+        data = b''.join(v.blk(l, c) for l, c in file_extents[n])[:size]
+        longest = stream_longest(rfm, data)
+
+        kind = {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm]
+        if longest > 32767 and maxrec == 0:
+            # VMS's own state for a binary stream file with no line ends: MRS 0 and LRL at most 32767 (or 0), and no record length
+            # can hold the record (52 such files on the AXP1 system disk); measured (V7.3, V7.3-2, V8.4): record-mode reads fail
+            fnd.info('file %d (%s): a %s file with a record of %d bytes (LRL %d, MRS 0): a record longer than 32,767 bytes: no VMS '
+                     'version tested (V7.3, V7.3-2, V8.4) reads it in record mode (TYPE, COPY to NL:, CHECKSUM\'s default, READ fail '
+                     'with RTB; with LRL 0, COPY to NL: fails with RSZ; CONVERT drops the whole file); block mode (COPY file to file, BACKUP) and V8.4 CHECKSUM/ALGORITHM=MD5 '
+                     'read it; VMS leaves binary stream files like this' %
+                     (n, d['name'] if d else '?', kind, longest, lrl))
+        elif lrl == 0 and maxrec == 0 and longest > 512:
+            # LRL 0 ("not recorded") with MRS 0: V7.3 and V7.3-2 CHECKSUM/FILE gives RTB for a 2000-byte line (TYPE, COPY, CONVERT work;
+            # V8.4 is fine). 512 is the threshold chosen here; only 2000 was measured.
+            fnd.info('file %d (%s): a %s file with LRL 0 and MRS 0 holds a record of %d bytes: CHECKSUM/FILE fails on V7.3 and '
+                     'V7.3-2 (%%RMS-W-RTB; measured with a 2000-byte line; 512 is the threshold chosen here), TYPE, COPY and CONVERT '
+                     'work, V8.4 is fine; VMS leaves files like this on its system disks and ods2v2 never writes one; '
+                     'SET FILE/ATTRIBUTES=(MRS:0) repairs it (LRL the longest record)' %
+                     (n, d['name'] if d else '?', kind, longest))
+        elif (lrl != 0 and longest > lrl) or (maxrec != 0 and longest > maxrec):
+            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d: TYPE, COPY and (V7.3, V7.3-2) '
+                     'CHECKSUM fail (%%RMS-F-RSZ, %%RMS-W-RTB); CONVERT drops the record; block I/O and COPY to disk work; '
+                     'SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
+                     (n, d['name'] if d else '?', kind, longest, lrl, maxrec))
 
     # --- directories ---
     dirs = [n for n, (b, d) in prim.items() if u32(b, 52) & 0x2000]
@@ -502,6 +607,12 @@ def main():
                         fnd.err('%s: %r has name type %d, VMS would store %d' % (where, nm, ntype, exp))
                 if '.' not in nm:
                     fnd.warn('%s: name %r has no dot' % (where, nm))
+                if v.level == 2 and nm.startswith('-') and nm.upper().endswith('.DIR'):
+                    # DCL reads a '-' that starts a directory component as "the parent directory" and ODS-2 has no '^' escape
+                    # (ODS-5 has: ^-): VAX V7.3 cannot name anything inside such a directory (%CLI-W-PARSEFAIL, %RMS-F-SYN);
+                    # Alpha V8.4 can (measured, CORPUS 26)
+                    fnd.warn('%s: directory %r starts with "-": VAX VMS (V7.3) reads a leading "-" as the parent directory and '
+                             'cannot reach files inside (%%RMS-F-SYN); Alpha V8.4 can' % (where, nm))
                 if prevkey is not None and not ignore_order:
                     if key < prevkey:
                         fnd.err('%s block %d: %r out of order' % (where, bi + 1, nm))
