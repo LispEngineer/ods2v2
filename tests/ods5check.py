@@ -556,8 +556,8 @@ def main():
         elif lrl != 0 and longest > lrl:
             # a non-zero MRS that is enough, an LRL below the record: not measured; the LRL is held against the record
             fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d (a record is longer than the '
-                     'LRL; this combination was not measured): COPY to NL: and CHECKSUM are expected to fail (%%RMS-W-RTB); '
-                     'SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
+                     'LRL; this combination was not measured): if RMS sizes its buffer from the LRL, COPY to NL: and CHECKSUM '
+                     'fail (RTB); if from the MRS, the file reads; SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
                      (n, d['name'] if d else '?', kind, longest, lrl, maxrec))
 
     # --- directories ---
