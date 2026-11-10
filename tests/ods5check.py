@@ -489,6 +489,8 @@ def main():
         print('storage: %d clusters, %d free' % (nclusters, free))
 
     # --- stream files whose maximum record size is smaller than their longest record ---
+    # (a Stream record ends here at CR LF only, a lone LF does not end one; COPY's scan of a host file ends one at any LF:
+    # an open question, ODS5_FORMAT_NOTES 15.27. A longer longest-record is the safe side for this warning.)
     # RMS refuses to read such a file (%RMS-W-RTB, "record too large for the user's buffer"): ods2v2 used to give every
     # Stream_LF file MRS 512 whatever its lines (found on VAX V7.3); VMS's own stream files have MRS 0.
     for n, (b, d) in sorted(prim.items()):
@@ -522,8 +524,9 @@ def main():
                     cur += 1
         longest = max(longest, cur)
         if longest > maxrec:
-            fnd.warn('file %d (%s): a %s file with maximum record size %d holds a record of %d bytes: RMS refuses to read it '
-                     '(RMS-W-RTB, record too large for the user\'s buffer); SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
+            fnd.warn('file %d (%s): a %s file with maximum record size %d holds a record of %d bytes: record-mode reads with '
+                     'a buffer sized from the MRS fail (TYPE, COPY, CHECKSUM: %%RMS-W-RTB on VAX V7.3); block I/O still reads '
+                     'the file; VMS\'s own FTP (ASCII mode) makes such files; SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
                      (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], maxrec, longest))
 
     # --- directories ---

@@ -428,9 +428,10 @@ size_t ods2_longest_record(uint8_t rtype, const uint8_t *data, size_t len);
 
 /* ods2_create_file() with chosen record attributes, checked first by
  * ods2_check_record_attrs() - a file whose attributes don't fit its
- * content is refused, not created: so is a stream file with a record longer than its MRS (when not 0) or its LRL. A stream or
- * undefined-format ods2_create_file(..., rtype, ...) is this with rattrib 0, MRS 0 and RSIZE = its longest record; a fixed one has
- * RSIZE = MRS = 512, unchecked, as before.
+ * content is refused, not created: so is a stream file with a record longer than its MRS (when not 0) or its LRL; an LRL of 0
+ * for a stream file becomes its longest record (for a UDF file with MRS 0, its length). ods2_create_file(..., rtype, ...) is
+ * this with rattrib 0 and: FIX - RSIZE = MRS = 512, unchecked, as before; stream (STM, STMLF, STMCR) - MRS 0 and RSIZE the
+ * longest record; UDF - MRS 0 and RSIZE the length.
  */
 ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_header,
                                       const char *name, const uint8_t *content,
@@ -464,6 +465,11 @@ typedef struct {
 
 /* ods2_create_file_attrs() with the content taken from `src` a chunk
  * at a time, so memory use stays the same whatever the file's size.
+ * The record attributes are used AS GIVEN: the library cannot scan a source it reads once, so for a stream file the caller
+ * supplies the LRL (the longest record) and MRS (0 unless wanted), and no check is made that no record is longer than
+ * either (ods2_create_file_attrs(), which has the content in memory, computes the LRL and refuses such a file; the CLI
+ * scans the host file first). A stream file made here with MRS 512 and a longer line cannot be read by TYPE, COPY or CHECKSUM
+ * on VMS (%RMS-W-RTB).
  * Everything is allocated (from src->length) before the first read;
  * if `src` fails part way, everything is given back and no file is
  * created. */
