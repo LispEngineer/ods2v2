@@ -421,10 +421,16 @@ const char *ods2_check_record_attrs(const ods2_record_attrs_t *attrs, size_t con
  * one carriage control; no unknown RAT bits. */
 const char *ods2_check_var_record_attrs(const ods2_record_attrs_t *attrs, size_t content_len);
 
+/* Is `rtype` a stream format (STM, STMLF, STMCR)? And the longest record of `len` bytes of stream content in that format:
+ * the LRL such a file is made with (MRS is 0). */
+bool ods2_stream_format(uint8_t rtype);
+size_t ods2_longest_record(uint8_t rtype, const uint8_t *data, size_t len);
+
 /* ods2_create_file() with chosen record attributes, checked first by
  * ods2_check_record_attrs() - a file whose attributes don't fit its
- * content is refused, not created. ods2_create_file(..., rtype, ...)
- * is this with rattrib 0 and RSIZE = MRS = 512, unchecked, as before.
+ * content is refused, not created: so is a stream file with a record longer than its MRS (when not 0) or its LRL. A stream or
+ * undefined-format ods2_create_file(..., rtype, ...) is this with rattrib 0, MRS 0 and RSIZE = its longest record; a fixed one has
+ * RSIZE = MRS = 512, unchecked, as before.
  */
 ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_header,
                                       const char *name, const uint8_t *content,
@@ -492,6 +498,11 @@ ods2_result_t ods2_set_volume_geometry(ods2_volume_t *vol, uint32_t sectors, uin
  * is the number of directory records changed. For volumes written before ods2v2 gave entries VMS's limit (32767). */
 ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file_number, const char *name,
                                            uint16_t limit, unsigned *changed);
+
+/* SET FILE/ATTRIBUTES=(MRS:0): a sequential Stream, Stream_LF or Stream_CR file with a maximum record size (MRS) gets MRS 0
+ * and its own longest record as LRL, as VMS makes such files (RMS refuses to read one with a longer line: %RMS-W-RTB).
+ * Only the file's header changes; *changed is 1 if it did, 0 if it needed nothing (another format, MRS already 0). */
+ods2_result_t ods2_set_stream_record_sizes(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed);
 
 /* Inserts (name, version, fid) into the directory whose header is at
  * `dir_file_number`, trying each of its existing content blocks
