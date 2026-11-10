@@ -426,6 +426,17 @@ const char *ods2_check_var_record_attrs(const ods2_record_attrs_t *attrs, size_t
 bool ods2_stream_format(uint8_t rtype);
 size_t ods2_longest_record(uint8_t rtype, const uint8_t *data, size_t len);
 
+/* The record length rules of stream files as RMS applies them (see ods2_reclen_feed in ods2_volume.c): the longest record of
+ * content fed in order, in any pieces. */
+typedef struct {
+    uint8_t rtype;
+    size_t cur, longest;
+    bool prev_cr;
+} ods2_reclen_t;
+void ods2_reclen_init(ods2_reclen_t *s, uint8_t rtype);
+void ods2_reclen_feed(ods2_reclen_t *s, const uint8_t *data, size_t len);
+size_t ods2_reclen_longest(const ods2_reclen_t *s);
+
 /* ods2_create_file() with chosen record attributes, checked first by
  * ods2_check_record_attrs() - a file whose attributes don't fit its
  * content is refused, not created: so is a stream file with a record longer than its MRS (when not 0) or its LRL; an LRL of 0
@@ -507,7 +518,8 @@ ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file
 
 /* SET FILE/ATTRIBUTES=(MRS:0): a sequential Stream, Stream_LF or Stream_CR file with a maximum record size (MRS) gets MRS 0
  * and its own longest record as LRL, as VMS makes such files (RMS refuses to read one with a longer line: %RMS-W-RTB).
- * Only the file's header changes; *changed is 1 if it did, 0 if it needed nothing (another format, MRS already 0). */
+ * Also a file whose LRL is below its longest record (COPY and CHECKSUM fail on it even with MRS 0). Only the file's header
+ * changes; *changed is 1 if it did, 0 if it needed nothing (another format, MRS 0 and LRL enough). */
 ods2_result_t ods2_set_stream_record_sizes(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed);
 
 /* Inserts (name, version, fid) into the directory whose header is at

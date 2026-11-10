@@ -2068,11 +2068,10 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
  * for CR-only line ends (no LF at all); anything else becomes fixed 512-byte records with no carriage control
  * and an exact end-of-file byte, as VMS binary FTP makes it. (Before, every file was Stream_LF with MRS 512,
  * which VMS V7.3-2 cannot read when a "line" of a binary file is longer than 512 bytes: %RMS-W-RTB.) */
-/* Record terminators, as this scan counts them (review 19, R19-2: two definitions of a Stream record end, to be settled by a
- * VMS measurement, see ODS5_FORMAT_NOTES 15.27): Stream_LF ends a record at LF (a CR before it stays in the record); Stream_CR at
- * CR; Stream (STM) here at LF, the CR before it not counted (longest_crlf). The library (ods2_longest_record), SET
- * FILE/ATTRIBUTES=(MRS:0) and ods5check end a Stream record only at CR LF - a lone LF does not end one there - so for a file
- * with mixed line ends they can compute a larger LRL than this scan does. */
+/* The longest record of the host file in each stream format, by the rules RMS applies (measured on V8.4 and VAX V7.3:
+ * ODS5_FORMAT_NOTES 15.28, ods2_reclen_feed in the library): Stream_LF ends at LF (a CR before it stays in the record),
+ * Stream_CR at CR, Stream (STM) at LF, FF or VT (that byte stays in the record) or at CR LF (stripped). `longest_crlf` is the
+ * STM figure (the name is the old one). */
 typedef struct {
     size_t total, nul, badctl, lf, crlf, cr, longest_lf, longest_crlf, longest_cr;
 } host_stats_t;
@@ -2083,8 +2082,12 @@ static bool scan_host_file(FILE *f, host_stats_t *s)
     size_t n, i, cur = 0, cur_cr = 0;
     bool prev_cr = false;
 
+    ods2_reclen_t stm;
+
     memset(s, 0, sizeof(*s));
+    ods2_reclen_init(&stm, ODS2_RFM_STM);
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        ods2_reclen_feed(&stm, buf, n);
         for (i = 0; i < n; i++) {
             uint8_t c = buf[i];
             s->total++;
@@ -2102,7 +2105,6 @@ static bool scan_host_file(FILE *f, host_stats_t *s)
                 s->lf++;
                 if (prev_cr) s->crlf++;
                 if (cur > s->longest_lf) s->longest_lf = cur;
-                if ((prev_cr ? cur - 1 : cur) > s->longest_crlf) s->longest_crlf = prev_cr ? cur - 1 : cur;
                 cur = 0;
                 prev_cr = false;
             } else {
@@ -2113,7 +2115,7 @@ static bool scan_host_file(FILE *f, host_stats_t *s)
     }
     if (ferror(f)) return false;
     if (cur > s->longest_lf) s->longest_lf = cur;
-    if (cur > s->longest_crlf) s->longest_crlf = cur;
+    s->longest_crlf = ods2_reclen_longest(&stm);
     if (cur_cr > s->longest_cr) s->longest_cr = cur_cr;
     return fseek(f, 0, SEEK_SET) == 0;
 }

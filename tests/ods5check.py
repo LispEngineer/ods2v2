@@ -41,11 +41,29 @@ of every file points at a directory that lists it, header name = the directory
 entry of the primary link, link count where the volume keeps one).
 """
 import os
+import re
 import struct, sys, time
 
 u16 = lambda b, o: struct.unpack_from('<H', b, o)[0]
 u32 = lambda b, o: struct.unpack_from('<I', b, o)[0]
 u64 = lambda b, o: struct.unpack_from('<Q', b, o)[0]
+
+
+def stream_longest(rfm, data):
+    """The longest record of Stream (4), Stream_LF (5) or Stream_CR (6) content as RMS reads it (see ods2_reclen_feed in
+    src/ods2_volume.c): Stream_LF ends a record at LF, Stream_CR at CR (neither is part of the record); Stream at LF, FF or
+    VT (that byte stays in the record) or CR LF (stripped); the last record may have no terminator."""
+    if rfm == 5:
+        return max((len(x) for x in data.split(b'\n')), default=0)
+    if rfm == 6:
+        return max((len(x) for x in data.split(b'\r')), default=0)
+    longest = prev = 0
+    for m in re.finditer(rb'\r\n|[\n\f\v]', data):
+        ln = m.start() - prev if m.group() == b'\r\n' else m.end() - prev
+        if ln > longest:
+            longest = ln
+        prev = m.end()
+    return max(longest, len(data) - prev)
 
 
 def checksum(b, n=255):
@@ -488,46 +506,31 @@ def main():
                          (part, volsize - part, v.cluster))
         print('storage: %d clusters, %d free' % (nclusters, free))
 
-    # --- stream files whose maximum record size is smaller than their longest record ---
-    # (a Stream record ends here at CR LF only, a lone LF does not end one; COPY's scan of a host file ends one at any LF:
-    # an open question, ODS5_FORMAT_NOTES 15.27. A longer longest-record is the safe side for this warning.)
-    # RMS refuses to read such a file (%RMS-W-RTB, "record too large for the user's buffer"): ods2v2 used to give every
-    # Stream_LF file MRS 512 whatever its lines (found on VAX V7.3); VMS's own stream files have MRS 0.
+    # --- stream files whose longest record exceeds their LRL or MRS ---
+    # RMS reads a Stream, Stream_LF or Stream_CR file in record mode with a buffer of the LRL (RSIZE) or, when it is not 0, the
+    # MRS: a longer record fails (measured on VAX V7.3 and V8.4: TYPE %RMS-F-RSZ, COPY %RMS-W-RTB, CHECKSUM %RMS-W-RTB on the
+    # VAX; CONVERT silently drops the record; COPY to disk and BACKUP work). ods2v2 once gave such files MRS = LRL = 512.
+    # Record ends as RMS applies them (ods2_reclen_feed): Stream_LF at LF; Stream_CR at CR; Stream at LF, FF or VT (the byte
+    # stays in the record) or CR LF (stripped).
     for n, (b, d) in sorted(prim.items()):
         if n <= 10 or (u32(b, 52) & 0x2000) or (u32(b, 52) & 0x8000):
             continue
-        rfm, org, maxrec = b[20] & 0xF, b[20] >> 4, u16(b, 36)
-        if org != 0 or rfm not in (4, 5, 6) or maxrec == 0:
+        rfm, org, maxrec, lrl = b[20] & 0xF, b[20] >> 4, u16(b, 36), u16(b, 22)
+        if org != 0 or rfm not in (4, 5, 6):
             continue
         size = (swap32(u32(b, 28)) - 1) * 512 + u16(b, 32)
         if size <= 0 or size > (1 << 28):
             continue
         data = b''.join(v.blk(l, c) for l, c in file_extents[n])[:size]
-        cur = longest = 0
-        for i, ch in enumerate(data):
-            if rfm == 6:
-                end = ch == 13
-                if end:
-                    longest = max(longest, cur); cur = 0
-                else:
-                    cur += 1
-            elif rfm == 4:
-                end = ch == 10 and i > 0 and data[i - 1] == 13
-                if end:
-                    longest = max(longest, cur - 1); cur = 0
-                else:
-                    cur += 1
-            else:
-                if ch == 10:
-                    longest = max(longest, cur); cur = 0
-                else:
-                    cur += 1
-        longest = max(longest, cur)
-        if longest > maxrec:
-            fnd.warn('file %d (%s): a %s file with maximum record size %d holds a record of %d bytes: record-mode reads with '
-                     'a buffer sized from the MRS fail (TYPE, COPY, CHECKSUM: %%RMS-W-RTB on VAX V7.3); block I/O still reads '
-                     'the file; files on a VMS system disk carry these attributes too (AXP1SYS: four; the transfer tool not recorded); SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
-                     (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], maxrec, longest))
+        longest = stream_longest(rfm, data)
+        # (an LRL of 0 means "not recorded": not measured on VMS, so only the MRS is held against the record then)
+        if (lrl != 0 and longest > lrl) or (maxrec != 0 and longest > maxrec):
+            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d: TYPE, COPY and (VAX) '
+                     'CHECKSUM fail (%%RMS-F-RSZ, %%RMS-W-RTB); CONVERT drops the record; block I/O and COPY to disk work; '
+                     '%s' %
+                     (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], longest, lrl, maxrec,
+                      'no record length can hold it (more than 32767 bytes: a binary file with no line ends)' if longest > 32767
+                      else 'SET FILE/ATTRIBUTES=(MRS:0) repairs it'))
 
     # --- directories ---
     dirs = [n for n, (b, d) in prim.items() if u32(b, 52) & 0x2000]
@@ -591,9 +594,10 @@ def main():
                     fnd.warn('%s: name %r has no dot' % (where, nm))
                 if v.level == 2 and nm.startswith('-') and nm.upper().endswith('.DIR'):
                     # DCL reads a '-' that starts a directory component as "the parent directory" and ODS-2 has no '^' escape
-                    # (ODS-5 has: ^-): VMS cannot name anything inside such a directory (%CLI-W-PARSEFAIL, %RMS-F-SYN)
-                    fnd.warn('%s: directory %r starts with "-": VMS cannot reach anything inside it on an ODS-2 volume '
-                             '(DCL reads it as the parent directory; %%RMS-F-SYN)' % (where, nm))
+                    # (ODS-5 has: ^-): VAX V7.3 cannot name anything inside such a directory (%CLI-W-PARSEFAIL, %RMS-F-SYN);
+                    # Alpha V8.4 can (measured, CORPUS 26)
+                    fnd.warn('%s: directory %r starts with "-": VAX VMS (V7.3) reads a leading "-" as the parent directory and '
+                             'cannot reach files inside (%%RMS-F-SYN); Alpha V8.4 can' % (where, nm))
                 if prevkey is not None and not ignore_order:
                     if key < prevkey:
                         fnd.err('%s block %d: %r out of order' % (where, bi + 1, nm))
