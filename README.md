@@ -176,7 +176,7 @@ COPY/ATTRIBUTES=(RFM:STMLF,RAT:CR) notes.txt [DOC]NOTES.TXT
 - `RAT:` record attributes - `NONE`, `CR`, `FTN`, `PRN`, `BLK`, `NOBLK`;
   repeat `RAT:` for more than one.
 - A stream file (`STMLF`, `STM`, `STMCR`) or `UDF` file gets MRS 0 and its
-  own longest record as `LRL` (the longest line, the length for `UDF`), as
+  own longest record as `LRL` (the longest record as RMS reads it: `STMLF` ends at LF, `STMCR` at CR, `STM` at LF, FF or VT - that byte stays in the record - or CR LF; the length for `UDF`), as
   VMS makes them, unless `MRS:` or `LRL:` is given. A line longer than a
   given `MRS:` or `LRL:` is refused (`%ODS2-E-RECTOOLONG`): RMS could not
   read the file back (`%RMS-W-RTB`, record too large for the user's
@@ -389,7 +389,7 @@ space in a name is written `^_`. Lookups and wildcards (`*`, `%`, `?`)
 are case blind and work on whole characters, not bytes (the letters of
 ISO Latin-1 and UCS-2 fold like VMS folds them, e.g. `É` finds `é`, `^U03B1`
 finds Greek capital Alpha); directory names
-are shown in their stored case. Directories nest to 2,048 levels. On an ODS-2 volume a directory name cannot start with `-`: DCL reads it as the parent directory (`[-]`) and ODS-2 has no `^` escape, so VMS could not name anything inside it (`%CLI-W-PARSEFAIL`, `%RMS-F-SYN`); `CREATE/DIRECTORY` and `IMPORT` refuse it, with a message, and `ods5check` warns of one that exists. On ODS-5 it is fine (VMS writes it `^-`).
+are shown in their stored case. Directories nest to 2,048 levels. On an ODS-2 volume a directory name cannot start with `-`: VAX VMS (V7.3) reads a leading `-` as the parent directory (`[-]`) and ODS-2 has no `^` escape, so it cannot name anything inside such a directory (`%CLI-W-PARSEFAIL`, `%RMS-F-SYN`); Alpha V8.4 can (measured), but an ODS-2 volume is the one that goes to VAXen, so it is refused; `CREATE/DIRECTORY` and `IMPORT` refuse it, with a message, and `ods5check` warns of one that exists. On ODS-5 it is fine (VMS writes it `^-`).
 `DIR/FULL` shows, per file, what the file header says: id, size, owner,
 protection, the dates (also the access and attribute-change dates of
 ODS-5), the link count where the volume has hard links, the record

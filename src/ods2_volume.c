@@ -2359,30 +2359,65 @@ bool ods2_stream_format(uint8_t rtype)
     return rtype == ODS2_RFM_STM || rtype == ODS2_RFM_STMLF || rtype == ODS2_RFM_STMCR;
 }
 
-/* The longest record of stream content: STMLF ends a record at LF (a CR before it stays in the record), STM at CR LF
-   (the CR is not part of the record; a lone LF does not end one), STMCR at CR. (The CLI's scan of a host file for COPY ends a
-   Stream record at any LF, the CR before it not counted: tools/ods2.c host_stats_t. Which is VMS's is an open question,
-   ODS5_FORMAT_NOTES 15.27; a larger LRL than RMS's longest record is harmless, MRS being 0.) */
-size_t ods2_longest_record(uint8_t rtype, const uint8_t *data, size_t len)
+/* The length of the records of stream content, as RMS reads them (measured on OpenVMS V8.4 and VAX V7.3, ods2v2-made and
+   VMS-made files alike, ODS5_FORMAT_NOTES 15.28):
+     Stream_LF (STMLF)  a record ends at LF; the LF is not part of it; a CR before the LF stays in the record.
+     Stream_CR (STMCR)  a record ends at CR; the CR is not part of it.
+     Stream (STM)       a record ends at LF, FF or VT, and that byte STAYS in the record ("abc" LF is a record of 4 bytes);
+                        it also ends at CR LF, which is stripped ("abc" CR LF is 3 bytes); a lone CR is data.
+   The last record may have no terminator. A file whose longest record is longer than its LRL (or MRS, when not 0) cannot be
+   read in record mode (%RMS-F-RSZ, %RMS-W-RTB). One state machine, fed any number of pieces in order, used by the CLI's
+   scan of a host file, the library, SET FILE/ATTRIBUTES=(MRS:0) and (in Python, the same rules) ods5check. */
+void ods2_reclen_init(ods2_reclen_t *s, uint8_t rtype)
 {
-    size_t i, cur = 0, longest = 0;
+    s->rtype = rtype;
+    s->cur = s->longest = 0;
+    s->prev_cr = false;
+}
+
+static void reclen_end(ods2_reclen_t *s, size_t len)
+{
+    if (len > s->longest) s->longest = len;
+    s->cur = 0;
+    s->prev_cr = false;
+}
+
+void ods2_reclen_feed(ods2_reclen_t *s, const uint8_t *data, size_t len)
+{
+    size_t i;
 
     for (i = 0; i < len; i++) {
         uint8_t c = data[i];
-        bool end;
-        if (rtype == ODS2_RFM_STMCR) {
-            end = (c == '\r');
-            if (end) { if (cur > longest) longest = cur; cur = 0; } else cur++;
-        } else if (rtype == ODS2_RFM_STM) {
-            end = (c == '\n' && i > 0 && data[i - 1] == '\r');
-            if (end) { if (cur - 1 > longest) longest = cur - 1; cur = 0; } else cur++;
+        if (s->rtype == ODS2_RFM_STMCR) {
+            if (c == '\r') reclen_end(s, s->cur); else s->cur++;
+        } else if (s->rtype == ODS2_RFM_STM) {
+            if (c == '\n') {
+                /* CR LF: the CR (counted as data so far) is part of the terminator; a lone LF stays in the record */
+                reclen_end(s, s->prev_cr ? s->cur - 1 : s->cur + 1);
+            } else if (c == '\f' || c == '\v') {
+                reclen_end(s, s->cur + 1);
+            } else {
+                s->cur++;
+                s->prev_cr = (c == '\r');
+            }
         } else {
-            end = (c == '\n');
-            if (end) { if (cur > longest) longest = cur; cur = 0; } else cur++;
+            if (c == '\n') reclen_end(s, s->cur); else s->cur++;
         }
     }
-    if (cur > longest) longest = cur;
-    return longest;
+}
+
+size_t ods2_reclen_longest(const ods2_reclen_t *s)
+{
+    return s->cur > s->longest ? s->cur : s->longest;
+}
+
+size_t ods2_longest_record(uint8_t rtype, const uint8_t *data, size_t len)
+{
+    ods2_reclen_t st;
+
+    ods2_reclen_init(&st, rtype);
+    ods2_reclen_feed(&st, data, len);
+    return ods2_reclen_longest(&st);
 }
 
 ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_header,
@@ -2519,8 +2554,9 @@ static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_numb
     }
     if (!vol->ods5 && (core->filechar & 0x2000u) && link_name[0] == '-') {
         /* (a link to a directory is refused just below; this keeps the rule of ods2_valid_dir_name if that is ever allowed) */
-        return fail("an ODS-2 directory name cannot start with '-': DCL reads it as the parent directory, so VMS could not "
-                    "reach anything inside it (%RMS-F-SYN; ODS-2 has no '^' escape)");
+        return fail("an ODS-2 directory name cannot start with '-': VAX VMS (V7.3) reads a leading '-' as the parent "
+                    "directory and cannot reach files inside (%RMS-F-SYN; ODS-2 has no '^' escape); Alpha V8.4 can. "
+                    "Refused because an ODS-2 volume is the one that goes to VAXen");
     }
     if (core->filechar & 0x2000u) {
         return fail("a link to a directory is not made here");
@@ -3282,8 +3318,8 @@ static ods2_result_t set_stream_record_sizes_impl(ods2_volume_t *vol, ods2_fid_t
     ods2_head_core_t *core = (ods2_head_core_t *) h;
     uint64_t bytes, done = 0;
     unsigned vbn, rfm;
-    size_t cur = 0, longest = 0, i;
-    uint8_t prev = 0;
+    size_t longest;
+    ods2_reclen_t st;
     uint16_t sum;
     ods2_result_t r;
 
@@ -3295,30 +3331,24 @@ static ods2_result_t set_stream_record_sizes_impl(ods2_volume_t *vol, ods2_fid_t
     if (!r.ok) return r;
     rfm = core->recattr.rtype & 0x0Fu;
     if ((core->recattr.rtype >> 4) != 0 || (rfm != ODS2_RFM_STM && rfm != ODS2_RFM_STMLF && rfm != ODS2_RFM_STMCR) ||
-        core->recattr.maxrec == 0 || (core->filechar & 0x2000u)) {
+        (core->filechar & 0x2000u)) {
         return ok();
     }
     bytes = ((uint64_t) ods2_word_swap32(core->recattr.efblk) - 1) * 512u + core->recattr.ffbyte;
     if (ods2_word_swap32(core->recattr.efblk) == 0) bytes = 0;
+    ods2_reclen_init(&st, (uint8_t) rfm);
     for (vbn = 1; done < bytes; vbn++) {
         size_t n = (bytes - done) < 512u ? (size_t) (bytes - done) : 512u;
         r = ods2_read_file_block(vol, h, vbn, blk);
         if (!r.ok) return r;
-        for (i = 0; i < n; i++) {
-            uint8_t c = blk[i];
-            if (rfm == ODS2_RFM_STMCR) {
-                if (c == '\r') { if (cur > longest) longest = cur; cur = 0; } else cur++;
-            } else if (rfm == ODS2_RFM_STM) {
-                if (c == '\n' && prev == '\r' && cur > 0) { if (cur - 1 > longest) longest = cur - 1; cur = 0; } else cur++;
-            } else {
-                if (c == '\n') { if (cur > longest) longest = cur; cur = 0; } else cur++;
-            }
-            prev = c;
-        }
+        ods2_reclen_feed(&st, blk, n);
         done += n;
     }
-    if (cur > longest) longest = cur;
-    if (longest > 32767) return fail("a line is longer than a stream record can be (32767 bytes): not changed");
+    longest = ods2_reclen_longest(&st);
+    if (longest > 32767) return fail("a record is longer than a stream record can be (32767 bytes): not changed");
+    /* needs repair: a maximum record size (RMS reads with a buffer of that size), or a longest record length (LRL) below
+       the longest record (COPY and CHECKSUM then fail too, even with MRS 0: %RMS-W-RTB) */
+    if (core->recattr.maxrec == 0 && core->recattr.rsize >= longest) return ok();
     core->recattr.maxrec = 0;
     core->recattr.rsize = (uint16_t) longest;
     sum = ods2_checksum(h, 255);

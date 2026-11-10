@@ -255,7 +255,26 @@ int main(void)
             assert(ods2_read_header(&vol, fid.fid_num, h).ok);
             assert(core->recattr.rsize == 777 && core->recattr.maxrec == 0);
             assert(ods2_longest_record(ODS2_RFM_STMCR, (const uint8_t *) "ab\rcdef\rg", 10) == 4);
-            assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "ab\r\ncd\nef\r\n", 12) == 5);
+            /* record lengths as RMS reads them (measured on V8.4 and VAX V7.3, notes 15.28) */
+            assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "ab\r\ncd\nef\r\n", 12) == 3);   /* ab | cd LF | ef */
+            assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "abc\n", 4) == 4);              /* LF stays */
+            assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "abc\f", 4) == 4);              /* FF stays */
+            assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "abc\v", 4) == 4);              /* VT stays */
+            assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "abc\r\n", 5) == 3);            /* CR LF stripped */
+            assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "abc\rdef\n", 8) == 8);         /* a lone CR is data */
+            assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "abc\r\r\ndef", 9) == 4);       /* abc CR | def */
+            assert(ods2_longest_record(ODS2_RFM_STM, (const uint8_t *) "abc\r\fz", 6) == 5);           /* CR FF: CR is data */
+            assert(ods2_longest_record(ODS2_RFM_STMLF, (const uint8_t *) "abc\r\nde", 7) == 4);        /* the CR stays */
+            assert(ods2_longest_record(ODS2_RFM_STMLF, (const uint8_t *) "abc\fde\vf", 8) == 8);       /* FF, VT are data */
+            assert(ods2_longest_record(ODS2_RFM_STMCR, (const uint8_t *) "abc\r\nde\r", 8) == 3);      /* abc | LF de */
+            {
+                /* fed in pieces, a CR LF split between two: the same */
+                ods2_reclen_t st;
+                ods2_reclen_init(&st, ODS2_RFM_STM);
+                ods2_reclen_feed(&st, (const uint8_t *) "abc\r", 4);
+                ods2_reclen_feed(&st, (const uint8_t *) "\ndefg", 5);
+                assert(ods2_reclen_longest(&st) == 4);                                                  /* abc | defg */
+            }
             printf("PASS: a stream record longer than MRS or LRL is refused; LRL 0 becomes the longest record\n");
         }
     }
