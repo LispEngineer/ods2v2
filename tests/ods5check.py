@@ -541,9 +541,22 @@ def main():
                      'work, V8.4 is fine; VMS leaves files like this on its system disks and ods2v2 never writes one; '
                      'SET FILE/ATTRIBUTES=(MRS:0) repairs it (LRL the longest record)' %
                      (n, d['name'] if d else '?', kind, longest))
-        elif (lrl != 0 and longest > lrl) or (maxrec != 0 and longest > maxrec):
-            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d: TYPE, COPY and (V7.3, V7.3-2) '
-                     'CHECKSUM fail (%%RMS-F-RSZ, %%RMS-W-RTB); CONVERT drops the record; block I/O and COPY to disk work; '
+        elif maxrec != 0 and longest > maxrec:
+            # the MRS state (what ods2v2 once wrote: MRS = LRL = 512): RMS reads with a buffer of the MRS
+            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d (a record is longer than the '
+                     'MRS): TYPE (%%RMS-F-RSZ), COPY to NL: (%%RMS-W-RTB) and (V7.3, V7.3-2) CHECKSUM (RTB) fail, CONVERT drops the '
+                     'record; block I/O and COPY to disk work; SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
+                     (n, d['name'] if d else '?', kind, longest, lrl, maxrec))
+        elif lrl != 0 and longest > lrl and maxrec == 0:
+            # the half-repair state (MRS 0, LRL below the record: what VMS's own MRS:0 leaves): TYPE and CONVERT work
+            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS 0 (a record is longer than the '
+                     'LRL): COPY to NL: (%%RMS-W-RTB) and (V7.3, V7.3-2) CHECKSUM (RTB) fail; TYPE and CONVERT work; block I/O and '
+                     'COPY to disk work; SET FILE/ATTRIBUTES=(MRS:0) repairs it (LRL the longest record)' %
+                     (n, d['name'] if d else '?', kind, longest, lrl))
+        elif lrl != 0 and longest > lrl:
+            # a non-zero MRS that is enough, an LRL below the record: not measured; the LRL is held against the record
+            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d (a record is longer than the '
+                     'LRL; this combination was not measured): COPY to NL: and CHECKSUM are expected to fail (%%RMS-W-RTB); '
                      'SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
                      (n, d['name'] if d else '?', kind, longest, lrl, maxrec))
 
