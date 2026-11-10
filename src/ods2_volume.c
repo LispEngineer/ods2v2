@@ -3657,7 +3657,9 @@ ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const ch
    control block must record for OpenVMS VAX V7.3's ANALYZE (cylinders = ceil(blocks / (sectors * tracks)) always).
    Measured by ods5-vms2 (CORPUS section 16) and in the corpus; `*measured` is false when this size was not one of
    the sizes measured (or accepted by ANALYZE) for the geometry returned, and the answer is a prediction (confirm with SHOW DEVICE/FULL).
-     ld      the LD driver's containers (LDDRIVER V8.3, VAX V7.3): measured at 29 sizes (CORPUS 16 and 30). The product
+     ld      the LD driver's containers (LDDRIVER V8.3, VAX V7.3): measured at 29 sizes (CORPUS 16 and 30). CORPUS 31: the
+             driver gives the same geometry every time for a size, and ANALYZE draws CHKSCB for a volume whose SCB has the
+             same product and cylinders in the other order. The product
              sectors x tracks is the largest k*k or k*(k+1) not above the square root of the size (fits all 29) and
              cylinders = ceil(blocks / product); the ORDER of the two (11 x 12 or 12 x 11) follows no rule found in the
              29 sizes (20,000 to 20,002 give 11 x 12, 18,000 and 20,479 to 20,481 give 12 x 11), and ANALYZE draws CHKSCB
