@@ -524,13 +524,17 @@ def main():
         data = b''.join(v.blk(l, c) for l, c in file_extents[n])[:size]
         longest = stream_longest(rfm, data)
         # (an LRL of 0 means "not recorded": not measured on VMS, so only the MRS is held against the record then)
-        if (lrl != 0 and longest > lrl) or (maxrec != 0 and longest > maxrec):
+        if longest > 32767 and maxrec == 0:
+            # VMS's own state for a binary stream file with no line ends: MRS 0 and LRL at most 32767, and no record length can
+            # hold the record; nothing can repair it (52 such files on the AXP1 system disk)
+            fnd.info('file %d (%s): a %s file with a record of %d bytes (LRL %d, MRS 0): longer than any record length can be; '
+                     'record-mode reads of it fail by nature (binary content), VMS leaves such files this way' %
+                     (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], longest, lrl))
+        elif (lrl != 0 and longest > lrl) or (maxrec != 0 and longest > maxrec):
             fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d: TYPE, COPY and (VAX) '
                      'CHECKSUM fail (%%RMS-F-RSZ, %%RMS-W-RTB); CONVERT drops the record; block I/O and COPY to disk work; '
-                     '%s' %
-                     (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], longest, lrl, maxrec,
-                      'no record length can hold it (more than 32767 bytes: a binary file with no line ends)' if longest > 32767
-                      else 'SET FILE/ATTRIBUTES=(MRS:0) repairs it'))
+                     'SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
+                     (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], longest, lrl, maxrec))
 
     # --- directories ---
     dirs = [n for n, (b, d) in prim.items() if u32(b, 52) & 0x2000]

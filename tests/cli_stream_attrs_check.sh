@@ -96,6 +96,7 @@ for l, c in ex:
     if cur <= vbn < cur + c: at = l + vbn - cur
     cur += c
 f.seek(at * 512); h = bytearray(f.read(512))
+if len(sys.argv) > 5: h[20] = int(sys.argv[5])                                  # RFM (and organisation) byte
 struct.pack_into('<H', h, 22, lrl); struct.pack_into('<H', h, 36, mrs)      # RSIZE (LRL), MAXREC (MRS): 512 and 512 by default
 struct.pack_into('<H', h, 510, sum(struct.unpack_from('<255H', h, 0)) & 0xffff)
 f.seek(at * 512); f.write(h)
@@ -171,6 +172,37 @@ for level in 2 5; do
     python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]LF600.TXT')" 600 0
     check "$t: an STM file with LRL 600 and a 601-byte record (the old COPY's output): ods5check warns" "1" \
         "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*LF600.TXT.*longest record is 601 bytes has LRL 600 and MRS 0')"
+    # a binary Stream_LF file with a 40,000-byte "record" (no LF): VMS's normal state for such files is MRS 0 and LRL 32767 (no record
+    # length can hold the record): the checker has no warning for it (an info line with -v), the repair skips it silently
+    # (no %ODS2-E-RECSIZES); with an MRS or an LRL below 32767 the repair writes VMS's state: MRS 0, LRL 32767
+    head -c 40000 /dev/zero | tr '\0' 'B' > "$TMP/big.bin"
+    $ODS2 "$img" "COPY/FORMAT=UDF $TMP/big.bin [000000]BIG.DAT" >/dev/null 2>&1
+    bn=$(fid_num "$img" '[000000]BIG.DAT')
+    python3 "$TMP/damage.py" "$img" "$bn" 32767 0 5
+    check "$t: Stream_LF, MRS 0, LRL 32767, a 40,000-byte record (VMS's own state): no warning, an info line with -v" "0 1" \
+        "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*BIG.DAT') $(python3 -I tests/ods5check.py -v "$img" | grep -c 'BIG.DAT.*longer than any record length can be')"
+    out=$($ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]BIG.DAT' 2>&1); rc=$?
+    case "$out" in *"0 stream files changed"*) msg=skipped ;; *) msg="$out" ;; esac
+    check "$t: ... the repair skips it silently: 0 changed, no RECSIZES error, exit 0" "skipped 0 0" "$msg $(echo "$out" | grep -c 'E-RECSIZES') $rc"
+    python3 "$TMP/damage.py" "$img" "$bn" 512 512 5
+    check "$t: the same file with MRS 512: ods5check warns" "1" "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*BIG.DAT.*LRL 512 and MRS 512')"
+    $ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]BIG.DAT' >/dev/null 2>&1
+    check "$t: ... the repair writes VMS's state: MRS 0, LRL 32767 (and the checker is quiet)" "Stream_LF, maximum 0 bytes, longest 32767 bytes 0" \
+        "$(rec "$img" '[000000]BIG.DAT') $(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*BIG.DAT')"
+    python3 "$TMP/damage.py" "$img" "$bn" 16384 0 5
+    w=$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*BIG.DAT.*LRL 16384 and MRS 0')
+    $ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]BIG.DAT' >/dev/null 2>&1
+    check "$t: MRS 0 and LRL 16384 with the 40,000-byte record: only the info line (as the AXP1SYS testtar.tar); the repair makes LRL 32767" \
+        "0 Stream_LF, maximum 0 bytes, longest 32767 bytes" "$w $(rec "$img" '[000000]BIG.DAT')"
+    # a 20,000-byte record with LRL 16384 and MRS 0 (the AXP1SYS .pdf and .pyc files): the checker warns, the repair makes LRL 20000
+    head -c 20000 /dev/zero | tr '\0' 'C' > "$TMP/mid.bin"
+    $ODS2 "$img" "COPY/FORMAT=UDF $TMP/mid.bin [000000]MID.DAT" >/dev/null 2>&1
+    mn=$(fid_num "$img" '[000000]MID.DAT')
+    python3 "$TMP/damage.py" "$img" "$mn" 16384 0 5
+    w=$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*MID.DAT.*record is 20000 bytes has LRL 16384 and MRS 0')
+    $ODS2 "$img" 'SET FILE/ATTRIBUTES=(MRS:0) [000000]MID.DAT' >/dev/null 2>&1
+    check "$t: MRS 0, LRL 16384, a 20,000-byte record (below 32767): the checker warns, the repair makes LRL 20000" \
+        "1 Stream_LF, maximum 0 bytes, longest 20000 bytes" "$w $(rec "$img" '[000000]MID.DAT')"
     # /CONVERT (VAR): LRL is the longest line (the record is the line without its terminator), MRS 0
     $ODS2 "$img" "COPY/CONVERT $TMP/mixed.txt [000000]VARFILE.TXT" >/dev/null 2>&1
     check "$t: COPY/CONVERT: variable-length records, LRL the longest line (one per LF, a CR before it dropped: 10, 700, 1)" \
