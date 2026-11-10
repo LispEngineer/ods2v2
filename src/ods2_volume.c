@@ -278,6 +278,34 @@ ods2_result_t ods2_mount_write(const char *path, ods2_volume_t *vol)
    "ODS2_FAULT: n writes" to stderr when it is dismounted, so a harness can learn how many k there are. */
 static long fault_writes;
 
+/* Test builds only (tests/ods2_integrity_selftest.c, the upstream pull request's interruption tests, run against
+   this code). ods2_fault_after_writes: the (n+1)th write after it is set to n, and every one after it, fails, as if
+   the machine stopped there; -1 is off. While ods2_fault_journal_on is set every block written is kept with what it
+   replaced, so that the test can put the image back (ods2_fault_rollback) instead of copying a volume of 1.5 GB for
+   each interruption it tries. The writes counted are the ones a change makes at its commit, in the order it made them. */
+long ods2_fault_after_writes = -1;
+bool ods2_fault_journal_on = false;
+static struct { uint32_t lbn; uint8_t old[512]; } *fault_journal;
+static size_t fault_journal_n, fault_journal_cap;
+
+void ods2_fault_forget(void)
+{
+    fault_journal_n = 0;
+}
+
+void ods2_fault_rollback(ods2_volume_t *vol)
+{
+    while (fault_journal_n > 0) {
+        fault_journal_n--;
+        if (fseek(vol->fp, (long) fault_journal[fault_journal_n].lbn * 512, SEEK_SET) != 0 ||
+            fwrite(fault_journal[fault_journal_n].old, 1, 512, vol->fp) != 512) {
+            abort();
+        }
+    }
+    fflush(vol->fp);
+    vol->write_failed = false;   /* the image is as it was: this mount may write again (a fresh mount would) */
+}
+
 static void fault_point(void)
 {
     static long limit = -2;
@@ -543,6 +571,25 @@ static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uin
     }
 #endif
     if (!lbn_in_volume(vol, lbn)) return fail(write_past_volume);
+#ifdef ODS2_FAULT_INJECTION
+    if (ods2_fault_after_writes >= 0) {
+        if (ods2_fault_after_writes == 0) return fail("injected write failure");   /* and every write after it */
+        ods2_fault_after_writes--;
+    }
+    if (ods2_fault_journal_on) {
+        if (fault_journal_n == fault_journal_cap) {
+            fault_journal_cap = fault_journal_cap ? fault_journal_cap * 2 : 256;
+            fault_journal = realloc(fault_journal, fault_journal_cap * sizeof(*fault_journal));
+            if (fault_journal == NULL) abort();
+        }
+        fault_journal[fault_journal_n].lbn = lbn;
+        if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
+            fread(fault_journal[fault_journal_n].old, 1, 512, vol->fp) != 512) {
+            memset(fault_journal[fault_journal_n].old, 0, 512);
+        }
+        fault_journal_n++;
+    }
+#endif
     if (fseek(vol->fp, (long) lbn * 512, SEEK_SET) != 0 ||
         fwrite(block, 1, 512, vol->fp) != 512) {
         return fail("could not write block");
@@ -1851,6 +1898,7 @@ static ods2_result_t header_ok_for_write(const uint8_t *h, unsigned file_number)
         core->idoffset < 40 || core->idoffset > core->mpoffset || core->mpoffset > core->acoffset ||
         core->acoffset > core->rsoffset ||
         (size_t) core->idoffset * 2 + ident_need > (size_t) core->mpoffset * 2 ||
+        (size_t) core->mpoffset * 2 >= 510 ||
         ods2_fid_number(core->fid) != file_number || core->fid.fid_rvn != 0) {
         return fail("a file header is damaged (checksum, offsets or file number): it is not changed - "
                     "run ANALYZE/DISK_STRUCTURE/REPAIR on VMS");
