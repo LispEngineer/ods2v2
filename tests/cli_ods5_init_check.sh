@@ -275,6 +275,25 @@ check "an unmeasured ld size whose product is k*k (22,000 blocks: 12 x 12): the 
 out=$($ODS2 "$TMP/ldu.img" "SET VOLUME/GEOMETRY=ld" 2>&1)
 check "SET VOLUME/GEOMETRY=ld on the same size: the same note, as a warning" "1" "$(echo "$out" | grep -c 'PREDICTED')"
 
+# HARDLINKS on a volume whose reserved files 1-10 have link count 0 (INITIALIZE, then SET VOLUME/VOLUME_CHARACTERISTICS=HARDLINKS
+# on V8.4: ANALYZE says %ANALDISK-W-LINKCOUNT "linkcount set at 0 when it should be 1"): the checker warns too. The image is a
+# plain ODS-5 one with the HARDLINKS bit set in the home block by hand (ods2v2 cannot set it afterwards).
+$INIT "$TMP/hlc.img" 16384 --structure=5 --label=HLC >/dev/null 2>&1
+python3 -I - "$TMP/hlc.img" <<'PY'
+import sys, struct
+f = open(sys.argv[1], 'r+b'); f.seek(512); b = bytearray(f.read(512))
+struct.pack_into('<H', b, 42, struct.unpack_from('<H', b, 42)[0] | 0x40)
+struct.pack_into('<H', b, 58, sum(struct.unpack_from('<29H', b, 0)) & 0xffff)
+struct.pack_into('<H', b, 510, sum(struct.unpack_from('<255H', b, 0)) & 0xffff)
+f.seek(512); f.write(b)
+PY
+out=$(python3 -I tests/ods5check.py "$TMP/hlc.img" 2>&1)
+check "ods5check: HARDLINKS volume, reserved files 1-10 with link count 0: ten warnings (file 1 first), no error" \
+    "10 yes 0 error(s), 10 warning(s)" \
+    "$(echo "$out" | grep -c 'link count 0 on a volume with HARDLINKS') $(echo "$out" | grep -q '^WARN   file 1: link count 0 on a volume with HARDLINKS' && echo yes) $(echo "$out" | tail -1)"
+$INIT "$TMP/hlc2.img" 16384 --structure=5 --label=HLC2 --hardlinks >/dev/null 2>&1
+check "ods5check: ods2_init --hardlinks (reserved files with link count 1): clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/hlc2.img" 2>&1 | tail -1)"
+
 # ods2_init says which geometry it wrote, and how to fit a VAX
 out=$($INIT "$TMP/pg.img" 1G --structure=2 2>&1)
 check "ods2_init (default): prints the geometry and the VAX advice" "1 1 1" \
