@@ -488,6 +488,44 @@ def main():
                          (part, volsize - part, v.cluster))
         print('storage: %d clusters, %d free' % (nclusters, free))
 
+    # --- stream files whose maximum record size is smaller than their longest record ---
+    # RMS refuses to read such a file (%RMS-W-RTB, "record too large for the user's buffer"): ods2v2 used to give every
+    # Stream_LF file MRS 512 whatever its lines (found on VAX V7.3); VMS's own stream files have MRS 0.
+    for n, (b, d) in sorted(prim.items()):
+        if n <= 10 or (u32(b, 52) & 0x2000) or (u32(b, 52) & 0x8000):
+            continue
+        rfm, org, maxrec = b[20] & 0xF, b[20] >> 4, u16(b, 36)
+        if org != 0 or rfm not in (4, 5, 6) or maxrec == 0:
+            continue
+        size = (swap32(u32(b, 28)) - 1) * 512 + u16(b, 32)
+        if size <= 0 or size > (1 << 28):
+            continue
+        data = b''.join(v.blk(l, c) for l, c in file_extents[n])[:size]
+        cur = longest = 0
+        for i, ch in enumerate(data):
+            if rfm == 6:
+                end = ch == 13
+                if end:
+                    longest = max(longest, cur); cur = 0
+                else:
+                    cur += 1
+            elif rfm == 4:
+                end = ch == 10 and i > 0 and data[i - 1] == 13
+                if end:
+                    longest = max(longest, cur - 1); cur = 0
+                else:
+                    cur += 1
+            else:
+                if ch == 10:
+                    longest = max(longest, cur); cur = 0
+                else:
+                    cur += 1
+        longest = max(longest, cur)
+        if longest > maxrec:
+            fnd.warn('file %d (%s): a %s file with maximum record size %d holds a record of %d bytes: RMS refuses to read it '
+                     '(RMS-W-RTB, record too large for the user\'s buffer); SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
+                     (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], maxrec, longest))
+
     # --- directories ---
     dirs = [n for n, (b, d) in prim.items() if u32(b, 52) & 0x2000]
     entries = {}   # dir fn -> list of (name_str, type, version, fid)
@@ -548,6 +586,11 @@ def main():
                         fnd.err('%s: %r has name type %d, VMS would store %d' % (where, nm, ntype, exp))
                 if '.' not in nm:
                     fnd.warn('%s: name %r has no dot' % (where, nm))
+                if v.level == 2 and nm.startswith('-') and nm.upper().endswith('.DIR'):
+                    # DCL reads a '-' that starts a directory component as "the parent directory" and ODS-2 has no '^' escape
+                    # (ODS-5 has: ^-): VMS cannot name anything inside such a directory (%CLI-W-PARSEFAIL, %RMS-F-SYN)
+                    fnd.warn('%s: directory %r starts with "-": VMS cannot reach anything inside it on an ODS-2 volume '
+                             '(DCL reads it as the parent directory; %%RMS-F-SYN)' % (where, nm))
                 if prevkey is not None and not ignore_order:
                     if key < prevkey:
                         fnd.err('%s block %d: %r out of order' % (where, bi + 1, nm))

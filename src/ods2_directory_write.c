@@ -195,6 +195,14 @@ bool ods2_valid_dir_name(const char *name, const char **why)
         *why = "an ODS-2 directory name is limited to 39 characters";
         return false;
     }
+    if (name[0] == '-') {
+        /* VMS (DCL, RMS) reads a '-' that starts a directory component as "the parent directory" ([-], [A.-.B]), and an
+           ODS-2 volume has no '^' escape for it (ODS-5 has: ^-), so nothing inside such a directory could be named:
+           %CLI-W-PARSEFAIL, %RMS-F-SYN, for every file in it (OpenVMS VAX V7.3, the stress after-images) */
+        *why = "an ODS-2 directory name cannot start with '-': DCL reads it as the parent directory, so VMS could not reach "
+               "anything inside it (%RMS-F-SYN; ODS-2 has no '^' escape)";
+        return false;
+    }
     for (i = 0; i < len; i++) {
         char c = (char) toupper((unsigned char) name[i]);
         if (!name_char_ok(c)) {

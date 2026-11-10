@@ -86,6 +86,7 @@ implements basic command recall to ease repetitive command sequences.
 | `SET DEFAULT path` | `SET DEFAULT [DECUS.NETLIB020]` |
 | `SHOW DEFAULT` | |
 | `SET VOLUME/LABEL=name` | `SET VOLUME/LABEL=ITANKITS` — relabel the volume |
+| `SET FILE/ATTRIBUTES=(MRS:0) spec` | `SET FILE/ATTRIBUTES=(MRS:0) [DECUS...]*.*` — repairs Stream, Stream_LF and Stream_CR files made with a maximum record size (older ods2v2 gave them 512, and RMS refuses such a file with a longer line: `%RMS-W-RTB`): MRS 0, LRL the longest record; the only attribute change implemented |
 | `SHOW VOLUME` | label, owner, cluster size, maximum files, free blocks |
 | `HELP` | |
 | `EXIT` / `QUIT` | |
@@ -174,6 +175,16 @@ COPY/ATTRIBUTES=(RFM:STMLF,RAT:CR) notes.txt [DOC]NOTES.TXT
   number of records, and the size even (2-32766).
 - `RAT:` record attributes - `NONE`, `CR`, `FTN`, `PRN`, `BLK`, `NOBLK`;
   repeat `RAT:` for more than one.
+- A stream file (`STMLF`, `STM`, `STMCR`) or `UDF` file gets MRS 0 and its
+  own longest record as `LRL` (the longest line, the length for `UDF`), as
+  VMS makes them, unless `MRS:` or `LRL:` is given. A line longer than a
+  given `MRS:` or `LRL:` is refused (`%ODS2-E-RECTOOLONG`): RMS could not
+  read the file back (`%RMS-W-RTB`, record too large for the user's
+  buffer). (Before, `/ATTRIBUTES` left MRS and LRL at 512, and `ods2_put`
+  and the library's `ods2_create_file()` did too; a file with a longer
+  line could not be read on VMS. `ods5check` warns of such a file, and
+  `SET FILE/ATTRIBUTES=(MRS:0) spec` repairs it: MRS 0 and LRL the
+  longest record, the data untouched.)
 
 VMS's native text format is variable-length records with carriage-return
 carriage control (`RFM:VAR`, `RAT:CR`) - what VMS FTP writes in ASCII
@@ -378,7 +389,7 @@ space in a name is written `^_`. Lookups and wildcards (`*`, `%`, `?`)
 are case blind and work on whole characters, not bytes (the letters of
 ISO Latin-1 and UCS-2 fold like VMS folds them, e.g. `É` finds `é`, `^U03B1`
 finds Greek capital Alpha); directory names
-are shown in their stored case. Directories nest to 2,048 levels.
+are shown in their stored case. Directories nest to 2,048 levels. On an ODS-2 volume a directory name cannot start with `-`: DCL reads it as the parent directory (`[-]`) and ODS-2 has no `^` escape, so VMS could not name anything inside it (`%CLI-W-PARSEFAIL`, `%RMS-F-SYN`); `CREATE/DIRECTORY` and `IMPORT` refuse it, with a message, and `ods5check` warns of one that exists. On ODS-5 it is fine (VMS writes it `^-`).
 `DIR/FULL` shows, per file, what the file header says: id, size, owner,
 protection, the dates (also the access and attribute-change dates of
 ODS-5), the link count where the volume has hard links, the record

@@ -2022,6 +2022,13 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
         }
         {
             const char *why;
+#ifdef ODS2_FAULT_INJECTION
+            /* test build only: ODS2_TEST_DASH_DIR=1 lets a name start with '-', to make the directories older versions made
+               (the checker's warning and the VMS-unreachable case are tested on them) */
+            if (name[0] == '-' && getenv("ODS2_TEST_DASH_DIR") != NULL) {
+                why = NULL;
+            } else
+#endif
             if (!ods2_valid_dir_name(name, &why)) return fail(why);
         }
         strcpy(dirname, name); /* at most 39 characters, checked above */
@@ -2347,6 +2354,35 @@ const char *ods2_check_var_record_attrs(const ods2_record_attrs_t *attrs, size_t
     return NULL;
 }
 
+bool ods2_stream_format(uint8_t rtype)
+{
+    return rtype == ODS2_RFM_STM || rtype == ODS2_RFM_STMLF || rtype == ODS2_RFM_STMCR;
+}
+
+/* The longest record of stream content: STMLF ends a record at LF (a CR before it stays in the record), STM at CR LF
+   (the CR is not part of the record; a lone LF does not end one), STMCR at CR. */
+size_t ods2_longest_record(uint8_t rtype, const uint8_t *data, size_t len)
+{
+    size_t i, cur = 0, longest = 0;
+
+    for (i = 0; i < len; i++) {
+        uint8_t c = data[i];
+        bool end;
+        if (rtype == ODS2_RFM_STMCR) {
+            end = (c == '\r');
+            if (end) { if (cur > longest) longest = cur; cur = 0; } else cur++;
+        } else if (rtype == ODS2_RFM_STM) {
+            end = (c == '\n' && i > 0 && data[i - 1] == '\r');
+            if (end) { if (cur - 1 > longest) longest = cur - 1; cur = 0; } else cur++;
+        } else {
+            end = (c == '\n');
+            if (end) { if (cur > longest) longest = cur; cur = 0; } else cur++;
+        }
+    }
+    if (cur > longest) longest = cur;
+    return longest;
+}
+
 ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_header,
                                       const char *name, const uint8_t *content,
                                       size_t content_len, const ods2_record_attrs_t *attrs,
@@ -2354,6 +2390,24 @@ ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_h
 {
     memory_source_t ctx;
     ods2_content_source_t src;
+    if (ods2_stream_format(attrs->rtype)) {
+        /* RMS refuses a stream file read back with a record longer than its MRS or its LRL (%RMS-W-RTB) */
+        size_t longest = ods2_longest_record(attrs->rtype, content, content_len);
+        if (longest > 32767) return fail("a line is longer than a stream record can be (32767 bytes)");
+        if (attrs->maxrec != 0 && longest > attrs->maxrec) {
+            return fail("a record is longer than the maximum record size (MRS) given: VMS could not read the file back "
+                        "(RMS-W-RTB); use MRS 0");
+        }
+        if (attrs->rsize != 0 && longest > attrs->rsize) {
+            return fail("a record is longer than the longest record length (LRL) given: VMS could not read the file back "
+                        "(RMS-W-RTB)");
+        }
+        if (attrs->rsize == 0) {                  /* no LRL given: the file's own longest record, as VMS stores it */
+            ods2_record_attrs_t own = *attrs;
+            own.rsize = (uint16_t) longest;
+            return ods2_create_file_attrs(vol, parent_header, name, content, content_len, &own, new_fid_out);
+        }
+    }
     ctx.data = content;
     ctx.pos = 0;
     src.length = content_len;
@@ -2564,6 +2618,17 @@ ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
     attrs.rattrib = 0;
     attrs.rsize = 512;
     attrs.maxrec = 512;
+    if (ods2_stream_format(rtype)) {
+        /* A stream file has no maximum record size (MRS 0, as VMS makes it) and its longest record is its own: MRS 512 made
+           RMS refuse such a file with a longer line (%RMS-W-RTB, record too large for the user's buffer) */
+        size_t longest = ods2_longest_record(rtype, content, content_len);
+        if (longest > 32767) return fail("a line is longer than a stream record can be (32767 bytes)");
+        attrs.rsize = (uint16_t) longest;
+        attrs.maxrec = 0;
+    } else if (rtype == ODS2_RFM_UDF) {
+        attrs.rsize = (uint16_t) (content_len > 32767 ? 32767 : content_len);
+        attrs.maxrec = 0;
+    }
     {
         memory_source_t ctx;
         ods2_content_source_t src;
@@ -3192,6 +3257,71 @@ ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file
     ods2_result_t r;
     TXN_BEGIN_OR_RETURN(vol);
     r = set_entry_version_limit_impl(vol, dir_file_number, name, limit, changed);
+    return txn_end(vol, r);
+}
+
+/* SET FILE/ATTRIBUTES=(MRS:0): repairs a stream file made with a maximum record size (ods2v2 gave every explicit-format
+   stream file MRS 512 whatever its lines, and RMS refuses to read such a file with a longer line: %RMS-W-RTB). MRS becomes 0
+   and LRL the file's own longest record, as VMS makes such files; the file's data is not touched. Only a sound header of a
+   sequential Stream, Stream_LF or Stream_CR file with a non-zero MRS is changed; *changed is 1 if it was. */
+static ods2_result_t set_stream_record_sizes_impl(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed)
+{
+    uint8_t h[512], blk[512];
+    ods2_head_core_t *core = (ods2_head_core_t *) h;
+    uint64_t bytes, done = 0;
+    unsigned vbn, rfm;
+    size_t cur = 0, longest = 0, i;
+    uint8_t prev = 0;
+    uint16_t sum;
+    ods2_result_t r;
+
+    *changed = 0;
+    if (!vol->writable) return not_writable(vol);
+    r = ods2_read_header_fid(vol, fid, h);
+    if (!r.ok) return r;
+    r = header_ok_for_write(h, ods2_fid_number(fid));
+    if (!r.ok) return r;
+    rfm = core->recattr.rtype & 0x0Fu;
+    if ((core->recattr.rtype >> 4) != 0 || (rfm != ODS2_RFM_STM && rfm != ODS2_RFM_STMLF && rfm != ODS2_RFM_STMCR) ||
+        core->recattr.maxrec == 0 || (core->filechar & 0x2000u)) {
+        return ok();
+    }
+    bytes = ((uint64_t) ods2_word_swap32(core->recattr.efblk) - 1) * 512u + core->recattr.ffbyte;
+    if (ods2_word_swap32(core->recattr.efblk) == 0) bytes = 0;
+    for (vbn = 1; done < bytes; vbn++) {
+        size_t n = (bytes - done) < 512u ? (size_t) (bytes - done) : 512u;
+        r = ods2_read_file_block(vol, h, vbn, blk);
+        if (!r.ok) return r;
+        for (i = 0; i < n; i++) {
+            uint8_t c = blk[i];
+            if (rfm == ODS2_RFM_STMCR) {
+                if (c == '\r') { if (cur > longest) longest = cur; cur = 0; } else cur++;
+            } else if (rfm == ODS2_RFM_STM) {
+                if (c == '\n' && prev == '\r' && cur > 0) { if (cur - 1 > longest) longest = cur - 1; cur = 0; } else cur++;
+            } else {
+                if (c == '\n') { if (cur > longest) longest = cur; cur = 0; } else cur++;
+            }
+            prev = c;
+        }
+        done += n;
+    }
+    if (cur > longest) longest = cur;
+    if (longest > 32767) return fail("a line is longer than a stream record can be (32767 bytes): not changed");
+    core->recattr.maxrec = 0;
+    core->recattr.rsize = (uint16_t) longest;
+    sum = ods2_checksum(h, 255);
+    h[510] = (uint8_t) (sum & 0xff);
+    h[511] = (uint8_t) (sum >> 8);
+    r = ods2_write_header(vol, ods2_fid_number(fid), h);
+    if (r.ok) *changed = 1;
+    return r;
+}
+
+ods2_result_t ods2_set_stream_record_sizes(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed)
+{
+    ods2_result_t r;
+    TXN_BEGIN_OR_RETURN(vol);
+    r = set_stream_record_sizes_impl(vol, fid, changed);
     return txn_end(vol, r);
 }
 
