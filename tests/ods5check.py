@@ -526,7 +526,7 @@ def main():
         if longest > maxrec:
             fnd.warn('file %d (%s): a %s file with maximum record size %d holds a record of %d bytes: record-mode reads with '
                      'a buffer sized from the MRS fail (TYPE, COPY, CHECKSUM: %%RMS-W-RTB on VAX V7.3); block I/O still reads '
-                     'the file; VMS\'s own FTP (ASCII mode) makes such files; SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
+                     'the file; files on a VMS system disk carry these attributes too (AXP1SYS: four; the transfer tool not recorded); SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
                      (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], maxrec, longest))
 
     # --- directories ---
