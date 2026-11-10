@@ -56,7 +56,7 @@ check "ods2_put 1: fixed 512-byte records by default" \
     "rtype=0x01 rattrib=0x00 rsize=512 maxrec=512" "$(hdr $n)"
 n=$(next_fid $DISK $TMP/notes.txt '' PUTCR.TXT 5 512 2)
 check "ods2_put 5 512 2: Stream_LF with CR carriage control" \
-    "rtype=0x05 rattrib=0x02 rsize=512 maxrec=512" "$(hdr $n)"
+    "rtype=0x05 rattrib=0x02 rsize=512 maxrec=0" "$(hdr $n)"
 check "ods2_put refuses content that isn't whole records (exit 1)" 1 \
     "$(status $PUT $DISK $TMP/short.pcsi '' SHORT.PCSI 1 8192)"
 check "ods2_put refuses VAR (exit 1)" 1 "$(status $PUT $DISK $TMP/notes.txt '' V.TXT 2)"
@@ -85,7 +85,8 @@ check "RFM:FIX with no size: 512-byte records; lowercase, no parentheses" \
     "rtype=0x01 rattrib=0x00 rsize=512 maxrec=512" "$(hdr $n)"
 $ODS2 $DISK "COPY/ATTRIBUTES=(RFM:STMLF,RAT:CR) $TMP/notes.txt [000000]NOTES.TXT" >/dev/null 2>&1
 n=$((n + 1))
-check "RFM:STMLF,RAT:CR" "rtype=0x05 rattrib=0x02 rsize=512 maxrec=512" "$(hdr $n)"
+# (it was RSIZE = MRS = 512 whatever the lines: RMS refused a file with a longer line, %RMS-W-RTB)
+check "RFM:STMLF,RAT:CR: LRL the longest line (8), MRS 0" "rtype=0x05 rattrib=0x02 rsize=8 maxrec=0" "$(hdr $n)"
 $ODS2 $DISK "COPY/ATTRIBUTES=(RFM:UDF,RAT:NONE,MRS:0,LRL:0) $TMP/notes.txt [000000]RAW.DAT" >/dev/null 2>&1
 n=$((n + 1))
 check "RFM:UDF with sizes 0" "rtype=0x00 rattrib=0x00 rsize=0 maxrec=0" "$(hdr $n)"
