@@ -10,6 +10,7 @@ import ods5read, stress   # noqa: E402
 out, rev = os.path.abspath(sys.argv[1]), sys.argv[2]
 src_text = sys.argv[3] if len(sys.argv) > 3 else 'origin/ods5 %s' % rev
 WHAT = {
+    's4-repair-f2': "REPAIR image: B321's s4-f2-fresh as VAX96 left it (written by ods2v2 before the stream MRS/LRL fix), after `SET FILE/ATTRIBUTES=(MRS:0) [000000...]*.*` with 110b503: 2 files changed (PYHKEUJA1$. MRS 512 -> 0, LRL 512 -> 1488; JD.K MRS 512 -> 0, LRL 512 -> 91), see s4-repair-f2.CHANGES.TXT; nothing else, no file's bytes changed. Bug A's directory [..Y.-U7NL] is still in it (checker: 1 warning, on purpose): its files are `unreachable-bugA` in MANIFEST_VMS",
     'up2-starter': "upstream's own ods2 (branch fix-integrity 4aa2507) on its starter volume (VMS 7.1 INITIALIZE, RA92, label TRANSFER -> UP2START): 100 random COPY / DELETE / CREATE/DIRECTORY / SET FILE/VERSION_LIMIT operations, then a directory split phase (70 files with 39.39-character names in one directory, half deleted)",
     'up2-asim6': "V7.3-2-made ODS2T6 corpus volume (asim6-ods2t6) + the same 100 operations and split phase with upstream's ods2 (label UP2A6)",
     'up2-phvs2': "VAX V7.3-made ODS-2 volume (phvs2-ods2v) + the same 100 operations and split phase (label UP2PH)",
@@ -32,8 +33,9 @@ WHAT = {
 rows, sums = [], []
 for f in sorted(glob.glob(os.path.join(out, '*.img'))):
     name = os.path.basename(f)[:-4]
-    summ = stress.run_checker(f)[0]
-    if summ != '0 error(s), 0 warning(s)':
+    summ, chk_out, _ = stress.run_checker(f)
+    known = name == 's4-repair-f2' and summ == '0 error(s), 1 warning(s)' and 'starts with "-"' in chk_out     # Bug A's directory [..Y.-U7NL], kept on purpose
+    if summ != '0 error(s), 0 warning(s)' and not known:
         sys.exit('%s: checker says %s' % (name, summ))
     v = ods5read.read_volume(f)
     if v.problems:
