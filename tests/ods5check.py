@@ -530,7 +530,7 @@ def main():
             # can hold the record (52 such files on the AXP1 system disk); measured (V7.3, V7.3-2, V8.4): record-mode reads fail
             fnd.info('file %d (%s): a %s file with a record of %d bytes (LRL %d, MRS 0): a record longer than 32,767 bytes: no VMS '
                      'version tested (V7.3, V7.3-2, V8.4) reads it in record mode (TYPE, COPY to NL:, CHECKSUM\'s default, READ fail '
-                     'with RTB; CONVERT drops the whole file); block mode (COPY file to file, BACKUP) and V8.4 CHECKSUM/ALGORITHM=MD5 '
+                     'with RTB; with LRL 0, COPY to NL: fails with RSZ; CONVERT drops the whole file); block mode (COPY file to file, BACKUP) and V8.4 CHECKSUM/ALGORITHM=MD5 '
                      'read it; VMS leaves binary stream files like this' %
                      (n, d['name'] if d else '?', kind, longest, lrl))
         elif lrl == 0 and maxrec == 0 and longest > 512:
@@ -542,7 +542,7 @@ def main():
                      'SET FILE/ATTRIBUTES=(MRS:0) repairs it (LRL the longest record)' %
                      (n, d['name'] if d else '?', kind, longest))
         elif (lrl != 0 and longest > lrl) or (maxrec != 0 and longest > maxrec):
-            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d: TYPE, COPY and (VAX) '
+            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d: TYPE, COPY and (V7.3, V7.3-2) '
                      'CHECKSUM fail (%%RMS-F-RSZ, %%RMS-W-RTB); CONVERT drops the record; block I/O and COPY to disk work; '
                      'SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
                      (n, d['name'] if d else '?', kind, longest, lrl, maxrec))
