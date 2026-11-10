@@ -268,6 +268,15 @@ def gen_content(rng, size, kind):
         if kind != 'nonl' and kind != 'cr' and size > 0 and data[-1:] not in (b'\n', b'\r'):
             data = data[:-1] + b'\n' if kind != 'crlf' else data[:-1] + b'\n'
         return data
+    if kind in ('longlines', 'ffvt', 'lonecr', 'crlflong'):
+        # stream-format tests: lines over 512 bytes; LF, FF, VT, CR LF endings; lone CRs inside lines
+        out = bytearray()
+        ends = {'longlines': [b'\n'], 'ffvt': [b'\n', b'\x0c', b'\x0b', b'\r\n'], 'lonecr': [b'\n', b'\r'], 'crlflong': [b'\r\n']}[kind]
+        while len(out) < size:
+            n = r_len = rng.choice([0, 1, 10, 100, 511, 512, 513, 700, 1500, 3000]) if kind != 'ffvt' else rng.choice([0, 5, 80, 600])
+            out += bytes(rng.choice(b'abcdefghijklmnopqrstuvwxyz 0123456789') for _ in range(n)) + rng.choice(ends)
+        data = bytes(out[:size])
+        return data if size else b''
     if kind == 'zero':
         return bytes(size)
     if kind == 'ff':
@@ -282,7 +291,7 @@ def gen_content(rng, size, kind):
 
 SIZES_SMALL = [0, 1, 2, 3, 127, 128, 255, 256, 509, 510, 511, 512, 513, 514, 1000, 1023, 1024, 1025, 1535, 1536,
                1537, 2047, 2048, 4095, 4096, 4097, 8191, 8192, 8193, 32767, 32768, 32769, 65535, 65536, 65537]
-KINDS = ['lf', 'lf', 'crlf', 'cr', 'mixed', 'nonl', 'bin', 'bin', 'zero', 'ff', 'tagged']
+KINDS = ['lf', 'lf', 'crlf', 'cr', 'mixed', 'nonl', 'bin', 'bin', 'zero', 'ff', 'tagged', 'longlines', 'ffvt', 'lonecr', 'crlflong']
 
 
 def gen_size(rng, big_ok):
@@ -320,10 +329,11 @@ def var_records(data):
 # ---------------------------------------------------------------- model
 
 class Obj:
-    __slots__ = ('kind', 'md5', 'size', 'target', 'volatile', 'name', 'raw')
+    __slots__ = ('kind', 'md5', 'size', 'target', 'volatile', 'name', 'raw', 'mrs')
 
     def __init__(self, kind='file', md5=None, size=0, target=None, volatile=False):
         self.kind, self.md5, self.size, self.target, self.volatile = kind, md5, size, target, volatile
+        self.mrs = None           # expected FAT$W_MAXREC (0 for a stream format: no maximum), None = not checked
         self.raw = False          # RMS indexed / relative / hash file: CHECKSUM on VMS reads these by record, not by block
 
 
@@ -610,7 +620,7 @@ class Harness:
         self.baseline_keys = set(self.model.ents)
         self.baseline_dirs = set(self.model.dirs.values())
         self.names = NameGen(r, self.ods5)
-        self.names.no_dash = (self.profile == 'up2')
+        self.names.no_dash = (self.profile == 'up2' or not self.ods5)     # Bug A (B321): an ODS-2 directory name cannot start with '-' (refused since 110b503)
         self.note('volume: ODS-%d cluster %d blocks %d hardlinks %s files %d dirs %d'
                   % (5 if self.ods5 else 2, vol.cluster, vol.size_blocks, self.hardlinks, len(vol.files), len(vol.dirs)))
         self.verify('baseline')
@@ -690,6 +700,8 @@ class Harness:
                 continue
             if fi.special == 5:
                 self.fail('%s: %r is a symbolic link on the volume only' % (tag, k))
+            if obj.mrs is not None and fi.maxrec != obj.mrs:
+                self.fail('%s: %r: stream-format file has MRS (FAT$W_MAXREC) %d, expected %d' % (tag, k, fi.maxrec, obj.mrs))
             if fi.size != obj.size or fi.md5 != obj.md5:
                 self.fail('%s: %r: size/md5 volume %d/%s, model %d/%s' % (tag, k, fi.size, fi.md5, obj.size, obj.md5))
 
@@ -838,10 +850,10 @@ class Harness:
         kind = r.choice(KINDS)
         data, src = self.src_for(size, kind)
         if self.profile == 'up2':        # upstream's COPY: plain, /CONVERT, /ATTRIBUTES only; no /FORMAT, no Linux-name form
-            fmt = fmt or r.choices([None, 'VAR', 'ATTR_FIX', 'ATTR_STM'], [70, 10, 10, 10])[0]
+            fmt = fmt or r.choices([None, 'VAR', 'ATTR_FIX', 'ATTR_STM', 'ATTR_STMCR', 'ATTR_STMSTM'], [55, 10, 10, 9, 8, 8])[0]
         else:
-            fmt = fmt or r.choices([None, 'STMLF', 'STM', 'STMCR', 'FIX512', 'UDF', 'VAR', 'ATTR_FIX', 'ATTR_STM'],
-                                   [60, 5, 5, 3, 6, 4, 6, 4, 4])[0]
+            fmt = fmt or r.choices([None, 'STMLF', 'STM', 'STMCR', 'FIX512', 'UDF', 'VAR', 'ATTR_FIX', 'ATTR_STM', 'ATTR_STMCR', 'ATTR_STMSTM'],
+                                   [50, 5, 5, 3, 6, 4, 6, 4, 6, 4, 4])[0]
         q = ''
         expect_data = data
         if fmt == 'VAR':
@@ -854,17 +866,21 @@ class Harness:
                 data, src = self.src_for(size, 'bin')
                 expect_data = data
             q = '/ATTRIBUTES=(RFM:FIX,MRS:%d)' % mrs
-        elif fmt == 'ATTR_STM':
-            q = '/ATTRIBUTES=(RFM:STMLF,RAT:CR)'
+        elif fmt in ('ATTR_STM', 'ATTR_STMCR', 'ATTR_STMSTM'):
+            q = '/ATTRIBUTES=(RFM:%s,RAT:CR)' % {'ATTR_STM': 'STMLF', 'ATTR_STMCR': 'STMCR', 'ATTR_STMSTM': 'STM'}[fmt]
+            if r.random() < 0.7 and size > 0:        # the Bug B cases: long lines, LF/FF/VT/CR LF endings, lone CRs
+                data = gen_content(r, size, r.choice(['longlines', 'ffvt', 'lonecr', 'crlflong']))
+                src = self.write_src(data)
+                expect_data = data
         elif fmt:
             q = '/FORMAT=' + fmt
         taken = m.name_taken(dirpath, display)
         if taken and not m.name_hard(dirpath, display):
             return      # only the harness's own export-collision avoidance (file "e." beside directory "e"): not a refusal case
         longline = False
-        if fmt in ('STMLF', 'STM', 'ATTR_STM', 'VAR'):
+        if fmt in ('STMLF', 'STM', 'ATTR_STM', 'ATTR_STMSTM', 'VAR'):
             longline = max_line(data, b'\n') > 32767
-        elif fmt == 'STMCR':
+        elif fmt in ('STMCR', 'ATTR_STMCR'):
             longline = max_line(data, b'\r') > 32767
         via_linux_name = self.ods5 and self.profile != 'up2' and r.random() < 0.15 and not display.endswith('.DIR')
         if via_linux_name:
@@ -889,6 +905,8 @@ class Harness:
             return
         if ok:
             m.add_file(dirpath, display, Obj('file', hashlib.md5(expect_data).hexdigest(), len(expect_data)))
+            if fmt in ('STMLF', 'STM', 'STMCR', 'ATTR_STM', 'ATTR_STMCR', 'ATTR_STMSTM'):
+                m.ents[(m.fkpath(dirpath), key_of(display), 1)][1].mrs = 0
 
     def op_bad_name(self):
         """names VMS refuses must be refused and leave nothing behind"""
@@ -1109,6 +1127,7 @@ class Harness:
         tree = os.path.join(self.src, 'imp%05d' % self.ncopy)
         self.ncopy += 1
         ng = NameGen(r, self.ods5)
+        ng.no_dash = not self.ods5
         planned = []            # (relpath dirs tuple, display, obj, data)
         dirs_planned = []
         nfiles = r.randint(1, 12)
