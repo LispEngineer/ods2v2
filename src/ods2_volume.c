@@ -3311,7 +3311,10 @@ ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file
 /* SET FILE/ATTRIBUTES=(MRS:0): repairs a stream file made with a maximum record size (ods2v2 gave every explicit-format
    stream file MRS 512 whatever its lines, and RMS refuses to read such a file with a longer line: %RMS-W-RTB). MRS becomes 0
    and LRL the file's own longest record, as VMS makes such files; the file's data is not touched. Only a sound header of a
-   sequential Stream, Stream_LF or Stream_CR file with a non-zero MRS is changed; *changed is 1 if it was. */
+   sequential Stream, Stream_LF or Stream_CR file is changed, and only if it is not already as VMS leaves such a file: MRS 0
+   and an LRL of at least the longest record, the record taken as at most 32767 bytes (a binary file with a longer "record" is
+   left by VMS with MRS 0 and LRL 32767, and is skipped silently in that state; with a non-zero MRS it gets MRS 0 and LRL
+   32767). *changed is 1 if the header was written. */
 static ods2_result_t set_stream_record_sizes_impl(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed)
 {
     uint8_t h[512], blk[512];
@@ -3345,7 +3348,7 @@ static ods2_result_t set_stream_record_sizes_impl(ods2_volume_t *vol, ods2_fid_t
         done += n;
     }
     longest = ods2_reclen_longest(&st);
-    if (longest > 32767) return fail("a record is longer than a stream record can be (32767 bytes): not changed");
+    if (longest > 32767) longest = 32767;        /* no record length can be more: VMS's state for such a binary file */
     /* needs repair: a maximum record size (RMS reads with a buffer of that size), or a longest record length (LRL) below
        the longest record (COPY and CHECKSUM then fail too, even with MRS 0: %RMS-W-RTB) */
     if (core->recattr.maxrec == 0 && core->recattr.rsize >= longest) return ok();

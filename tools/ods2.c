@@ -1562,9 +1562,10 @@ static void cmd_set_version_limit(ods2_volume_t *vol, const ods2_parsed_path_t *
     }
 }
 
-/* SET FILE/ATTRIBUTES=(MRS:0) <spec>: repairs Stream, Stream_LF and Stream_CR files made with a maximum record size
-   (ods2v2 gave every explicit-format stream file MRS 512; RMS refuses to read such a file with a longer line,
-   %RMS-W-RTB): MRS 0 and LRL the file's own longest record, as VMS makes such files. The data is not touched. */
+/* SET FILE/ATTRIBUTES=(MRS:0) <spec>: repairs Stream, Stream_LF and Stream_CR files whose MRS is not 0 or whose LRL is below
+   their longest record (ods2v2 gave every explicit-format stream file MRS 512, and once gave a Stream file an LRL one short;
+   record-mode reads then fail: %RMS-W-RTB): MRS 0 and LRL the file's own longest record (at most 32767), as VMS makes such
+   files. A file already in that state is left alone, silently. The data is not touched. */
 typedef struct {
     unsigned files, changed;
     int errors;

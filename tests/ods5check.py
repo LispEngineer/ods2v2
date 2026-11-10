@@ -523,14 +523,29 @@ def main():
             continue
         data = b''.join(v.blk(l, c) for l, c in file_extents[n])[:size]
         longest = stream_longest(rfm, data)
-        # (an LRL of 0 means "not recorded": not measured on VMS, so only the MRS is held against the record then)
-        if (lrl != 0 and longest > lrl) or (maxrec != 0 and longest > maxrec):
-            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d: TYPE, COPY and (VAX) '
+
+        kind = {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm]
+        if longest > 32767 and maxrec == 0:
+            # VMS's own state for a binary stream file with no line ends: MRS 0 and LRL at most 32767 (or 0), and no record length
+            # can hold the record (52 such files on the AXP1 system disk); measured (V7.3, V7.3-2, V8.4): record-mode reads fail
+            fnd.info('file %d (%s): a %s file with a record of %d bytes (LRL %d, MRS 0): a record longer than 32,767 bytes: no VMS '
+                     'version tested (V7.3, V7.3-2, V8.4) reads it in record mode (TYPE, COPY to NL:, CHECKSUM\'s default, READ fail '
+                     'with RTB; with LRL 0, COPY to NL: fails with RSZ; CONVERT drops the whole file); block mode (COPY file to file, BACKUP) and V8.4 CHECKSUM/ALGORITHM=MD5 '
+                     'read it; VMS leaves binary stream files like this' %
+                     (n, d['name'] if d else '?', kind, longest, lrl))
+        elif lrl == 0 and maxrec == 0 and longest > 512:
+            # LRL 0 ("not recorded") with MRS 0: V7.3 and V7.3-2 CHECKSUM/FILE gives RTB for a 2000-byte line (TYPE, COPY, CONVERT work;
+            # V8.4 is fine). 512 is the threshold chosen here; only 2000 was measured.
+            fnd.info('file %d (%s): a %s file with LRL 0 and MRS 0 holds a record of %d bytes: CHECKSUM/FILE fails on V7.3 and '
+                     'V7.3-2 (%%RMS-W-RTB; measured with a 2000-byte line; 512 is the threshold chosen here), TYPE, COPY and CONVERT '
+                     'work, V8.4 is fine; VMS leaves files like this on its system disks and ods2v2 never writes one; '
+                     'SET FILE/ATTRIBUTES=(MRS:0) repairs it (LRL the longest record)' %
+                     (n, d['name'] if d else '?', kind, longest))
+        elif (lrl != 0 and longest > lrl) or (maxrec != 0 and longest > maxrec):
+            fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d: TYPE, COPY and (V7.3, V7.3-2) '
                      'CHECKSUM fail (%%RMS-F-RSZ, %%RMS-W-RTB); CONVERT drops the record; block I/O and COPY to disk work; '
-                     '%s' %
-                     (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], longest, lrl, maxrec,
-                      'no record length can hold it (more than 32767 bytes: a binary file with no line ends)' if longest > 32767
-                      else 'SET FILE/ATTRIBUTES=(MRS:0) repairs it'))
+                     'SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
+                     (n, d['name'] if d else '?', kind, longest, lrl, maxrec))
 
     # --- directories ---
     dirs = [n for n, (b, d) in prim.items() if u32(b, 52) & 0x2000]
