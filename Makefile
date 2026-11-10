@@ -382,5 +382,5 @@ release: test
 clean:
 	rm -rf $(BUILD)
 	rm -f samples/synthetic_disk.img samples/synthetic_disk_working.img samples/synthetic_disk_v0.img
-	rm -f samples/versions_disk.img samples/versions_cli_disk.img samples/cli_wildcard_disk.img samples/cli_loop_disk.img samples/file_alloc_disk.img samples/dir_order_disk.img samples/dir_eof_disk.img samples/large_file_disk.img samples/cli_status_disk.img samples/cli_attrs_disk.img samples/record_attrs_disk.img samples/indexf_large_disk.img samples/text_var_disk.img samples/cli_label_disk.img samples/cli_label_orig.img
+	rm -f samples/versions_disk.img samples/versions_cli_disk.img samples/cli_wildcard_disk.img samples/cli_loop_disk.img samples/file_alloc_disk.img samples/dir_order_disk.img samples/dir_eof_disk.img samples/large_file_disk.img samples/cli_status_disk.img samples/cli_attrs_disk.img samples/record_attrs_disk.img samples/indexf_large_disk.img samples/text_var_disk.img samples/cli_label_disk.img samples/cli_label_orig.img samples/verlimit_disk.img samples/fid_disk.img samples/integrity_disk.img samples/cli_verlimit_disk.img samples/cli_lock_disk.img
 	rm -f $(TOOLS) ods2_fault ods2_deep_make

@@ -30,7 +30,9 @@
  *   - an entry whose sequence number is not the header's (the file was deleted and its number reused: VMS gives a
  *     reused number a new sequence number, and calls the entry's file "no such file") opened the file that now has
  *     the number.
- * ods2_read_header_fid() refuses all of them. */
+ * ods2_read_header_fid() refuses all of them. (In ods5 an NMX is a supported part of the file number, so an NMX FID is not
+ * "unsupported": it names file number 65536 + n, which is not file n's header, and is refused unless such a file is
+ * there with that sequence number.) */
 
 #include <stdio.h>
 #include <string.h>
