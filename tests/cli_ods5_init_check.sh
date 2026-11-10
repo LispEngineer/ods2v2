@@ -269,11 +269,15 @@ check "--target=ld at the 30 sizes VMS reported or accepted (B325: 20,001 = 11 x
 $INIT "$TMP/ldu.img" 25000 --target=ld >/dev/null 2>"$TMP/ldu.err"
 check "an unmeasured ld size with an ambiguous order (25,000 blocks: product 156 = 12 x 13): says the order follows no rule, CHKSCB, and --geometry" "1 1 1" \
     "$(grep -c 'follows no rule' "$TMP/ldu.err") $(grep -c CHKSCB "$TMP/ldu.err") $(grep -c -- '--geometry=SECTORS,TRACKS' "$TMP/ldu.err")"
-$INIT "$TMP/ldu.img" 22000 --target=ld >/dev/null 2>"$TMP/ldu2.err"
-check "an unmeasured ld size whose product is k*k (22,000 blocks: 12 x 12): the plain prediction note only" "1 0" \
-    "$(grep -c prediction "$TMP/ldu2.err") $(grep -c 'follows no rule' "$TMP/ldu2.err")"
+$INIT "$TMP/ldk.img" 22000 --target=ld >/dev/null 2>"$TMP/ldk.err"
+check "an unmeasured ld size whose product is k*k (22,000 blocks: 12 x 12; the volume is made): the plain prediction note only" "1 0 1" \
+    "$(grep -c prediction "$TMP/ldk.err") $(grep -c 'follows no rule' "$TMP/ldk.err") $([ -s "$TMP/ldk.img" ] && echo 1 || echo 0)"
 out=$($ODS2 "$TMP/ldu.img" "SET VOLUME/GEOMETRY=ld" 2>&1)
-check "SET VOLUME/GEOMETRY=ld on the same size: the same note, as a warning" "1" "$(echo "$out" | grep -c 'PREDICTED')"
+check "SET VOLUME/GEOMETRY=ld on the 25,000-block image: PREDICTED once, with the order note" "1 1" \
+    "$(echo "$out" | grep -c 'PREDICTED') $(echo "$out" | grep -c 'follows no rule')"
+out=$($ODS2 "$TMP/ldk.img" "SET VOLUME/GEOMETRY=ld" 2>&1)
+check "SET VOLUME/GEOMETRY=ld on the 22,000-block image (12 x 12): PREDICTED once, without the order note" "1 0" \
+    "$(echo "$out" | grep -c 'PREDICTED') $(echo "$out" | grep -c 'follows no rule')"
 
 # HARDLINKS on a volume whose reserved files 1-10 have link count 0 (INITIALIZE, then SET VOLUME/VOLUME_CHARACTERISTICS=HARDLINKS
 # on V8.4: ANALYZE says %ANALDISK-W-LINKCOUNT "linkcount set at 0 when it should be 1"): the checker warns too. The image is a

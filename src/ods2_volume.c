@@ -3656,7 +3656,7 @@ ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const ch
 /* The disk geometry (sectors x tracks) a device type reports for a volume of `blocks` blocks, which the storage
    control block must record for OpenVMS VAX V7.3's ANALYZE (cylinders = ceil(blocks / (sectors * tracks)) always).
    Measured by ods5-vms2 (CORPUS section 16) and in the corpus; `*measured` is false when this size was not one of
-   the sizes measured for the geometry returned, and the answer is a prediction (confirm with SHOW DEVICE/FULL).
+   the sizes measured (or accepted by ANALYZE) for the geometry returned, and the answer is a prediction (confirm with SHOW DEVICE/FULL).
      ld      the LD driver's containers (LDDRIVER V8.3, VAX V7.3): measured at 29 sizes (CORPUS 16 and 30). The product
              sectors x tracks is the largest k*k or k*(k+1) not above the square root of the size (fits all 29) and
              cylinders = ceil(blocks / product); the ORDER of the two (11 x 12 or 12 x 11) follows no rule found in the
@@ -3765,8 +3765,8 @@ bool ods2_target_geometry_warning(const char *target, uint64_t blocks, uint32_t 
 {
     if (measured || msg == NULL || cap == 0) return false;
     if (strcasecmp(target, "ld") == 0 && sectors != tracks) {
-        snprintf(msg, cap, "the ld geometry for %llu blocks is a prediction (not a measured size): the product %u x %u fits "
-                 "every measured size, but whether the LD driver gives %u sectors x %u tracks or %u x %u follows no rule "
+        snprintf(msg, cap, "the ld geometry for %llu blocks is a prediction (not a measured size): the product %u x %u comes from "
+                 "the rule that fits every measured size, but whether the LD driver gives %u sectors x %u tracks or %u x %u follows no rule "
                  "found (20,000 blocks: 11 x 12; 20,479: 12 x 11), and VAX V7.3 ANALYZE reports CHKSCB for the wrong order. "
                  "Check with LD CONNECT and SHOW DEVICE/FULL, and give the answer as --geometry=SECTORS,TRACKS "
                  "(SET VOLUME/GEOMETRY=SECTORS,TRACKS)", (unsigned long long) blocks, sectors, tracks, sectors, tracks,
