@@ -527,8 +527,10 @@ def main():
         if (lrl != 0 and longest > lrl) or (maxrec != 0 and longest > maxrec):
             fnd.warn('file %d (%s): a %s file whose longest record is %d bytes has LRL %d and MRS %d: TYPE, COPY and (VAX) '
                      'CHECKSUM fail (%%RMS-F-RSZ, %%RMS-W-RTB); CONVERT drops the record; block I/O and COPY to disk work; '
-                     'SET FILE/ATTRIBUTES=(MRS:0) repairs it' %
-                     (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], longest, lrl, maxrec))
+                     '%s' %
+                     (n, d['name'] if d else '?', {4: 'Stream', 5: 'Stream_LF', 6: 'Stream_CR'}[rfm], longest, lrl, maxrec,
+                      'no record length can hold it (more than 32767 bytes: a binary file with no line ends)' if longest > 32767
+                      else 'SET FILE/ATTRIBUTES=(MRS:0) repairs it'))
 
     # --- directories ---
     dirs = [n for n, (b, d) in prim.items() if u32(b, 52) & 0x2000]
