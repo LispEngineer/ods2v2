@@ -171,8 +171,8 @@ for level in 2 5; do
     # LRL 0 with MRS 0 (no LRL recorded; VMS-made files are like this): CHECKSUM/FILE gives RTB on V7.3 and V7.3-2 for a long line
     # (measured with 2000 bytes); 512 is the threshold chosen here. A line of at most 512 bytes: no warning; the repair sets LRL.
     python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]HALF.TXT')" 0 0
-    check "$t: Stream_LF with LRL 0 and MRS 0 and a 900-byte record: ods5check warns (CHECKSUM/FILE on V7.3)" "1" \
-        "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*HALF.TXT.*LRL 0 and MRS 0 holds a record of 900 bytes: CHECKSUM/FILE fails on V7.3 and V7.3-2')"
+    check "$t: Stream_LF with LRL 0 and MRS 0 and a 900-byte record: an info line with -v (CHECKSUM/FILE on V7.3 only), no warning" "0 1" \
+        "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*HALF.TXT') $(python3 -I tests/ods5check.py -v "$img" | grep -c 'HALF.TXT.*LRL 0 and MRS 0 holds a record of 900 bytes: CHECKSUM/FILE fails on V7.3 and V7.3-2')"
     $ODS2 "$img" "COPY $TMP/short.txt [000000]SHORT.TXT" >/dev/null 2>&1
     python3 "$TMP/damage.py" "$img" "$(fid_num "$img" '[000000]SHORT.TXT')" 0 0
     check "$t: ... with a 5-byte record: no warning" "0" "$(python3 -I tests/ods5check.py "$img" | grep -c '^WARN.*SHORT.TXT')"
