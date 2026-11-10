@@ -186,6 +186,17 @@ COPY/ATTRIBUTES=(RFM:STMLF,RAT:CR) notes.txt [DOC]NOTES.TXT
   `SET FILE/ATTRIBUTES=(MRS:0) spec` repairs it: MRS 0 and LRL the
   longest record, the data untouched.)
 
+`tests/ods5check.py` judges a stream file's record lengths in tiers, by what
+VMS then does (measured on V8.4 and VAX V7.3): a **warning** when a record is
+longer than a non-zero MRS (`TYPE` fails with RSZ, `COPY` to `NL:` and
+`CHECKSUM` with `RTB` on V7.3, `CONVERT` drops the record), and when MRS is 0
+but the LRL is below the longest record (`COPY` to `NL:` and `CHECKSUM` fail,
+`TYPE` and `CONVERT` work); no message for a non-zero MRS that is enough with a
+short LRL; an **info** line (`-v`) for a record over 32,767 bytes with MRS 0 and
+for LRL 0 / MRS 0 with a record over 512 bytes. It also warns of a link count of
+0 in the reserved files of a HARDLINKS volume (V8.4 ANALYZE: `LINKCOUNT`; what
+INITIALIZE followed by SET VOLUME/VOLUME_CHARACTERISTICS=HARDLINKS leaves).
+
 VMS's native text format is variable-length records with carriage-return
 carriage control (`RFM:VAR`, `RAT:CR`) - what VMS FTP writes in ASCII
 mode, and what some older utilities and kit procedures expect.
@@ -372,8 +383,15 @@ version, which ods2v2 does not make; it creates version 1 only). Also:
   `--target=ld` (the LD driver), `--target=ra` (SIMH RA82 / RA92) or
   `--target=scsi` (also `axpbox`, `rz`; or `--geometry=SECTORS,TRACKS`), and fit an
   existing image with `SET VOLUME/GEOMETRY=ld|ra|scsi|sectors,tracks`.** The
-  geometry of the LD driver and of the RA types depends on the size; a size that
-  was not measured is said to be a prediction (check `SHOW DEVICE/FULL`).
+  geometry of the LD driver and of the RA types depends on the size. For `ld`
+  the table holds the 31 sizes measured on VAX V7.3 (LDDRIVER V8.3): sectors x
+  tracks is the largest k x k or k x (k+1) not above the square root of the
+  size, cylinders = ceil(blocks / that), but the ORDER of the two (11 x 12 or
+  12 x 11) follows no rule found, and ANALYZE reports `CHKSCB` for the wrong one
+  (it compares sectors and tracks one by one). A size that is not in the table
+  is said to be a prediction, and where the order is ambiguous the warning says
+  so: check `LD CONNECT` and `SHOW DEVICE/FULL`, then give
+  `--geometry=SECTORS,TRACKS` (or `SET VOLUME/GEOMETRY=SECTORS,TRACKS`).
 
 **Names.** ODS-5 keeps the case of names and allows spaces, many dots,
 ISO Latin-1 and UCS-2 characters. `DIR` shows them the way DCL does,
