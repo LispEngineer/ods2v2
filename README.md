@@ -82,7 +82,7 @@ implements basic command recall to ease repetitive command sequences.
 | `COPY/ATTRIBUTES=(...) <local-file> <path>` | `COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) kit.pcsi [KITS]KIT.PCSI` |
 | `COPY/CONVERT <local-file> <path>` | `COPY/CONVERT notes.txt [DOC]NOTES.TXT` — text as VAR records |
 | `TYPE[/RAW\|/LINES] path` | `TYPE [DECUS]README.TXT;2` — sequential files as text the way VMS `TYPE` shows them (carriage control applied: a file with none shows its records run together); `/LINES` one line per record always; `/RAW` the stored bytes |
-| `DELETE path` | `DELETE [DECUS]OLDFILE.TXT;1` |
+| `DELETE path` | `DELETE [DECUS]OLDFILE.TXT;1`; with `*`, `%` or `?` in the name every match in that one directory: `DELETE [DECUS]*.LIS` (the highest version of each), `DELETE [DECUS]OLD*.*;*` (every version) |
 | `SET DEFAULT path` | `SET DEFAULT [DECUS.NETLIB020]` |
 | `SHOW DEFAULT` | |
 | `SET VOLUME/LABEL=name` | `SET VOLUME/LABEL=ITANKITS` — relabel the volume |
