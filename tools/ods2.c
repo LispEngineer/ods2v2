@@ -3063,8 +3063,8 @@ static void report_deletion(const char *name, uint16_t version, const ods2_delet
 }
 
 /* DELETE with '*', '%' or '?' (not ^-escaped) in the file name (upstream #24, be4e467): every entry of the one
-   directory whose name matches, as DIR matches it (case-blind, ^-escapes literal; a name with no type means any
-   type, as in DIR). The versions follow the rules for one file: NAME;* every version, NAME;n version n, NAME;-n
+   directory whose name and type match, each matched apart (case-blind, ^-escapes literal; no type given is the
+   null type). The versions follow the rules for one file: NAME;* every version, NAME;n version n, NAME;-n
    the n-th lower one, and no version (or ;0) the highest. The matches are listed first and then deleted by their
    exact version numbers, so deleting never disturbs the list being worked through. An entry that cannot be
    deleted (a reserved file, a directory that is not empty) is reported and the rest are still deleted. */
@@ -3074,11 +3074,27 @@ static void delete_wildcard(ods2_volume_t *vol, const uint8_t *dir_header, ods2_
     ods2_dir_entry_t *entries = NULL;
     int count = 0, i, rank = 0, matched = 0, deleted = 0, failed = 0;
     ods2_result_t r;
-    char pattern[ODS2_PATH_MAX + 4];
+    char pat_name[ODS2_PATH_MAX + 4], pat_type[ODS2_PATH_MAX + 4];
+    const char *dot;
     struct target { char name[ODS2_DIR_MAX_NAME + 1]; uint16_t version; } *targets;
 
-    if (ods5_find_unescaped(p->filename, '.') == NULL) snprintf(pattern, sizeof(pattern), "%s.*", p->filename);
-    else snprintf(pattern, sizeof(pattern), "%s", p->filename);
+    if (!vol->writable) {
+        report_error("%%ODS2-E-DELETEERR, %s: the volume is mounted read-only\n", p->filename);
+        return;
+    }
+    /* The name and the type are matched apart (review 26 F2): on ODS-5 a name may hold dots, and '*' must not
+       reach across the type delimiter, or FOO.*;* would take FOO.TAR.GZ (name FOO.TAR). With no type given the
+       type is the null type, as for one file (DELETE README is README.) and as VMS applies no default type
+       (review 26 F1): READM%;* is README.;*, not README.*;*. In the spelling the one unescaped dot is the
+       delimiter; in the stored literal name, the last dot. */
+    dot = ods5_find_unescaped(p->filename, '.');
+    if (dot == NULL) {
+        snprintf(pat_name, sizeof(pat_name), "%s", p->filename);
+        pat_type[0] = '\0';
+    } else {
+        snprintf(pat_name, sizeof(pat_name), "%.*s", (int) (dot - p->filename), p->filename);
+        snprintf(pat_type, sizeof(pat_type), "%s", dot + 1);
+    }
 
     r = ods2_list_directory_alloc(vol, dir_header, &entries, &count);
     if (!r.ok) {
@@ -3094,7 +3110,15 @@ static void delete_wildcard(ods2_volume_t *vol, const uint8_t *dir_header, ods2_
     for (i = 0; i < count; i++) {
         bool take;
         rank = (i > 0 && same_name(entries[i].name, entries[i - 1].name)) ? rank + 1 : 0;
-        if (!ods2_wildcard_match(pattern, entries[i].name)) continue;
+        {
+            char lit_name[ODS2_DIR_MAX_NAME + 1];
+            const char *ldot = strrchr(entries[i].name, '.');
+            const char *lit_type = ldot != NULL ? ldot + 1 : "";
+            size_t nlen = ldot != NULL ? (size_t) (ldot - entries[i].name) : strlen(entries[i].name);
+            memcpy(lit_name, entries[i].name, nlen);
+            lit_name[nlen] = '\0';
+            if (!ods2_wildcard_match(pat_name, lit_name) || !ods2_wildcard_match(pat_type, lit_type)) continue;
+        }
         if (p->version_wildcard) take = true;                                   /* ;*  every version */
         else if (!p->has_version || p->version == 0) take = (rank == 0);        /* the highest */
         else if (p->version > 0) take = (entries[i].version == (unsigned) p->version);
@@ -3128,7 +3152,7 @@ static void delete_wildcard(ods2_volume_t *vol, const uint8_t *dir_header, ods2_
         format_file_spec(p, spec, sizeof(spec));
         report_error("%%ODS2-E-DELETEERR, %s: no files match\n", spec);
     } else if (deleted > 1 || failed > 0) {
-        printf("%%ODS2-I-TOTAL, %d file%s deleted%s\n", deleted, deleted == 1 ? "" : "s",
+        printf("%%ODS2-I-TOTAL, %d entr%s deleted%s\n", deleted, deleted == 1 ? "y" : "ies",
                failed > 0 ? ", some could not be (see above)" : "");
     }
 }
