@@ -250,6 +250,13 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
     load_scb_volsize(vol);
     if (writable) {
         char fmsg[256];
+        /* Without SCB$L_VOLSIZE nothing bounds the allocator or the writes to the volume (lbn_in_volume,
+           allocate_clusters): such a volume is not written (upstream issue #23, b167ac0, refuses to allocate). */
+        if (vol->volsize == 0) {
+            ods2_dismount(vol);
+            return fail("the storage control block's volume size is 0 or unreadable: the volume can be read, "
+                        "not written");
+        }
         if (ods2_image_footer(vol, fmsg, sizeof(fmsg)) == 2) {
             ods2_dismount(vol);
             return fail("a SIMH container footer lies inside the volume (the last block may be lost): the "

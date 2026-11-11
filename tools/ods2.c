@@ -3685,6 +3685,10 @@ int main(int argc, char **argv)
     }
     if (r.ok && footer_state == 2) {
         /* already told: read-only */
+    } else if (r.ok && vol.volsize == 0) {
+        /* without the volume size nothing bounds a write to the volume (upstream issue #23) */
+        fprintf(stderr, "%%ODS2-W-READONLY, %s: the storage control block's volume size is 0 or unreadable; "
+                        "mounted read-only\n", argv[1]);
     } else if (r.ok && vol.version0) {
         fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version is 0; "
                         "mounted read-only\n", argv[1]);

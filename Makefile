@@ -331,6 +331,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_lock_check.sh
 	@echo "--- cli_volume_end_check ---"
 	@sh tests/cli_volume_end_check.sh
+	@echo "--- cli_volsize_zero_check ---"
+	@sh tests/cli_volsize_zero_check.sh
 	@echo "--- cli_stream_attrs_check ---"
 	@sh tests/cli_stream_attrs_check.sh
 	@echo "--- cli_dirname_check ---"
@@ -390,5 +392,5 @@ clean:
 	rm -f samples/synthetic_disk.img samples/synthetic_disk_working.img samples/synthetic_disk_v0.img
 	rm -f samples/versions_disk.img samples/versions_cli_disk.img samples/cli_wildcard_disk.img samples/cli_loop_disk.img samples/file_alloc_disk.img samples/dir_order_disk.img samples/dir_eof_disk.img samples/large_file_disk.img samples/cli_status_disk.img samples/cli_attrs_disk.img samples/record_attrs_disk.img samples/indexf_large_disk.img samples/text_var_disk.img samples/cli_label_disk.img samples/cli_label_orig.img samples/verlimit_disk.img samples/fid_disk.img samples/integrity_disk.img samples/cli_verlimit_disk.img samples/cli_lock_disk.img
 	rm -f samples/cli_volend_disk.img samples/cli_volend_disk.img.bitmap
-	rm -rf samples/cli_stream_tmp samples/cli_dirname_tmp samples/cli_volend_tmp
+	rm -rf samples/cli_stream_tmp samples/cli_dirname_tmp samples/cli_volend_tmp samples/cli_volsize0_tmp
 	rm -f $(TOOLS) ods2_fault ods2_deep_make
