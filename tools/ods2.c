@@ -3086,8 +3086,9 @@ static void delete_wildcard(ods2_volume_t *vol, const uint8_t *dir_header, ods2_
        reach across the type delimiter, or FOO.*;* would take FOO.TAR.GZ (name FOO.TAR). With no type given the
        type is the null type, as for one file (DELETE README is README.) and as VMS applies no default type
        (review 26 F1): READM%;* is README.;*, not README.*;*. In the spelling the one unescaped dot is the
-       delimiter; in the stored literal name, the last dot. */
-    dot = ods5_find_unescaped(p->filename, '.');
+       delimiter (the last one if more are typed, as the one-file path reads it); in the stored literal name, the
+       last dot. */
+    dot = ods5_rfind_unescaped(p->filename, '.');
     if (dot == NULL) {
         snprintf(pat_name, sizeof(pat_name), "%s", p->filename);
         pat_type[0] = '\0';

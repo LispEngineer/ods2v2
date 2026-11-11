@@ -64,6 +64,11 @@ check "FOO.*;* deletes FOO.TXT only" 1 "$(echo "$out" | grep -c '^%ODS2-I-DELETE
 check "...FOO^.TAR.GZ stays" 1 "$(names "$D" '[000000]FOO^.TAR.GZ;*' | wc -w)"
 out=$("$ODS2" "$D" "DELETE [000000]*.T*;*" 2>&1)
 check "*.T*;* takes no .GZ file" 0 "$(echo "$out" | grep -c '^%ODS2-I-DELETED')"
+"$ODS2" "$D" "COPY $TMP/a.txt [000000]FOO^.TAR.Z" >/dev/null 2>&1
+out=$("$ODS2" "$D" "DELETE [000000]FOO.TAR.*;*" 2>&1)
+check "FOO.TAR.*;* (two unescaped dots: the last is the delimiter) deletes FOO^.TAR.GZ and FOO^.TAR.Z" 2 \
+    "$(echo "$out" | grep -c '^%ODS2-I-DELETED')"
+"$ODS2" "$D" "COPY $TMP/a.txt [000000]FOO^.TAR.GZ" >/dev/null 2>&1
 out=$("$ODS2" "$D" "DELETE [000000]NO*;*" 2>&1)
 check "NO*;* (the null type) deletes NOTYPE." 1 "$(echo "$out" | grep -c '^%ODS2-I-DELETED')"
 out=$("$ODS2" "$D" "DELETE [000000]*^.TAR.GZ;*" 2>&1)
