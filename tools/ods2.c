@@ -468,9 +468,9 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
     hiblk = ods2_word_swap32(core->recattr.hiblk);
     efblk = ods2_word_swap32(core->recattr.efblk);
     (void) efblk;
-    printf("  Size:               %zu/%u blocks, %zu bytes\n",
-           (ods2_file_content_length(header) + 511) / 512, (unsigned) hiblk,
-           ods2_file_content_length(header));
+    printf("  Size:               %llu/%u blocks, %llu bytes\n",
+           (unsigned long long) ((ods2_file_content_length(header) + 511) / 512), (unsigned) hiblk,
+           (unsigned long long) ods2_file_content_length(header));
     printf("  Owner:              [%o,%o]\n", core->fileowner_uic[1], core->fileowner_uic[0]);
     protection_text((core->fileprot >> 0) & 15, s_);
     protection_text((core->fileprot >> 4) & 15, o_);
@@ -557,7 +557,8 @@ static void print_full_entry(ods2_volume_t *vol, const ods2_dir_entry_t *e)
         printf("  Special file:       %s\n", special < 6 ? kinds[special] : "(unknown type)");
         if (special == ODS5_FAT_SYMBOLIC_LINK || special == ODS5_FAT_SYMLINK) {
             uint8_t target[1100];
-            size_t got = 0, len = ods2_file_content_length(header);
+            size_t got = 0;
+            uint64_t len = ods2_file_content_length(header);
             if (len > 0 && len < sizeof(target) - 1 &&
                 ods2_read_file(vol, header, target, sizeof(target) - 1, &got).ok) {
                 char lit[2400];
@@ -1099,7 +1100,7 @@ static bool rec_feed_sink(void *ctx, const uint8_t *data, size_t n)
 static ods2_result_t read_file_content(ods2_volume_t *vol, const uint8_t *header, bool records,
                                        unsigned rec_options,
                                        bool (*sink)(void *ctx, const uint8_t *data, size_t n), void *ctx,
-                                       size_t *bytes_out, bool *sink_failed_out, const char **note)
+                                       uint64_t *bytes_out, bool *sink_failed_out, const char **note)
 {
     const ods2_head_core_t *core = (const ods2_head_core_t *) header;
     ods2_rec_decoder_t *d;
@@ -1306,7 +1307,8 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
     if (special != 0) {      /* a symbolic link: the data is the target text */
         uint8_t target[1100];
         char lit[2400];
-        size_t got = 0, len = ods2_file_content_length(header);
+        size_t got = 0;
+        uint64_t len = ods2_file_content_length(header);
         if (len == 0 || len >= sizeof(target) ||
             !ods2_read_file(vol, header, target, sizeof(target), &got).ok ||
             ods5_isl1_to_utf8(target, got, lit, sizeof(lit)) == (size_t) -1) {
@@ -1336,7 +1338,7 @@ static void export_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
         int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0666);
         FILE *f = fd >= 0 ? fdopen(fd, "wb") : NULL;
         file_sink_t sink;
-        size_t bytes = 0;
+        uint64_t bytes = 0;
         bool sink_failed = false;
 
         if (f == NULL) {
@@ -1710,6 +1712,48 @@ static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p
     warn_deep(vol, parent_header, effective_path, true, NULL, NULL);
 }
 
+/* The image being worked on (argv[1]): its directory is the second place a spool file may go. */
+static const char *g_image_path = NULL;
+
+/* An anonymous temporary file (made, then unlinked at once) for input that has no length to go by. It goes in $TMPDIR, else in
+   the image's directory; never in /tmp by default (tmpfile() ignores TMPDIR and uses /tmp, a RAM disk on many hosts). On failure
+   `*tried` says what was tried. */
+static FILE *spool_create(char *tried, size_t tried_cap)
+{
+    const char *tmpdir = getenv("TMPDIR");
+    char imgdir[ODS2_PATH_MAX];
+    const char *dirs[2];
+    size_t n = 0, i, used = 0;
+
+    tried[0] = '\0';
+    if (tmpdir != NULL && tmpdir[0] != '\0') dirs[n++] = tmpdir;
+    if (g_image_path != NULL) {
+        const char *slash = strrchr(g_image_path, '/');
+        if (slash == NULL) snprintf(imgdir, sizeof(imgdir), ".");
+        else if (slash == g_image_path) snprintf(imgdir, sizeof(imgdir), "/");
+        else snprintf(imgdir, sizeof(imgdir), "%.*s", (int) (slash - g_image_path), g_image_path);
+        dirs[n++] = imgdir;
+    }
+    for (i = 0; i < n; i++) {
+        char path[ODS2_PATH_MAX + 32];
+        int fd;
+        FILE *f;
+        snprintf(path, sizeof(path), "%s/ods2-spool-XXXXXX", dirs[i]);
+        fd = mkstemp(path);
+        if (fd < 0) {
+            used += (size_t) snprintf(tried + used, used < tried_cap ? tried_cap - used : 0, "%s%s: %s", i ? "; " : "", dirs[i],
+                                      strerror(errno));
+            continue;
+        }
+        unlink(path);
+        f = fdopen(fd, "w+b");
+        if (f == NULL) { close(fd); continue; }
+        return f;
+    }
+    if (n == 0) snprintf(tried, tried_cap, "no directory to use (TMPDIR is not set)");
+    return NULL;
+}
+
 /* A host file opened for COPY, read in order a chunk at a time
    rather than all at once (issue #16). `length` is known before
    anything is allocated on the volume: from the file itself if it is
@@ -1718,7 +1762,7 @@ static void cmd_create_directory(ods2_volume_t *vol, const ods2_parsed_path_t *p
 typedef struct {
     FILE *f;
     const char *path;
-    size_t length;
+    uint64_t length;
     char problem[256];
 } host_input_t;
 
@@ -1731,8 +1775,8 @@ static bool host_input_read(void *ctx_, uint8_t *buf, size_t n)
         snprintf(in->problem, sizeof(in->problem), "error reading %s", in->path);
     } else {
         snprintf(in->problem, sizeof(in->problem),
-                 "%s became shorter while being copied (expected %zu bytes)",
-                 in->path, in->length);
+                 "%s became shorter while being copied (expected %llu bytes)",
+                 in->path, (unsigned long long) in->length);
     }
     return false;
 }
@@ -1763,18 +1807,20 @@ static bool host_input_open(const char *path, host_input_t *in)
     }
     if (fstat(fileno(f), &st) == 0 && S_ISREG(st.st_mode)) {
         in->f = f;
-        in->length = (size_t) st.st_size;
+        in->length = (uint64_t) st.st_size;
         return true;
     }
     /* No length to go by: spool it to a temporary file first. */
     {
         static uint8_t buf[1 << 16];
-        FILE *spool = tmpfile();
-        size_t n, total = 0;
+        char tried[ODS2_PATH_MAX * 2 + 64];
+        FILE *spool = spool_create(tried, sizeof(tried));
+        size_t n;
+        uint64_t total = 0;
 
         if (spool == NULL) {
             report_error("%%ODS2-E-OPENIN, could not create a temporary file to "
-                         "hold %s: %s\n", path, strerror(errno));
+                         "hold %s (tried $TMPDIR, then the image's directory): %s\n", path, tried);
             fclose(f);
             return false;
         }
@@ -1795,7 +1841,7 @@ static bool host_input_open(const char *path, host_input_t *in)
             return false;
         }
         fclose(f);
-        if (fflush(spool) != 0 || fseek(spool, 0, SEEK_SET) != 0) {
+        if (fflush(spool) != 0 || fseeko(spool, 0, SEEK_SET) != 0) {
             report_error("%%ODS2-E-READERR, could not reread the temporary copy of %s\n",
                          path);
             fclose(spool);
@@ -2121,11 +2167,11 @@ static bool scan_host_file(FILE *f, host_stats_t *s)
     if (cur > s->longest_lf) s->longest_lf = cur;
     s->longest_crlf = ods2_reclen_longest(&stm);
     if (cur_cr > s->longest_cr) s->longest_cr = cur_cr;
-    return fseek(f, 0, SEEK_SET) == 0;
+    return fseeko(f, 0, SEEK_SET) == 0;
 }
 
 /* Sets `attrs` for the host file `f` of `length` bytes as described above, or as /FORMAT says. */
-static bool choose_format(const copy_options_t *opts, FILE *f, size_t length, ods2_record_attrs_t *attrs,
+static bool choose_format(const copy_options_t *opts, FILE *f, uint64_t length, ods2_record_attrs_t *attrs,
                           bool *partial_fix, const char *path)
 {
     host_stats_t s;
@@ -2178,7 +2224,7 @@ static bool choose_format(const copy_options_t *opts, FILE *f, size_t length, od
  * is the longest line of the host file (LF, CR LF or CR ends as the format says) and MRS is 0 unless it was given; for an
  * undefined-format file LRL is the length. A size the user gave that is smaller than a line of the file is refused: RMS
  * would refuse to read such a file back (%RMS-W-RTB, record too large for the user's buffer). */
-static bool complete_stream_attrs(const copy_options_t *opts, FILE *f, size_t length, ods2_record_attrs_t *attrs,
+static bool complete_stream_attrs(const copy_options_t *opts, FILE *f, uint64_t length, ods2_record_attrs_t *attrs,
                                   const char *path)
 {
     host_stats_t s;
@@ -2262,7 +2308,7 @@ static bool convert_scan(host_input_t *in, ods2_text_var_scan_t *scan)
                      ODS2_VAR_MAX_RECORD);
         return false;
     }
-    if (fseek(in->f, 0, SEEK_SET) != 0) {
+    if (fseeko(in->f, 0, SEEK_SET) != 0) {
         report_error("%%ODS2-E-READERR, could not reread %s\n", in->path);
         return false;
     }
@@ -2390,8 +2436,8 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
                          local_file);
         } else if (grew) {
             fprintf(stderr, "%%ODS2-W-CHANGED, %s grew while being copied; only its "
-                    "first %zu bytes were written - copy it again\n",
-                    local_file, in.length);
+                    "first %llu bytes were written - copy it again\n",
+                    local_file, (unsigned long long) in.length);
         }
     }
     ods2_text_var_encoder_free(conv.enc);
@@ -2415,11 +2461,11 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
             snprintf(stored, sizeof(stored), "%s", name);
         }
         if (opts->convert) {
-            printf("%%ODS2-I-COPIED, %zu bytes to %s;1 as %zu variable-length "
-                   "record%s (longest %zu)\n", in.length, stored, scan.records,
+            printf("%%ODS2-I-COPIED, %llu bytes to %s;1 as %zu variable-length "
+                   "record%s (longest %zu)\n", (unsigned long long) in.length, stored, scan.records,
                    scan.records == 1 ? "" : "s", scan.longest);
         } else {
-            printf("%%ODS2-I-COPIED, %zu bytes to %s;1\n", in.length, stored);
+            printf("%%ODS2-I-COPIED, %llu bytes to %s;1\n", (unsigned long long) in.length, stored);
         }
     }
 }
@@ -3026,14 +3072,14 @@ static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw, 
        the file got less than all of it. */
     {
         bool sink_failed = false;
-        size_t bytes = 0;
+        uint64_t bytes = 0;
         const char *note = NULL;
         r = read_file_content(vol, file_header, !raw, lines ? ODS2_REC_LINES : 0, stdout_sink, NULL, &bytes, &sink_failed, &note);
         if (r.ok && fflush(stdout) != 0) sink_failed = true;
         if (note != NULL && r.ok && !sink_failed) fprintf(stderr, "%%ODS2-W-RECORDS, %s: %s\n", spec, note);
         if (sink_failed) {
-            report_error("%%ODS2-E-WRITEERR, %s: could not write all %zu bytes to output\n",
-                         spec, ods2_file_content_length(file_header));
+            report_error("%%ODS2-E-WRITEERR, %s: could not write all %llu bytes to output\n",
+                         spec, (unsigned long long) ods2_file_content_length(file_header));
         } else if (!r.ok) {
             report_error("%%ODS2-E-READERR, %s: %s\n", spec, r.problem);
         }
@@ -3784,6 +3830,7 @@ int main(int argc, char **argv)
 
     /* A structure version 0 volume (e.g. the OpenVMS Alpha V8.4 CD)
        is mounted for reading only, so look before opening for write. */
+    g_image_path = argv[1];
     r = ods2_mount(argv[1], &vol);
     if (r.ok) {
         char scb_msg[512];

@@ -223,11 +223,11 @@ ods2_result_t ods2_read_file(ods2_volume_t *vol, const uint8_t *header,
    (ods2_read_file() rejects that), so callers allocating from it
    should check against HIBLK * 512 first - see
    ods2_file_allocated_bytes(). */
-size_t ods2_file_content_length(const uint8_t *header);
+uint64_t ods2_file_content_length(const uint8_t *header);
 
 /* Returns the number of bytes the file's allocation can hold:
    FAT$L_HIBLK * 512. */
-size_t ods2_file_allocated_bytes(const uint8_t *header);
+uint64_t ods2_file_allocated_bytes(const uint8_t *header);
 
 /* Finds a free file number for a new file, and the file sequence
    number to give it, following spec 5.1.6/5.1.7: the number comes from
@@ -460,7 +460,7 @@ ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_h
 #define ODS2_STREAM_CHUNK (1u << 20)
 
 typedef struct {
-    size_t length;
+    uint64_t length;   /* bytes in all (a file may exceed what size_t holds on a 32-bit host) */
     bool (*read)(void *ctx, uint8_t *buf, size_t n);
     void *ctx;
     const char *problem;
@@ -497,7 +497,7 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
  * *bytes_out (if non-NULL) is how much reached the sink. */
 ods2_result_t ods2_read_file_stream(ods2_volume_t *vol, const uint8_t *header,
                                      bool (*sink)(void *ctx, const uint8_t *data, size_t n),
-                                     void *ctx, size_t *bytes_out, bool *sink_failed_out);
+                                     void *ctx, uint64_t *bytes_out, bool *sink_failed_out);
 
 /* The geometry (sectors x tracks) device type `target` (ld, ra, ra82, ra92, rq, scsi, axpbox, rz) reports for a
  * volume of `blocks` blocks; *measured is false for a size that was not measured (a prediction). False: unknown target. */

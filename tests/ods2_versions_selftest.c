@@ -424,6 +424,22 @@ int main(void)
         assert(ods2_file_content_length(hdr) == 0);
         r = ods2_read_file(&vol, hdr, block, sizeof(block), &n);
         assert(r.ok && n == 0);
+        /* the lengths are 64-bit whatever size_t is: EOF above 4 GiB and above 2^31 bytes (LARGE_VOLUMES.md 7) */
+        {
+            uint8_t big[512];
+            ods2_head_core_t *bc = (ods2_head_core_t *) big;
+            memcpy(big, hdr, sizeof(big));
+            bc->recattr.efblk = ods2_word_swap32(0x00800001u);          /* (2^23 + 1 - 1) blocks + FFBYTE */
+            bc->recattr.ffbyte = 1;
+            bc->recattr.hiblk = ods2_word_swap32(0x00800002u);
+            assert(ods2_file_content_length(big) == 4294967297ull);       /* 4 GiB + 1 */
+            assert(ods2_file_allocated_bytes(big) == 4294968320ull);
+            bc->recattr.hiblk = ods2_word_swap32(0xFFFFFFFFu);
+            bc->recattr.efblk = ods2_word_swap32(0xFFFFFFFFu);
+            bc->recattr.ffbyte = 511;
+            assert(ods2_file_content_length(big) == 2199023255039ull);    /* 2^32 - 2 blocks + 511 bytes */
+            assert(ods2_file_allocated_bytes(big) == 2199023255040ull);   /* 2^32 - 1 blocks */
+        }
         r = ods2_read_header(&vol, 4, hdr);                 /* 000000.DIR: EFBLK 2, FFBYTE 0 */
         assert(r.ok);
         assert(ods2_file_content_length(hdr) == 512);

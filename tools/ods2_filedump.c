@@ -51,7 +51,7 @@ int main(int argc, char **argv)
     for (n = first; n <= last; n++) {
         const ods2_head_core_t *c = (const ods2_head_core_t *) h;
         const char *status = "OK";
-        size_t len = 0;
+        uint64_t len = 0;
         uint16_t stored;
         bool is_dir;
 
@@ -63,25 +63,25 @@ int main(int argc, char **argv)
         else if (is_dir) status = "DIR";
         len = ods2_file_content_length(h);
         if (strcmp(status, "OK") == 0 && !content) status = "NOCONTENT";
-        printf("F %u %u %u %x %u %u %u %u %u %u %u %u %zu ", n, (unsigned) c->fid.fid_seq, (unsigned) (c->struclev >> 8),
+        printf("F %u %u %u %x %u %u %u %u %u %u %u %u %llu ", n, (unsigned) c->fid.fid_seq, (unsigned) (c->struclev >> 8),
                (unsigned) c->filechar, (unsigned) c->recattr.rtype, (unsigned) c->recattr.rattrib,
                (unsigned) c->recattr.rsize, (unsigned) c->recattr.maxrec, (unsigned) c->recattr.vfcsize,
                (unsigned) ods2_word_swap32(c->recattr.hiblk), (unsigned) ods2_word_swap32(c->recattr.efblk),
-               (unsigned) c->recattr.ffbyte, len);
+               (unsigned) c->recattr.ffbyte, (unsigned long long) len);
         if (strcmp(status, "OK") == 0) {
             /* the length is known; the content follows only if it can be read whole */
-            size_t got = 0;
+            uint64_t got = 0;
             bool failed = false;
             fputs("OK\n", stdout);
             fflush(stdout);
             r = ods2_read_file_stream(&vol, h, sink, NULL, &got, &failed);
             if (!r.ok || got != len) {
                 /* the header said OK and some bytes may be out: pad so the reader stays in step */
-                size_t pad = len - got;
+                uint64_t pad = len - got;
                 static const uint8_t zero[4096];
-                fprintf(stderr, "file %u: %s (%zu of %zu bytes)\n", n, r.ok ? "short" : r.problem, got, len);
+                fprintf(stderr, "file %u: %s (%llu of %llu bytes)\n", n, r.ok ? "short" : r.problem, (unsigned long long) got, (unsigned long long) len);
                 while (pad > 0) {
-                    size_t k = pad < sizeof(zero) ? pad : sizeof(zero);
+                    size_t k = pad < sizeof(zero) ? (size_t) pad : sizeof(zero);
                     fwrite(zero, 1, k, stdout);
                     pad -= k;
                 }

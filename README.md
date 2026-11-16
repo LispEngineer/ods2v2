@@ -620,8 +620,8 @@ in every structural test.
   free space - up to 1,024 pieces. `COPY` and `TYPE` stream the
   content in 1 MiB chunks, so memory use stays flat however large the
   file. Input with no length to go by (a pipe, `/dev/stdin`) is first
-  copied to a temporary file (in `$TMPDIR`, or `/tmp`), so that needs
-  room for it. Directories still grow only within one header.
+  copied to a temporary file (in `$TMPDIR`, else in the image's directory, never
+  in `/tmp`; it is unlinked at once), so that needs room for it. Directories still grow only within one header.
 - No INITIALIZE command (formatting a *new* volume from scratch) - see
   `samples/README.md` for why that's a deliberate choice (it's complicated)
   and how to get a real, ready-to-use volume instead.

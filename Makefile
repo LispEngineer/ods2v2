@@ -14,7 +14,7 @@
 # dependencies everywhere - no separate install step on any platform.
 
 CC       = gcc
-CFLAGS   = -Wall -Wextra -std=c11 -Iinclude -g
+CFLAGS   = -Wall -Wextra -std=c11 -Iinclude -g -D_FILE_OFFSET_BITS=64
 SANFLAGS = -fsanitize=address,undefined
 BUILD    = build
 
@@ -343,6 +343,10 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_dirname_check.sh
 	@echo "--- cli_escdot_check ---"
 	@sh tests/cli_escdot_check.sh
+	@echo "--- cli_spool_check ---"
+	@sh tests/cli_spool_check.sh
+	@echo "--- cli_hugevol_check ---"
+	@sh tests/cli_hugevol_check.sh
 	@echo "--- cli_ods5_integrity_check ---"
 	@sh tests/cli_ods5_integrity_check.sh
 	@echo "--- cli_deep_check (trees deeper than 255 levels) ---"
