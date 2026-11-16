@@ -649,8 +649,11 @@ in every structural test.
   name and entry count, never cut silently). `EXPORT` copies what the host's 4,096-character path limit allows and names
   every file or directory it could not copy (and counts the rest); the exit status is 1. On an ODS-2 volume
   `CREATE/DIRECTORY` and `IMPORT` also warn from the 8th level below [000000], which OpenVMS VAX V7.3 cannot reach
-  (`%RMS-F-DIR`; Alpha V7.3-2 and later can). A file with more than 1,024 extents, or a header chain with more than 64
-  segments, is refused (read and delete) rather than handled partly.
+  (`%RMS-F-DIR`; Alpha V7.3-2 and later can). A file's extents and extension headers are not limited (up to the
+  65,535 headers of FH2$W_SEG_NUM; reading, deleting and creating a file in thousands of pieces works); the directories
+  and the bitmap file keep arrays of 1,024 extents and refuse, with a message, a file with more rather than use part of
+  it. A directory of 32 blocks or more is searched by halving its blocks (a name lookup reads about log2(blocks) blocks);
+  a directory is still read whole for each insert or delete.
 - `ods2_init` gives BADBLK.SYS the blocks past the last whole cluster when the size is not a multiple of the cluster, as VMS
   INITIALIZE does (V8.4 ANALYZE reports `ALLOCCLR` and `FREESPADRIFT` for a volume that leaves them to nobody);
   `SET VOLUME/PARTIAL_CLUSTER` does the same for a volume made by an older `ods2_init`, and `ods5check.py` warns of one.

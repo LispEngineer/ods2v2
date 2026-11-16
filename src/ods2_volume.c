@@ -1099,8 +1099,8 @@ static unsigned dir_blocks_in_use(const uint8_t *dir_header, unsigned allocated)
     return (used > allocated) ? allocated : (unsigned) used;
 }
 
-static ods2_result_t walk_directory(ods2_volume_t *vol, const uint8_t *dir_header,
-                                    dir_visit_fn visit, void *ctx)
+static ods2_result_t walk_directory_from(ods2_volume_t *vol, const uint8_t *dir_header, unsigned first_block,
+                                         dir_visit_fn visit, void *ctx)
 {
     ods2_extent_t extents[ODS2_MAX_EXTENTS];
     int extent_count;
@@ -1117,7 +1117,7 @@ static ods2_result_t walk_directory(ods2_volume_t *vol, const uint8_t *dir_heade
        further, so neither does this: DIR shows what VMS will find. */
     total_blocks = dir_blocks_in_use(dir_header, total_blocks);
 
-    for (block_index = 1; block_index <= total_blocks; block_index++) {
+    for (block_index = first_block < 1 ? 1 : first_block; block_index <= total_blocks; block_index++) {
         uint8_t block[512];
         ods2_dir_entry_t block_entries[ODS2_DIR_MAX_ENTRIES_PER_BLOCK];
         int n;
@@ -1144,6 +1144,55 @@ static ods2_result_t walk_directory(ods2_volume_t *vol, const uint8_t *dir_heade
             if (!visit(&block_entries[i], ctx)) return ok();
         }
     }
+    return ok();
+}
+
+static ods2_result_t walk_directory(ods2_volume_t *vol, const uint8_t *dir_header,
+                                    dir_visit_fn visit, void *ctx)
+{
+    return walk_directory_from(vol, dir_header, 1, visit, ctx);
+}
+
+/* A directory of this many blocks or more is searched by halving (a name lookup reads about log2(blocks) blocks, not all of
+   them): its blocks are sorted by name, as every directory VMS or this program makes is (the version lookup already stops
+   at the first name past the one it wants). Smaller ones are walked whole as before. */
+#define ODS2_DIR_BSEARCH_MIN 32u
+
+/* Where a walk for `name` may start: the last block whose first record's name sorts before `name` (every record of `name`
+   is in it or after it); 1 when the directory is small or a probed block holds no records (an unusual layout: no
+   shortcut). *sorted says the search was used, so a visitor may stop at the first name past `name`. */
+static ods2_result_t dir_search_start(ods2_volume_t *vol, const uint8_t *dir_header, const char *name,
+                                      unsigned *start_out, bool *sorted_out)
+{
+    ods2_extent_t extents[ODS2_MAX_EXTENTS];
+    int extent_count, i;
+    unsigned total = 0, lo, hi;
+    ods2_result_t r;
+
+    *start_out = 1;
+    *sorted_out = false;
+    r = ods2_decode_all_extents(vol, dir_header, extents, ODS2_MAX_EXTENTS, &extent_count);
+    if (!r.ok || extent_count <= 0) return ok();           /* the walk itself reports it */
+    for (i = 0; i < extent_count; i++) total += extents[i].block_count;
+    total = dir_blocks_in_use(dir_header, total);
+    if (total < ODS2_DIR_BSEARCH_MIN) return ok();
+    lo = 1;
+    hi = total;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo + 1) / 2, bad = 0;
+        uint8_t block[512];
+        ods2_dir_entry_t e[ODS2_DIR_MAX_ENTRIES_PER_BLOCK];
+        int n;
+        r = ods2_read_file_block(vol, dir_header, mid, block);
+        if (!r.ok) return ok();
+        n = ods2_parse_directory_records(block, sizeof(block), vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, e,
+                                         ODS2_DIR_MAX_ENTRIES_PER_BLOCK, &bad);
+        if (n <= 0 || bad != 0) return ok();                /* an empty or damaged block: walk it all */
+        if (ods2_dir_name_compare(e[0].name, strlen(e[0].name), name, strlen(name)) < 0) lo = mid;
+        else hi = mid - 1;
+    }
+    *start_out = lo;
+    *sorted_out = true;
     return ok();
 }
 
@@ -2052,6 +2101,7 @@ typedef struct {
     const char *name;
     ods2_fid_t fid;
     bool found;
+    bool sorted;        /* the walk started by halving: stop at the first name that sorts past `name` */
 } lookup_ctx_t;
 
 static bool visit_lookup(const ods2_dir_entry_t *entry, void *ctx_)
@@ -2059,13 +2109,13 @@ static bool visit_lookup(const ods2_dir_entry_t *entry, void *ctx_)
     lookup_ctx_t *ctx = (lookup_ctx_t *) ctx_;
     /* Case-insensitive compare - VMS names are conventionally
        uppercase on disk, but callers may pass either case. */
-    if (ods2_dir_name_compare(entry->name, strlen(entry->name),
-                              ctx->name, strlen(ctx->name)) == 0) {
+    int c = ods2_dir_name_compare(entry->name, strlen(entry->name), ctx->name, strlen(ctx->name));
+    if (c == 0) {
         ctx->fid = entry->fid;
         ctx->found = true;
         return false; /* stop walking */
     }
-    return true;
+    return !(ctx->sorted && c > 0);
 }
 
 ods2_result_t ods2_lookup_name(ods2_volume_t *vol, const uint8_t *dir_header,
@@ -2076,11 +2126,15 @@ ods2_result_t ods2_lookup_name(ods2_volume_t *vol, const uint8_t *dir_header,
        buffer here, so any name sorting after the 256th entry of its
        directory was silently reported as "not found". */
     lookup_ctx_t ctx;
+    unsigned start;
     ods2_result_t r;
 
     ctx.name = name;
     ctx.found = false;
-    r = walk_directory(vol, dir_header, visit_lookup, &ctx);
+    ctx.sorted = false;
+    r = dir_search_start(vol, dir_header, name, &start, &ctx.sorted);
+    if (!r.ok) return r;
+    r = walk_directory_from(vol, dir_header, start, visit_lookup, &ctx);
     if (!r.ok) return r;
     if (!ctx.found) return fail(ODS2_NAME_NOT_FOUND);
     *fid_out = ctx.fid;
@@ -2105,6 +2159,7 @@ typedef struct {
     bool found;
     ods2_fid_t fid;
     uint16_t found_version;
+    bool sorted;         /* the walk started by halving: stop at the first name past `name` */
 } version_lookup_ctx_t;
 
 static bool visit_lookup_version(const ods2_dir_entry_t *entry, void *ctx_)
@@ -2115,6 +2170,9 @@ static bool visit_lookup_version(const ods2_dir_entry_t *entry, void *ctx_)
         /* Directories are sorted by name, so every version of a name
            is contiguous (even when split across several records and
            blocks). Once past them there is nothing more to find. */
+        if (ctx->sorted && ods2_dir_name_compare(entry->name, strlen(entry->name), ctx->name, strlen(ctx->name)) > 0) {
+            return false;
+        }
         return !ctx->name_found;
     }
     ctx->name_found = true;
@@ -2146,6 +2204,8 @@ ods2_result_t ods2_lookup_name_version(ods2_volume_t *vol, const uint8_t *dir_he
                                         ods2_fid_t *fid_out, uint16_t *version_out)
 {
     version_lookup_ctx_t ctx;
+    unsigned start;
+    bool sorted;
     ods2_result_t r;
 
     if (version > ODS2_MAX_VERSION || version < -ODS2_MAX_VERSION) {
@@ -2155,7 +2215,10 @@ ods2_result_t ods2_lookup_name_version(ods2_volume_t *vol, const uint8_t *dir_he
     memset(&ctx, 0, sizeof(ctx));
     ctx.name = name;
     ctx.version = version;
-    r = walk_directory(vol, dir_header, visit_lookup_version, &ctx);
+    r = dir_search_start(vol, dir_header, name, &start, &sorted);
+    if (!r.ok) return r;
+    ctx.sorted = sorted;
+    r = walk_directory_from(vol, dir_header, start, visit_lookup_version, &ctx);
     if (!r.ok) return r;
     if (!ctx.name_found) return fail(ODS2_NAME_NOT_FOUND);
     if (!ctx.found) return fail("version not found");
