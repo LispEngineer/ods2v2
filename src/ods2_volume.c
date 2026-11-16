@@ -2157,15 +2157,21 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
     }
     for (attempt = 0; ; attempt++) {
         uint8_t trial[512];
-        r = ods2_allocate_blocks(vol, want, &lbn, &got);
-        if (!r.ok && want > (256u / vol->home.cluster) * vol->home.cluster && want > vol->home.cluster) {
-            want = (256u / vol->home.cluster) * vol->home.cluster; /* no run that long: the smaller step */
-            if (want == 0) want = vol->home.cluster;
+        if (attempt > 0 && !ext_ok) {
+            /* the short piece for the last 4 bytes of map: as long as a Format 1 pointer can say (256 blocks) and a free run
+               below LBN 4,194,304 allows, at least a cluster (review 30 W1) */
+            r = ods2_allocate_extent(vol, want, &lbn, &got);
+        } else {
             r = ods2_allocate_blocks(vol, want, &lbn, &got);
-        }
-        if (!r.ok && want > vol->home.cluster) {
-            want = vol->home.cluster;
-            r = ods2_allocate_blocks(vol, want, &lbn, &got);
+            if (!r.ok && want > (256u / vol->home.cluster) * vol->home.cluster && want > vol->home.cluster) {
+                want = (256u / vol->home.cluster) * vol->home.cluster; /* no run that long: the smaller step */
+                if (want == 0) want = vol->home.cluster;
+                r = ods2_allocate_blocks(vol, want, &lbn, &got);
+            }
+            if (!r.ok && want > vol->home.cluster) {
+                want = vol->home.cluster;
+                r = ods2_allocate_blocks(vol, want, &lbn, &got);
+            }
         }
         if (!r.ok) return r;
         /* what the last header becomes, in memory */
@@ -2178,10 +2184,16 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
         }
         /* The pointer does not fit the last header (a Format 2 pointer needs 6 bytes; an index file stuck like this by an
            older version, review 27 F1), or it fits and the header must get its extension header but the piece has no
-           free slot for it (a piece of one block has only the new file's own): a short piece of 2 blocks or more takes a
-           Format 1 pointer (4 bytes) when its blocks lie below LBN 4,194,304, and the extension header is made in it. */
+           free slot for it (a piece of one block has only the new file's own): a short piece takes a Format 1 pointer (4 bytes)
+           when its blocks lie below LBN 4,194,304 (2 blocks or more, and the extension header is made in it, under the test
+           hook; up to 256 blocks without it). */
         ods2_free_blocks(vol, lbn, got);
-        want = (2u + vol->home.cluster - 1) / vol->home.cluster * vol->home.cluster;
+        if (ext_ok) {
+            want = (2u + vol->home.cluster - 1) / vol->home.cluster * vol->home.cluster;   /* the new file's slot and the header's */
+        } else {
+            want = (256u / vol->home.cluster) * vol->home.cluster;                         /* no extension header: as long as it can be */
+            if (want == 0) want = vol->home.cluster;
+        }
     }
     if (!fits) {
         /* Still no room: a header slot for an extension header to carry the pointer cannot be read before the pointer that

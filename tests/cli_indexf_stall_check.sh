@@ -218,7 +218,33 @@ $INIT "$img" 8192 --structure=2 --cluster=1 --maxfiles=1500 --label=NOEXT >/dev/
 out=$(ODS2_TEST_INDEXF=step=2,nomerge,noext $FAULT "$img" "@$TMP/few.ods2" 2>&1)
 check "noext: the full primary map refuses to grow, with the reason (CORPUS 37)" "yes" "$(echo "$out" | grep -q 'does not write INDEXF.SYS extension headers' && echo yes || echo no)"
 check "noext: no extension header was made" "0" "$(chain_length "$img")"
+sum0=$(sha256sum "$img" | cut -d' ' -f1)
+ODS2_TEST_INDEXF=step=2,nomerge,noext $FAULT "$img" "COPY $TMP/empty.txt [000000]REFUSED.TXT" >/dev/null 2>&1
+check "noext: a refused COPY leaves the image byte for byte as it was (sha256)" "$sum0" "$(sha256sum "$img" | cut -d' ' -f1)"
 check "noext: ods5check clean after the refusals" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
+# the last 4 bytes of map buy a Format 1 piece as long as it can be (review 30 W1), not 2 blocks: the growth in 258-block
+# pieces (Format 2, 6 bytes) leaves 4 bytes, and the short piece that takes them is up to 256 blocks
+img="$TMP/w1.img"
+$INIT "$img" 120000 --structure=2 --cluster=1 --maxfiles=$((TOTAL + 2000)) --label=W1 >/dev/null 2>&1
+# (two Format 1 pieces first, so that the Format 2 pieces after them leave 4 bytes: 294 - 8 = 286 = 47 x 6 + 4)
+ODS2_TEST_INDEXF=step=256,nomerge,noext $FAULT "$img" "@$TMP/few.ods2" >/dev/null 2>&1
+ODS2_TEST_INDEXF=step=258,nomerge,noext $FAULT "$img" "@$TMP/make.ods2" >/dev/null 2>&1
+last=$(python3 -I - "$img" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'rb')
+f.seek(512); home = f.read(512)
+ib, ibsz = struct.unpack_from('<I', home, 24)[0], struct.unpack_from('<H', home, 32)[0]
+f.seek((ib + ibsz) * 512); h = f.read(512)
+o = h[1] * 2; end = o + h[58] * 2; cnt = []; fm = []
+while o < end:
+    w = struct.unpack_from('<H', h, o)[0]; fmt = w >> 14
+    if fmt == 1: cnt.append((w & 0xFF) + 1); fm.append(1); o += 4
+    elif fmt == 2: cnt.append((w & 0x3FFF) + 1); fm.append(2); o += 6
+    else: o += 2
+print(cnt[-1], fm[-1], end - h[1] * 2)
+PY
+)
+check "noext: the last piece of a full primary is a long Format 1 piece (count format bytes: $last)" "yes" "$(echo "$last" | awk '{print ($1 > 100 && $2 == 1 && $3 >= 304) ? "yes" : "no"}')"
 img="$TMP/chain.img"
 $INIT "$img" 8192 --structure=2 --cluster=1 --maxfiles=1500 --label=CHAIN >/dev/null 2>&1
 ODS2_TEST_INDEXF=step=2,nomerge $FAULT "$img" "@$TMP/few.ods2" >/dev/null 2>&1
@@ -231,8 +257,10 @@ with open(tmp + '/more2.ods2', 'w') as f:
     for i in range(600):
         f.write('COPY %s/empty.txt [000000]J%04d.TXT\n' % (tmp, i))
 PY
+sumc=$(sha256sum "$img" | cut -d' ' -f1)
 out=$(./ods2 "$img" "@$TMP/more2.ods2" 2>&1)
 check "a plain ods2 does not extend an index file that has extension headers (refused with the reason)" "yes" "$(echo "$out" | grep -q 'does not extend an index file that has extension headers' && echo yes || echo no)"
+check "... and the image is byte for byte as it was (sha256)" "$sumc" "$(sha256sum "$img" | cut -d' ' -f1)"
 check "... and no extension header was made or lost (chain $before)" "$before" "$(chain_length "$img")"
 check "... and ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
 check "ods5check warns of an INDEXF.SYS extension header ods2v2 made (ODS-2; CORPUS 37)" "1" "$(env -u ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT python3 -I tests/ods5check.py "$TMP/chain0.img" 2>&1 | grep -c 'looks like one ods2v2 made')"
