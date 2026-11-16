@@ -26,13 +26,22 @@ rm -rf "$TMP"
 mkdir -p "$TMP"
 head -c 300000 /dev/urandom > "$TMP/f.bin"
 
-for blocks in 2147483632 2147483664 4294967280; do
+for blocks in 2147475456 2147483632 2147483664 4294967280; do
     img="$TMP/h$blocks.img"
-    if ! $INIT "$img" $blocks --structure=5 --label=HUGE >/dev/null 2>&1; then
+    if ! $INIT "$img" $blocks --structure=5 --label=HUGE >/dev/null 2>"$TMP/err"; then
         echo "SKIP: $blocks blocks: the file system cannot hold a sparse image that large"
         rm -f "$img"
         continue
     fi
+    # P1 2: VMS V7.3-2 mounts at most 2,147,475,456 blocks (CORPUS 35.3), V8.4 at most 4,261,348,350 (35.1): a bigger volume is
+    # made, with a warning that says which one will not mount it
+    case $blocks in
+        2147475456) want="0 0" ;;
+        4294967280) want="1 1" ;;
+        *)          want="1 0" ;;
+    esac
+    check "$blocks blocks: the warnings of ods2_init (V7.3-2 limit, V8.4 limit)" "$want" \
+        "$(grep -c 'V7.3-2.*2,147,475,456' "$TMP/err") $(grep -c 'V8.4 mounts at most 4,261,348,350' "$TMP/err")"
     check "$blocks blocks: SHOW VOLUME gives the size, the free blocks are below it" "yes" \
         "$($ODS2 "$img" 'SHOW VOLUME' 2>&1 | awk -v n=$blocks '/Total blocks:/ {t=$3} /Free blocks:/ {f=$3} END {print (t==n && f>0 && f<n) ? "yes" : "no " t " " f}')"
     out=$($ODS2 "$img" "COPY $TMP/f.bin [000000]F.BIN" 2>&1)

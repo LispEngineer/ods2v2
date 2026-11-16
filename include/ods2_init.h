@@ -47,7 +47,8 @@ typedef struct {
     unsigned    level;       /* 2 (ODS-2) or 5 (ODS-5) */
     uint16_t    volchar;     /* HM2$W_VOLCHAR: ODS5_VC_* bits (0x20 ACCESSTIMES, 0x40 HARDLINKS,
                                 0x80 NO_SPECIAL_FILES are valid at level 5 only), NOHIGHWATER ... */
-    unsigned    cluster;     /* cluster factor; 0 = the default for the size */
+    unsigned    cluster;     /* cluster factor; 0 = the default for the size; at most 16,380 (what VMS INITIALIZE accepts) */
+    bool        cluster_over_limit; /* allow 16,381 to 16,383 too (VMS reads and writes such a volume, INITIALIZE does not make it) */
     uint32_t    maxfiles;    /* 0 = the default, blocks / (2 * cluster + 2) */
     bool        security_lw1_given;  /* longword 1 of the security record: security_lw1 instead of 0x220 */
     uint32_t    security_lw1;

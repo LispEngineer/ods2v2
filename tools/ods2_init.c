@@ -33,7 +33,8 @@
  *     --access-dates          HM2$M_ACCESSTIMES (ODS-5)
  *     --no-special-files      HM2$M_NO_SPECIAL_FILES (ODS-5)
  *     --nohighwater           HM2$M_NOHIGHWATER
- *     --cluster=N             cluster factor (default by size)
+ *     --cluster=N             cluster factor (default by size), 1 to 16380 as VMS INITIALIZE; --cluster-over-limit
+ *                             also allows 16381 to 16383 (V8.4 and V7.3-2 mount such a volume, INITIALIZE does not make one)
  *     --maxfiles=N            maximum number of files
  *     --geometry=SECTORS,TRACKS       the disk geometry the storage control block records (default 32,16; 63,255 above 16 GiB)
  *     --security=profile|empty|zero   what SECURITY.SYS holds (default: the profile record VMS writes)
@@ -66,7 +67,7 @@ int main(int argc, char **argv)
     if (argc < 3) {
         fprintf(stderr, "usage: %s <new-image> <size> [--label=NAME] [--structure=2|5] [--hardlinks] "
                         "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N] [--geometry=SECTORS,TRACKS | --target=ld|ra|scsi|axpbox|rz]\n"
-                        "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 16383\n", argv[0]);
+                        "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 16380\n", argv[0]);
         return 2;
     }
     const char *geo_source = NULL;
@@ -122,12 +123,28 @@ int main(int argc, char **argv)
             geo_source = "--geometry";
         }
         else if (starts(argv[i], "--cluster=")) opt.cluster = (unsigned) atoi(argv[i] + 10);
+        else if (strcmp(argv[i], "--cluster-over-limit") == 0) opt.cluster_over_limit = true;
         else if (strcmp(argv[i], "--security=profile") == 0) opt.security = ODS2_INIT_SECURITY_PROFILE;
         else if (strcmp(argv[i], "--security=empty") == 0) opt.security = ODS2_INIT_SECURITY_EMPTY;
         else if (strcmp(argv[i], "--security=zero") == 0) opt.security = ODS2_INIT_SECURITY_ZERO;
         else if (starts(argv[i], "--security-lw1=")) { opt.security_lw1_given = true; opt.security_lw1 = (uint32_t) strtoul(argv[i] + 15, NULL, 0); }
         else if (starts(argv[i], "--maxfiles=")) opt.maxfiles = (uint32_t) strtoul(argv[i] + 11, NULL, 10);
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
+    }
+    if (opt.cluster > 16380 && opt.cluster_over_limit) {
+        fprintf(stderr, "ods2_init: cluster factor %u: VMS INITIALIZE accepts 16,380 at most (V8.4 and V7.3-2: %%INIT-F-BADCLUSTER); "
+                "both mount and write a volume that has it (CORPUS 36, 39), no VMS-made volume does\n", opt.cluster);
+    }
+    if (opt.blocks > 2147475456ULL) {
+        /* measured: V7.3-2 mounts 2,147,475,456 blocks (2^31 - 8192) and refuses one block more, ODS-2 and ODS-5, whoever made
+           the volume (CORPUS 35.3); V8.4 mounts up to 4,261,348,350 and refuses more (35.1); the VAX V7.3 limit is not measured */
+        fprintf(stderr, "ods2_init: %llu blocks: OpenVMS Alpha V7.3-2 mounts a volume of at most 2,147,475,456 blocks and refuses a "
+                "bigger one (%%MOUNT-F-FILESTRUCT)%s\n", (unsigned long long) opt.blocks,
+                opt.blocks > 4261348350ULL ? "" : "; V8.4 mounts it (up to 4,261,348,350 blocks)");
+        if (opt.blocks > 4261348350ULL) {
+            fprintf(stderr, "ods2_init: V8.4 mounts at most 4,261,348,350 blocks and refuses a bigger volume the same way "
+                    "(%%MOUNT-F-FILESTRUCT): no VMS version measured mounts this size\n");
+        }
     }
     r = ods2_initialize(argv[1], &opt);
     if (!r.ok) {

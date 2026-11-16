@@ -618,8 +618,8 @@ means no VMS version has been tried at that size):
 
 | | VMS structure | ods2v2 |
 | :-- | :-- | :-- |
-| volume size | `SCB$L_VOLSIZE` is 32 bits: up to 2^32 - 1 blocks (2 TiB) | `ods2_init`: 8,192 to 2^32 - 16 blocks; which VMS version mounts what is not measured |
-| cluster factor | `HM2$W_CLUSTER` is a word, `HM2$W_IBMAPVBN` = 4c + 1 must fit one: up to 16,383 | `ods2_init --cluster=` up to 16,383; any value is read and written |
+| volume size | `SCB$L_VOLSIZE` is 32 bits: up to 2^32 - 1 blocks (2 TiB) | `ods2_init`: 8,192 to 2^32 - 16 blocks, with a warning above what a VMS version mounts. Measured (ods2v2-made and VMS-made volumes alike): Alpha V7.3-2 mounts up to 2,147,475,456 blocks (2^31 - 8192) and refuses one more (`%MOUNT-F-FILESTRUCT`); Alpha V8.4 mounts up to 4,261,348,350 and refuses more; VAX V7.3 not measured yet |
+| cluster factor | `HM2$W_CLUSTER` is a word, `HM2$W_IBMAPVBN` = 4c + 1 must fit one: up to 16,383. Measured: `INITIALIZE/CLUSTER_SIZE` takes 1 to 16,380 and refuses 16,381 and above (`%INIT-F-BADCLUSTER`) on V8.4 and V7.3-2; both mount and write a volume that has 16,383 | `ods2_init --cluster=` up to 16,380 as VMS; `--cluster-over-limit` allows 16,381 to 16,383 (with a warning); any value is read and written |
 | file numbers | 24 bits (FID_NMX << 16 \| FID_NUM): 16,777,215 | all of them; the allocator skips multiples of 65,536 |
 | file size | `HIBLK`, `EFBLK` are 32 bits: 2^32 - 1 blocks | the same; lengths are 64-bit, seeks are `fseeko` with a 64-bit `off_t` (the build refuses a 32-bit one) |
 | file pieces | one retrieval pointer per piece; extension headers up to 65,535 per file | no limit but memory (reading, deleting, creating); directories and BITMAP.SYS read at most 1,024 pieces |
