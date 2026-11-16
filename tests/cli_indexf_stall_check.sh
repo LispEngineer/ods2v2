@@ -82,6 +82,34 @@ out=$(ODS2_TEST_INDEXF=step=258,nomerge $FAULT "$img" "@$TMP/more.ods2" 2>&1)
 check "and keeps growing: 5,600 more files, none refused" "0" "$(echo "$out" | grep -c '%ODS2-E-')"
 check "stuck volume after the way out: ods5check clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
 
+# the content of a file made while the index file takes its second attempt (review 28 F1): the first piece was zeroed in the
+# change's buffer, given back, and the buffered zeros were written over the new file's content at commit. Compared byte for
+# byte, on the stuck volume (the pointer does not fit) and with one-block pieces on cluster factor 1 (no slot for the header)
+python3 -I - "$TMP" <<'PY'
+import sys
+tmp = sys.argv[1]
+open(tmp + '/c150k.dat', 'wb').write(bytes((i * 7 + 13) % 251 + 1 for i in range(150000)))   # 293 blocks, no zero byte
+open(tmp + '/c1blk.dat', 'wb').write(bytes((i * 5 + 3) % 250 + 1 for i in range(400)))
+PY
+cp "$TMP/stuck0.img" "$TMP/stuckc.img"
+out=$(ODS2_TEST_INDEXF=step=258,nomerge $FAULT "$TMP/stuckc.img" "COPY $TMP/c150k.dat [000000]C150K.DAT" 2>&1)
+rm -f "$TMP/exp"
+./ods2 "$TMP/stuckc.img" "EXPORT [000000]C150K.DAT $TMP/exp" >/dev/null 2>&1
+check "the stuck volume: a 150,000-byte file made while the index file grows reads back identical" "same" "$(cmp -s "$TMP/exp" "$TMP/c150k.dat" && echo same || echo different)"
+check "... and ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/stuckc.img" 2>&1 | tail -1)"
+img="$TMP/oneblk.img"
+$INIT "$img" 8192 --structure=2 --cluster=1 --maxfiles=1500 --label=ONEBLK >/dev/null 2>&1
+i=0
+: > "$TMP/oneblk.ods2"
+while [ $i -lt 300 ]; do i=$((i + 1)); echo "COPY $TMP/c1blk.dat [000000]C$i.DAT" >> "$TMP/oneblk.ods2"; done
+ODS2_TEST_INDEXF=step=1,nomerge $FAULT "$img" "@$TMP/oneblk.ods2" >/dev/null 2>&1
+rm -rf "$TMP/exp1"
+./ods2 "$img" "EXPORT [000000]C*.DAT $TMP/exp1" >/dev/null 2>&1
+bad=0; i=0
+while [ $i -lt 300 ]; do i=$((i + 1)); cmp -s "$TMP/exp1/C$i.DAT" "$TMP/c1blk.dat" || bad=$((bad + 1)); done
+check "cluster factor 1, the index file growing one block at a time: 300 one-block files read back identical" "0" "$bad"
+check "... and ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
+
 # a slot beyond EFBLK that holds INDEXF.SYS's own extension header is never given to a new file, even when its index
 # bitmap bit is clear (review 27 F2 c: the second COPY after an interrupted growth wrote its header over it)
 img="$TMP/guard.img"
