@@ -575,6 +575,8 @@ static ods2_result_t txn_begin(ods2_volume_t *vol)
 
 static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block);
 
+static void bitmap_cache_drop(ods2_volume_t *vol);
+
 /* puts INDEXF.SYS's extent cache back to what it was when the change began (room was made for it then) */
 static void indexf_extents_restore(ods2_volume_t *vol, const struct ods2_txn *t)
 {
@@ -605,10 +607,12 @@ static ods2_result_t txn_end(ods2_volume_t *vol, ods2_result_t r)
             vol->write_failed = true;
             indexf_extents_restore(vol, t);
             vol->idx_highest_valid = false;
+            bitmap_cache_drop(vol);
         }
     } else {
         indexf_extents_restore(vol, t);
         vol->idx_highest_valid = false;
+        bitmap_cache_drop(vol);
     }
     free(t->saved_extents);
     free(t->w);
@@ -698,6 +702,9 @@ void ods2_dismount(ods2_volume_t *vol)
         fclose(vol->fp);
         vol->fp = NULL;
     }
+    free(vol->bm_data);
+    vol->bm_data = NULL;
+    vol->bm_valid = false;
     free(vol->indexf_extents);
     vol->indexf_extents = NULL;
     vol->indexf_extent_cap = 0;
@@ -807,6 +814,19 @@ ods2_result_t ods2_write_file_block(ods2_volume_t *vol, const uint8_t *header,
 /* Shared body of ods2_allocate_blocks() and ods2_allocate_extent():
    with `partial_ok`, settles for the longest free run when none is
    long enough, allocating however many clusters that run holds. */
+/* Bitmaps above this are not kept in memory (a 2 TiB volume with one-block clusters: 512 MiB): each allocation reads
+   them whole, as before. */
+#define ODS2_BITMAP_CACHE_MAX ((size_t) 64 << 20)
+
+static void bitmap_cache_drop(ods2_volume_t *vol)
+{
+    free(vol->bm_data);
+    vol->bm_data = NULL;
+    vol->bm_bytes = 0;
+    vol->bm_hint = 0;
+    vol->bm_valid = false;
+}
+
 static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_needed,
                                        bool partial_ok, uint32_t *lbn_out,
                                        unsigned *blocks_allocated_out)
@@ -817,8 +837,9 @@ static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_neede
     unsigned total_bitmap_blocks = 0;
     unsigned bits_blocks; /* blocks actually holding bitmap bits, excluding the SCB */
     uint8_t *bitmap_data;
+    bool cached = false;
     size_t total_bits, total_bytes;
-    size_t start_cluster, found_clusters;
+    size_t start_cluster, found_clusters, from_bit = 0;
     unsigned clusters_needed = (blocks_needed + vol->home.cluster - 1) / vol->home.cluster;
     ods2_result_t r;
     unsigned i;
@@ -848,7 +869,7 @@ static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_neede
         return fail("BITMAP.SYS is too small to contain both an SCB and bitmap data");
     }
     bits_blocks = total_bitmap_blocks - 1;
-    {
+    if (!(vol->bm_valid && vol->bm_bytes == (size_t) bits_blocks * 512)) {
         /* a damaged BITMAP.SYS header can claim any size: the bitmap of this image
            needs one bit per cluster, so more than a few blocks over that is damage */
         off_t here = ftello(vol->fp);
@@ -868,38 +889,56 @@ static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_neede
     if (vol->volsize != 0 && vol->home.cluster != 0 && total_bits > (size_t) (vol->volsize / vol->home.cluster)) {
         total_bits = (size_t) (vol->volsize / vol->home.cluster);
     }
-    bitmap_data = malloc(total_bytes);
-    if (bitmap_data == NULL) {
-        return fail("could not allocate memory to read the storage bitmap");
-    }
-
-    /* i is a bitmap-data block index (0-based); the corresponding
-       real VBN within BITMAP.SYS is i+2 (i=0 -> VBN 2, the first
-       real bitmap block, skipping VBN 1's SCB). */
-    for (i = 0; i < bits_blocks; i++) {
-        r = ods2_read_file_block(vol, bitmap_header, i + 2, bitmap_data + (size_t) i * 512);
-        if (!r.ok) {
-            free(bitmap_data);
-            return r;
+    if (vol->bm_valid && vol->bm_bytes == total_bytes) {
+        bitmap_data = vol->bm_data;
+        cached = true;
+    } else {
+        bitmap_cache_drop(vol);
+        bitmap_data = malloc(total_bytes);
+        if (bitmap_data == NULL) {
+            return fail("could not allocate memory to read the storage bitmap");
+        }
+        /* i is a bitmap-data block index (0-based); the corresponding
+           real VBN within BITMAP.SYS is i+2 (i=0 -> VBN 2, the first
+           real bitmap block, skipping VBN 1's SCB). */
+        for (i = 0; i < bits_blocks; i++) {
+            r = ods2_read_file_block(vol, bitmap_header, i + 2, bitmap_data + (size_t) i * 512);
+            if (!r.ok) {
+                free(bitmap_data);
+                return r;
+            }
+        }
+        if (total_bytes <= ODS2_BITMAP_CACHE_MAX) {
+            vol->bm_data = bitmap_data;
+            vol->bm_bytes = total_bytes;
+            vol->bm_hint = 0;
+            vol->bm_valid = true;
+            cached = true;
         }
     }
+    /* every cluster below the hint is allocated: first fit starts at its byte (the search is unchanged otherwise) */
+    if (cached) from_bit = (vol->bm_hint / 8) * 8;
+    if (from_bit >= total_bits) from_bit = 0;
 
     if (partial_ok) {
-        if (!ods2_bitmap_find_run(bitmap_data, total_bits, clusters_needed,
+        if (!ods2_bitmap_find_run(bitmap_data + from_bit / 8, total_bits - from_bit, clusters_needed,
                                   &start_cluster, &found_clusters)) {
-            free(bitmap_data);
+            if (!cached) free(bitmap_data);
             return fail("no free space left on the volume");
         }
         clusters_needed = (unsigned) found_clusters;
-    } else if (!ods2_bitmap_find_free(bitmap_data, total_bits, clusters_needed,
+    } else if (!ods2_bitmap_find_free(bitmap_data + from_bit / 8, total_bits - from_bit, clusters_needed,
                                       &start_cluster, &found_clusters)) {
-        free(bitmap_data);
+        if (!cached) free(bitmap_data);
         return fail("no free space found on volume for this allocation");
     }
+    start_cluster += from_bit;
     if (!ods2_bitmap_mark(bitmap_data, total_bits, start_cluster, clusters_needed, true)) {
-        free(bitmap_data);
+        if (!cached) free(bitmap_data);
+        if (cached) bitmap_cache_drop(vol);
         return fail("internal error marking bitmap bits (should be unreachable)");
     }
+    if (cached && start_cluster <= vol->bm_hint) vol->bm_hint = start_cluster + clusters_needed;
 
     /* Write back only the blocks that could have changed covering the bits
        we just marked - rather than the entire potentially large bitmap. Block indices
@@ -913,13 +952,14 @@ static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_neede
             r = ods2_write_file_block(vol, bitmap_header, i + 2,
                                        bitmap_data + (size_t) i * 512);
             if (!r.ok) {
-                free(bitmap_data);
+                if (!cached) free(bitmap_data);
+                if (cached) bitmap_cache_drop(vol);
                 return r;
             }
         }
     }
 
-    free(bitmap_data);
+    if (!cached) free(bitmap_data);
 
     *lbn_out = (uint32_t) (start_cluster * vol->home.cluster);
     *blocks_allocated_out = clusters_needed * vol->home.cluster;
@@ -3937,6 +3977,18 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
             }
             r = ods2_write_file_block(vol, bitmap_header, i + 2, bitmap_block);
             if (!r.ok) return r;
+        }
+    }
+    /* the cache of the bitmap follows (the hint moves down to the first cluster freed) */
+    if (vol->bm_valid) {
+        if ((size_t) (last_block + 1) * 512 <= vol->bm_bytes) {
+            if (!ods2_bitmap_mark(vol->bm_data, vol->bm_bytes * 8, start_cluster, clusters_to_free, false)) {
+                bitmap_cache_drop(vol);
+            } else if (start_cluster < vol->bm_hint) {
+                vol->bm_hint = start_cluster;
+            }
+        } else {
+            bitmap_cache_drop(vol);
         }
     }
 

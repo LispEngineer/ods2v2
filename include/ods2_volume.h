@@ -58,6 +58,12 @@ typedef struct {
     ods2_extent_t *indexf_extents;      /* grown as needed (INDEXF.SYS's primary header and its whole extension chain) */
     size_t         indexf_extent_cap;
     int            indexf_extent_count;
+    /* the storage bitmap of a write mount, read once (bitmaps up to 64 MiB) and kept in step by every allocation and free; the
+       hint is a cluster index below which every cluster is allocated, so a first-fit search starts there */
+    uint8_t       *bm_data;
+    size_t         bm_bytes;            /* bytes of bitmap data (the SCB block is not included) */
+    size_t         bm_hint;
+    bool           bm_valid;
     unsigned       idx_highest;         /* the highest file number marked in use in the index bitmap, when idx_highest_valid: */
     bool           idx_highest_valid;   /* kept by every change to the bitmap, so a create does not read all of it */
     /* A change to the volume (a delete, a create, a link) is made in memory first and written when it is

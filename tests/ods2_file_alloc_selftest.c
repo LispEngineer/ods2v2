@@ -240,6 +240,35 @@ int main(void)
                "EOF past all of them\n");
     }
 
+    /* --- the storage bitmap is kept in memory with a hint (LARGE_VOLUMES.md 3): first fit is unchanged --- */
+    {
+        uint32_t a, b, c, d, e;
+        unsigned na, nb, nc, nd, ne;
+        const unsigned cl = vol.home.cluster;
+        assert(ods2_allocate_blocks(&vol, cl, &a, &na).ok);
+        assert(ods2_allocate_blocks(&vol, cl, &b, &nb).ok);
+        assert(ods2_allocate_blocks(&vol, cl, &c, &nc).ok);
+        assert(b == a + na && c == b + nb);                         /* consecutive: the lowest free cluster each time */
+        assert(ods2_free_blocks(&vol, b, nb).ok);
+        assert(ods2_allocate_blocks(&vol, cl, &d, &nd).ok);
+        assert(d == b);                                             /* the hole below the last allocation is taken first */
+        assert(ods2_free_blocks(&vol, a, na).ok);
+        assert(ods2_free_blocks(&vol, d, nd).ok);
+        assert(ods2_allocate_blocks(&vol, 2 * cl, &e, &ne).ok);
+        assert(e == a && ne == 2 * cl);                             /* two freed neighbours make a run for a request of two */
+        assert(ods2_free_blocks(&vol, e, ne).ok);
+        assert(ods2_free_blocks(&vol, c, nc).ok);
+        /* a failed change puts the cache back with the disk: allocate inside a change that is dropped, then allocate again */
+        ods2_dismount(&vol);
+        assert(ods2_mount_write(DISK_PATH, &vol).ok);
+        assert(ods2_allocate_blocks(&vol, cl, &a, &na).ok);
+        assert(ods2_free_blocks(&vol, a, na).ok);
+        assert(ods2_allocate_blocks(&vol, cl, &b, &nb).ok && b == a);
+        assert(ods2_free_blocks(&vol, b, nb).ok);
+        printf("PASS: with the bitmap cached, allocation is still first fit: holes below the last allocation are taken first, "
+               "freed neighbours join into a run\n");
+    }
+
     ods2_dismount(&vol);
     remove(DISK_PATH);
     printf("\nods2_file_alloc_selftest: all checks passed\n");
