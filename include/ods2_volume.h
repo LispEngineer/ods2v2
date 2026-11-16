@@ -385,6 +385,13 @@ bool ods2_header_is_file(const uint8_t *header, ods2_fid_t fid);
    write. msg describes it. */
 int ods2_image_footer(ods2_volume_t *vol, char *msg, size_t cap);
 
+/* True, with a message, when the image file has fewer blocks than the volume's storage control block says it has (SCB$L_VOLSIZE):
+ * a truncated copy, or a sparse image that was not copied whole. Reads of the missing part come back as errors; a write mount
+ * of such an image is refused (a write past the end would extend the file silently, and the image would then be a different
+ * size than the volume it holds). The volume can be read. False when the size is not known (VOLSIZE 0), when the block that
+ * should be the storage control block is not one (the placeholder of the starter volume: it stays writable) or when it fits. */
+bool ods2_image_short(ods2_volume_t *vol, char *msg, size_t cap);
+
 /* True, with a message in msg, when the storage control block (BITMAP.SYS VBN 1) is one OpenVMS ANALYZE would
    call invalid (%ANALDISK-W-CHKSCB); read only. */
 bool ods2_scb_problem(ods2_volume_t *vol, char *msg, size_t cap);

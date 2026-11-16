@@ -611,13 +611,40 @@ in every structural test.
   finishes and fails the command if that fails (`ODS2_NOSYNC=1` skips it). A directory entry that names a
   file by a relative volume number or an extended file number is not followed by a write.
 
+## Large volumes and image files
+
+What a volume and a file may be, as far as ods2v2 is concerned (VMS's own limits are noted where they are known; "not measured"
+means no VMS version has been tried at that size):
+
+| | VMS structure | ods2v2 |
+| :-- | :-- | :-- |
+| volume size | `SCB$L_VOLSIZE` is 32 bits: up to 2^32 - 1 blocks (2 TiB) | `ods2_init`: 8,192 to 2^32 - 16 blocks; which VMS version mounts what is not measured |
+| cluster factor | `HM2$W_CLUSTER` is a word, `HM2$W_IBMAPVBN` = 4c + 1 must fit one: up to 16,383 | `ods2_init --cluster=` up to 16,383; any value is read and written |
+| file numbers | 24 bits (FID_NMX << 16 \| FID_NUM): 16,777,215 | all of them; the allocator skips multiples of 65,536 |
+| file size | `HIBLK`, `EFBLK` are 32 bits: 2^32 - 1 blocks | the same; lengths are 64-bit, seeks are `fseeko` with a 64-bit `off_t` (the build refuses a 32-bit one) |
+| file pieces | one retrieval pointer per piece; extension headers up to 65,535 per file | no limit but memory (reading, deleting, creating); directories and BITMAP.SYS read at most 1,024 pieces |
+| INDEXF.SYS | grows in the volume's extend quantity; extension headers when its map is full | grows in big steps, lengthens its last piece, writes extension headers (the layout of those is not checked on VMS) |
+| directory | sorted blocks, contiguous; VMS's own size limit is not measured | up to 65,536 blocks; a name lookup halves the blocks of a directory of 32 or more |
+| volume sets | relative volume numbers | not supported: refused on relabel and on writes; an entry naming another volume is refused |
+
+**Image files.** `ods2_init` makes a sparse file: a 2 TiB volume takes a few tens of MB on the host until it is written.
+`cp`, `rsync` and `tar` write the holes out in full unless asked not to: copy an image with `cp --sparse=always` (or
+`--reflink=auto` on a file system that has it), `rsync -S`, `tar -S`, `dd conv=sparse`, and check with `du` and `ls -l`
+(disk use against apparent size). A volume needs host space for what is written into it and for its structures (the bitmap
+is 1 bit per cluster, the index file 1 block per file), not for its size. An image file shorter than the volume it holds
+(a truncated copy) is mounted read-only with `%ODS2-W-IMAGESHORT`: extend it (`truncate -s`) to the volume's size to write it.
+A write the host cannot hold (disk full, a file size limit) fails the command and says why (`No space left on device`,
+`File too large`); the change is undone and the volume stays sound. The storage bitmap of a write mount is kept in memory
+(up to 64 MiB of it) and COPY from a pipe needs room in `$TMPDIR` or the image's directory for the piped data.
+`tests/ods5check.py --sample=K` checks a volume with millions of headers in minutes (headers only: see its header).
+
 ## Known limitations
 
 - `COPY` takes any size of file the volume has room for. Its content
   goes in as few pieces as the free space allows (one, on a volume
   with a long enough free run), described by Format 1, 2 or 3
   retrieval pointers, continuing into extension headers on fragmented
-  free space - up to 1,024 pieces. `COPY` and `TYPE` stream the
+  free space (no limit but memory and the 65,535 headers of a file). `COPY` and `TYPE` stream the
   content in 1 MiB chunks, so memory use stays flat however large the
   file. Input with no length to go by (a pipe, `/dev/stdin`) is first
   copied to a temporary file (in `$TMPDIR`, else in the image's directory, never

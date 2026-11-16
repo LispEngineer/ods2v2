@@ -3820,6 +3820,7 @@ int main(int argc, char **argv)
     ods2_result_t r;
     int exit_code = 0;
     int footer_state = 0;
+    bool image_short = false;
 
     if (argc < 2) {
         fprintf(stderr, "usage: %s <disk-image> [command...]\n", argv[0]);
@@ -3839,12 +3840,14 @@ int main(int argc, char **argv)
         footer_state = ods2_image_footer(&vol, scb_msg, sizeof(scb_msg));
         if (footer_state == 1) fprintf(stderr, "%%ODS2-I-SIMHFOOTER, %s\n", scb_msg);
         else if (footer_state == 2) fprintf(stderr, "%%ODS2-W-SIMHFOOTER, %s\n", scb_msg);
+        image_short = ods2_image_short(&vol, scb_msg, sizeof(scb_msg));
+        if (image_short) fprintf(stderr, "%%ODS2-W-IMAGESHORT, %s\n", scb_msg);
     }
     {
         const char *names = getenv("ODS2_NAMES");
         if (names != NULL && matches(names, "UTF8")) g_utf8_names = true;
     }
-    if (r.ok && footer_state == 2) {
+    if (r.ok && (footer_state == 2 || image_short)) {
         /* already told: read-only */
     } else if (r.ok && vol.volsize == 0) {
         /* without the volume size nothing bounds a write to the volume (upstream issue #23) */

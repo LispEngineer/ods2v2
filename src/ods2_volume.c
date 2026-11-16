@@ -58,6 +58,19 @@ static ods2_result_t fail(const char *why)
     ods2_result_t r; r.ok = false; r.problem = why; return r;
 }
 
+/* A failure of a write or flush says why the host refused (ENOSPC, EFBIG, EIO, ...): `what` and strerror(errno), in a buffer that
+   lives until the next such failure. errno is read at once, before anything else can change it. */
+static ods2_result_t fail_io(const char *what)
+{
+    static char msg[160];
+    int e = errno;
+    ods2_result_t r;
+    snprintf(msg, sizeof(msg), "%s: %s", what, e != 0 ? strerror(e) : "write failed");
+    r.ok = false;
+    r.problem = msg;
+    return r;
+}
+
 /* Why a write is refused: a version 0 volume is never writable, any
    other volume (ODS-2 or ODS-5) only if mounted with ods2_mount_write(). */
 static ods2_result_t not_writable(const ods2_volume_t *vol)
@@ -296,6 +309,11 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
             return fail("a SIMH container footer lies inside the volume (the last block may be lost): the "
                         "volume can be read, not written");
         }
+        if (ods2_image_short(vol, fmsg, sizeof(fmsg))) {
+            ods2_dismount(vol);
+            return fail("the disk image is shorter than the volume it holds: the volume can be read, not written (extend "
+                        "the image file to the volume's size first)");
+        }
     }
     r = ok();
     return r;
@@ -496,6 +514,39 @@ static bool simh_footer_at_end(ods2_volume_t *vol, uint64_t *image_blocks, uint8
     }
 }
 
+bool ods2_image_short(ods2_volume_t *vol, char *msg, size_t cap)
+{
+    off_t here, size;
+    uint64_t image_blocks;
+
+    if (msg != NULL && cap > 0) msg[0] = '\0';
+    if (vol->fp == NULL || vol->volsize == 0) return false;
+    {
+        /* The starter volume's storage control block is a placeholder (all ones, or 0xAAAA...: its "volume size" is no size): a block
+           that is no SCB claims nothing to compare, and that volume stays writable (README: make starter-volume). */
+        uint8_t bh[512], scb[512];
+        if (!ods2_read_header(vol, 2, bh).ok || !ods2_read_file_block(vol, bh, 1, scb).ok) return false;
+        {
+            unsigned level = (unsigned) (scb[0] | (scb[1] << 8));
+            if (level != 0x0201u && level != 0x0501u) return false;
+        }
+    }
+    here = ftello(vol->fp);
+    if (fseeko(vol->fp, 0, SEEK_END) != 0) return false;
+    size = ftello(vol->fp);
+    (void) fseeko(vol->fp, here < 0 ? 0 : here, SEEK_SET);
+    if (size < 0) return false;
+    image_blocks = (uint64_t) size / 512;
+    if (image_blocks >= vol->volsize) return false;
+    if (msg != NULL) {
+        snprintf(msg, cap, "the disk image has %llu blocks but the volume's storage control block says it has %u: the image "
+                 "is shorter than the volume (a truncated copy, or a sparse image copied without its holes?); reading the "
+                 "missing blocks fails, and the volume is not written", (unsigned long long) image_blocks,
+                 (unsigned) vol->volsize);
+    }
+    return true;
+}
+
 int ods2_image_footer(ods2_volume_t *vol, char *msg, size_t cap)
 {
     uint8_t foot[512];
@@ -656,10 +707,10 @@ static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uin
 #endif
     if (fseeko(vol->fp, (off_t) lbn * 512, SEEK_SET) != 0 ||
         fwrite(block, 1, 512, vol->fp) != 512) {
-        return fail("could not write block");
+        return fail_io("could not write block");
     }
     if (fflush(vol->fp) != 0) {
-        return fail("could not flush written block");
+        return fail_io("could not flush written block");
     }
 #ifdef ODS2_FAULT_INJECTION
     if (getenv("ODS2_FAULT_TRACE") != NULL) fprintf(stderr, "ODS2_FAULT: write %ld = LBN %u\n", fault_writes + 1, (unsigned) lbn);
@@ -681,9 +732,9 @@ ods2_result_t ods2_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *
 ods2_result_t ods2_sync(ods2_volume_t *vol)
 {
     if (vol->fp == NULL || !vol->writable) return ok();
-    if (fflush(vol->fp) != 0) return fail("could not flush the disk image");
+    if (fflush(vol->fp) != 0) return fail_io("could not flush the disk image");
     if (getenv("ODS2_NOSYNC") == NULL && fdatasync(fileno(vol->fp)) != 0) {
-        return fail("could not write the disk image to the disk (fdatasync failed)");
+        return fail_io("could not write the disk image to the disk (fdatasync failed)");
     }
     return ok();
 }
@@ -2627,11 +2678,11 @@ static ods2_result_t write_extents(ods2_volume_t *vol, const ods2_extent_t *exte
                 break;
             }
             if (fwrite(chunk, 1, piece, vol->fp) != piece) {
-                r = fail("could not write file content blocks");
+                r = fail_io("could not write file content blocks");
                 break;
             }
             if (fflush(vol->fp) != 0) {
-                r = fail("could not flush written file content");
+                r = fail_io("could not flush written file content");
                 break;
             }
             fault_point();
@@ -2641,7 +2692,7 @@ static ods2_result_t write_extents(ods2_volume_t *vol, const ods2_extent_t *exte
         while (r.ok && run_bytes > 0) {
             size_t n = (run_bytes < sizeof(zeros)) ? (size_t) run_bytes : sizeof(zeros);
             if (fwrite(zeros, 1, n, vol->fp) != n) {
-                r = fail("could not write file content blocks");
+                r = fail_io("could not write file content blocks");
                 break;
             }
             run_bytes -= n;
@@ -2649,7 +2700,7 @@ static ods2_result_t write_extents(ods2_volume_t *vol, const ods2_extent_t *exte
     }
     free(chunk);
     if (r.ok && fflush(vol->fp) != 0) {
-        r = fail("could not flush written file content");
+        r = fail_io("could not flush written file content");
     }
     return r;
 }
@@ -4807,7 +4858,7 @@ ods2_result_t ods2_set_volume_label(ods2_volume_t *vol, const char *label,
         }
         r = ods2_write_block(vol, lbns[k], copy);
         if (!r.ok) break;
-        if (fflush(vol->fp) != 0) { r = fail("could not flush the home blocks"); break; }
+        if (fflush(vol->fp) != 0) { r = fail_io("could not flush the home blocks"); break; }
         if (fseeko(vol->fp, (off_t) lbns[k] * 512, SEEK_SET) != 0 ||
             fread(back, 1, 512, vol->fp) != 512 || memcmp(back, copy, 512) != 0) {
             r = fail("a home block copy didn't read back as written");
