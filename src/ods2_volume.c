@@ -1814,7 +1814,7 @@ static uint32_t indexf_total_blocks(const ods2_volume_t *vol);
 static ods2_result_t header_ok_for_write(const uint8_t *h, unsigned file_number);
 
 /* Whether INDEXF.SYS's last growth was interrupted (review 28 a): *hiblk_behind says the map holds more blocks than HIBLK, and
-   *stray_from is the highest file number marked in use whose header lies beyond the map (0 if none). */
+   *stray_from is the one file number marked in use whose header lies beyond the map (0 if none, or if several). */
 static ods2_result_t indexf_growth_state(ods2_volume_t *vol, uint8_t *primary, bool *hiblk_behind, unsigned *stray_from)
 {
     const ods2_head_core_t *core = (const ods2_head_core_t *) primary;
@@ -1829,7 +1829,24 @@ static ods2_result_t indexf_growth_state(ods2_volume_t *vol, uint8_t *primary, b
     *hiblk_behind = mapped > hib;
     r = highest_used_file_number(vol, &highest);
     if (!r.ok) return r;
-    if (highest > 0 && header_vbn(vol, highest) > (mapped > hib ? mapped : hib)) *stray_from = highest;
+    if (highest > 0 && header_vbn(vol, highest) > (mapped > hib ? mapped : hib)) {
+        /* exactly one number marked past the map is the mark of an interrupted growth (the new extension header's slot, set
+           before it was linked); more are something else (a volume made to look full, damage) and are left as they are */
+        unsigned n, marked = 0, scanned = 0;
+        uint8_t block[512];
+        unsigned loaded = (unsigned) -1;
+        uint32_t limit = mapped > hib ? mapped : hib;
+        for (n = highest; n > 0 && header_vbn(vol, n) > limit && scanned < 200000u && marked < 2; n--, scanned++) {
+            unsigned bit = n - 1;
+            if (bit / 4096u != loaded) {
+                r = read_index_bitmap_block(vol, bit / 4096u, block);
+                if (!r.ok) return r;
+                loaded = bit / 4096u;
+            }
+            if (block[(bit % 4096u) / 8u] & (1u << (bit % 8u))) marked++;
+        }
+        if (marked == 1 && scanned < 200000u) *stray_from = highest;
+    }
     return ok();
 }
 
@@ -1841,7 +1858,7 @@ bool ods2_indexf_growth_unfinished(ods2_volume_t *vol)
     return indexf_growth_state(vol, primary, &behind, &stray).ok && (behind || stray != 0);
 }
 
-/* The repair: HIBLK from the map (and EFBLK over the highest header marked in use inside it), and the bits marked beyond the
+/* The repair: HIBLK from the map (and EFBLK over the highest header marked in use inside it), and the one bit marked beyond the
    map cleared (a growth interrupted after its new extension header's bit was set and before the header was linked: the
    number belongs to nothing). */
 static ods2_result_t indexf_repair_growth(ods2_volume_t *vol)
@@ -1849,7 +1866,7 @@ static ods2_result_t indexf_repair_growth(ods2_volume_t *vol)
     uint8_t primary[512];
     ods2_head_core_t *core = (ods2_head_core_t *) primary;
     bool behind, changed = false;
-    unsigned stray, n, guard = 0;
+    unsigned stray;
     uint32_t mapped = indexf_total_blocks(vol);
     ods2_result_t r = indexf_growth_state(vol, primary, &behind, &stray);
 
@@ -1868,8 +1885,8 @@ static ods2_result_t indexf_repair_growth(ods2_volume_t *vol)
         }
         changed = true;
     }
-    for (n = stray; n > 0 && header_vbn(vol, n) > mapped && guard < 100000u; n--, guard++) {
-        r = mark_index_bitmap(vol, n, false);
+    if (stray != 0) {
+        r = mark_index_bitmap(vol, stray, false);
         if (!r.ok) return r;
     }
     if (changed) {
