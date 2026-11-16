@@ -623,7 +623,7 @@ means no VMS version has been tried at that size):
 | file numbers | 24 bits (FID_NMX << 16 \| FID_NUM): 16,777,215 | all of them; the allocator skips multiples of 65,536 |
 | file size | `HIBLK`, `EFBLK` are 32 bits: 2^32 - 1 blocks | the same; lengths are 64-bit, seeks are `fseeko` with a 64-bit `off_t` (the build refuses a 32-bit one) |
 | file pieces | one retrieval pointer per piece; extension headers up to 65,535 per file | no limit but memory (reading, deleting, creating); directories and BITMAP.SYS read at most 1,024 pieces |
-| INDEXF.SYS | grows in the volume's extend quantity; extension headers when its map is full | grows in big steps, lengthens its last piece; does NOT write extension headers (VMS V8.4 cannot use the layout ods2v2 wrote: CORPUS 37), refuses when the primary's map is full |
+| INDEXF.SYS | grows in the volume's extend quantity; extension headers when its map is full | grows in big steps, lengthens its last piece; does NOT write extension headers (VMS V8.4 crashes at the first INDEXF.SYS growth through the ones ods2v2 wrote: CORPUS 37/38; VMS makes none itself), refuses when the primary's map is full |
 | directory | sorted blocks, contiguous; VMS's own size limit is not measured | up to 65,536 blocks; a name lookup halves the blocks of a directory of 32 or more |
 | volume sets | relative volume numbers | not supported: refused on relabel and on writes; an entry naming another volume is refused |
 
@@ -665,20 +665,27 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
   extension headers.** When the primary header's map is full it refuses to grow the index file (new files are refused:
   "the index file cannot grow", nothing written), as it always did before it had an extension-header writer, and it does
   not extend an index file that already has extension headers (it reads those, and mounts them; a volume whose chain
-  cannot be followed to its end is mounted read-only). The reason is measured (CORPUS 37): OpenVMS V8.4 cannot use the
-  extension-header layout ods2v2 wrote in e0bad43 and earlier test builds: `ANALYZE/DISK_STRUCTURE` stops with
-  `%ANALDISK-F-OPENINDEX`, INDEXF.SYS shows 0 blocks, every file behind the first extension header is "no such file", and
-  VMS can create nothing. VMS's own extension of INDEXF.SYS (1,333 to 1,774 blocks in that test) only lengthened pointers.
-  The code that makes extension headers stays in the source for the tests, behind the fault-injection build's
-  `ODS2_TEST_INDEXF` hook, marked "layout not accepted by VMS"; it is switched on again only after VMS accepts a layout
-  (ANALYZE clean, files created, INDEXF.SYS extended). `tests/ods5check.py` warns of an extension header of INDEXF.SYS that
-  looks like ods2v2's (the name in the ident area on ODS-2; a level 5 header behind a level 2.1 primary on ODS-5): do not
-  take such a volume to VMS. An interruption of a growth between its writes (only when the last header is an extension
+  cannot be followed to its end is mounted read-only). The reason is measured (CORPUS 37, 38): OpenVMS V8.4 reads a
+  volume whose INDEXF.SYS links an extension header written by ods2v2 (e0bad43 and earlier test builds), but it
+  **crashes the first time it has to grow INDEXF.SYS through that header** (BUGCHECK UNXSIGNAL in the ACP: a volume with
+  14 free header slots behind the header took 14 file creations, the 15th, which needed INDEXF.SYS to grow, crashed it;
+  any creation that needs no growth is fine). Where the header carries pointers and files lie behind it, V8.4 cannot open
+  INDEXF.SYS at all (`ANALYZE/DISK_STRUCTURE` gives `%ANALDISK-F-OPENINDEX`, files behind the first extension header are
+  "no such file"). Fields that differ from a VMS-made extension header (map at word 50, name-only ident area, FILECHAR 0,
+  EFBLK 1) made no difference. VMS itself made no INDEXF.SYS extension header in any run: it extends the index file by a
+  new contiguous piece and adds one pointer to the primary's map (28-40 of 155 words in fragmentation runs), and the
+  volume reached its maximum files first. So ods2v2 refuses when the primary map is full and writes none. The code that
+  makes extension headers stays in the source for the tests, behind the fault-injection build's `ODS2_TEST_INDEXF`
+  hook, and its volumes are for ods2v2's own tests only. `tests/ods5check.py` reports an extension header of INDEXF.SYS
+  that looks like ods2v2's (map at word 100 on ODS-2; a level 5 header behind a level 2.1 primary on ODS-5) as an error,
+  and mount prints `%ODS2-W-INDEXEXT` (a heuristic: no VMS-made one has been seen): mount such a volume on VMS only with
+  /NOWRITE; read-only use is safe.
+  An interruption of a growth between its writes (only when the last header is an extension
   header, so only on a volume made with the hook) leaves HIBLK and EFBLK behind the map for a moment (the checker says so,
   and mount prints `%ODS2-W-INDEXGROWTH`); the first change of any kind made through a write mount (a relabel as well as a
   new file) repairs them from the map, once per mount; that repair is written outside the change that triggered it, so a
   command that then fails may still have written it. A growth that does not fit the last header's remaining 4 bytes takes
-  a short piece (2 blocks or more, a Format 1 pointer, below LBN 4,194,304) instead of failing.
+  a short piece (up to 256 blocks, a Format 1 pointer, below LBN 4,194,304) instead of failing.
 - File numbers are 24 bits (up to 16,777,215, FID_NMX << 16 | FID_NUM), bounded by the volume's MAXIMUM_FILES
   and its index bitmap; an entry naming a file by a relative volume number (a volume set) is refused.
 - A directory is limited to 65,536 blocks (32 MiB of records), the most one
