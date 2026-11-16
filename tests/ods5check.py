@@ -433,6 +433,15 @@ def main():
             if nb is None:
                 fnd.err('%s: extension header %d missing' % (where, efn))
                 break
+            if n == 1 and (b'INDEXF.SYS' in nb or 'INDEXF.SYS'.encode('utf-16-le') in nb or (u16(nb, 6) >> 8) != (u16(b, 6) >> 8)) and 'ods2v2_ext' not in FUTURE_SEEN and not os.environ.get('ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT'):
+                # ods2v2 writes its own extension headers of INDEXF.SYS: on ODS-2 with the name of the file in the ident area (a
+                # header VMS made has none, as far as is known), on ODS-5 at structure level 5 behind a primary of level 2.1.
+                # No VMS-made extension header of INDEXF.SYS has been seen: if VMS made one like that, this warning is wrong. VMS V8.4 cannot use the layout ods2v2 wrote (CORPUS 37): headers behind the first one
+                # are "no such file", ANALYZE/DISK_STRUCTURE fails with OPENINDEX.
+                FUTURE_SEEN['ods2v2_ext'] = True
+                fnd.warn('%s: extension header %d looks like one ods2v2 made (its ident area names INDEXF.SYS;1): OpenVMS V8.4 '
+                         'cannot use that layout (CORPUS 37: ANALYZE/DISK_STRUCTURE gives OPENINDEX, files behind the first '
+                         'extension header are "no such file"); do not take this volume to VMS' % (where, efn))
             if u16(nb, 4) != len(segs):
                 fnd.err('%s: extension header %d has segment number %d, expected %d' % (where, efn, u16(nb, 4), len(segs)))
             if u16(nb, 66) | (nb[71] << 16) != n:

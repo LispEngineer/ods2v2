@@ -9,6 +9,8 @@
 # extension headers (ODS2_TEST_INDEXF in the ods2_fault build). Called by `make test`; run from the project root.
 
 TMP=samples/cli_checker_sample_tmp
+# these tests make INDEXF.SYS extension headers on purpose (the hook): the checker's warning about them is for volumes meant for VMS
+export ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT=1
 INIT=./ods2_init
 FAULT=./ods2_fault
 CHK="python3 -I tests/ods5check.py"

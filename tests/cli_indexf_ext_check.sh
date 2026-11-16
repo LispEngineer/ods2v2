@@ -13,6 +13,8 @@
 # project root.
 
 TMP=samples/cli_indexf_ext_tmp
+# these tests make INDEXF.SYS extension headers on purpose (the hook): the checker's warning about them is for volumes meant for VMS
+export ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT=1
 INIT=./ods2_init
 ODS2=./ods2
 FAULT=./ods2_fault

@@ -12,6 +12,8 @@
 # Called by `make test`; run from the project root.
 
 TMP=samples/cli_indexf_stall_tmp
+# these tests make INDEXF.SYS extension headers on purpose (the hook): the checker's warning about them is for volumes meant for VMS
+export ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT=1
 INIT=./ods2_init
 FAULT=./ods2_fault
 DIRS=${STALL_DIRS:-200}
@@ -200,6 +202,45 @@ f.seek(lbn * 512); f.write(bytes(512))                 # the extension header is
 PY
 check "the volume with a lost extension header is mounted read-only (a COPY is refused)" "2 1" "$($FAULT "$TMP/broken.img" "COPY $TMP/empty.txt [000000]NOPE.TXT" 2>&1 | grep -c 'mounted read-only\|COPYERR' | tr '\n' ' ')$($FAULT "$TMP/broken.img" "COPY $TMP/empty.txt [000000]NOPE.TXT" 2>&1 | grep -c 'COPYERR')"
 check "... and it is still read" "1" "$(./ods2 "$TMP/broken.img" 'DIR [000000]G1.TXT' 2>&1 | grep -c 'G1.TXT')"
+
+# ods2v2 never makes an INDEXF.SYS extension header on its own (CORPUS 37: VMS V8.4 cannot use the layout; the code stays behind
+# the hook). With the hook's `noext` the primary fills and the growth is refused with nothing written; a plain ods2 (no hook)
+# does not extend an index file that has extension headers
+python3 -I - "$TMP" <<'PY'
+import sys
+tmp = sys.argv[1]
+with open(tmp + '/few.ods2', 'w') as f:
+    for i in range(400):
+        f.write('COPY %s/empty.txt [000000]H%04d.TXT\n' % (tmp, i))
+PY
+img="$TMP/noext.img"
+$INIT "$img" 8192 --structure=2 --cluster=1 --maxfiles=1500 --label=NOEXT >/dev/null 2>&1
+out=$(ODS2_TEST_INDEXF=step=2,nomerge,noext $FAULT "$img" "@$TMP/few.ods2" 2>&1)
+check "noext: the full primary map refuses to grow, with the reason (CORPUS 37)" "yes" "$(echo "$out" | grep -q 'does not write INDEXF.SYS extension headers' && echo yes || echo no)"
+check "noext: no extension header was made" "0" "$(chain_length "$img")"
+check "noext: ods5check clean after the refusals" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
+img="$TMP/chain.img"
+$INIT "$img" 8192 --structure=2 --cluster=1 --maxfiles=1500 --label=CHAIN >/dev/null 2>&1
+ODS2_TEST_INDEXF=step=2,nomerge $FAULT "$img" "@$TMP/few.ods2" >/dev/null 2>&1
+before=$(chain_length "$img")
+cp "$img" "$TMP/chain0.img"
+python3 -I - "$TMP" <<'PY'
+import sys
+tmp = sys.argv[1]
+with open(tmp + '/more2.ods2', 'w') as f:
+    for i in range(600):
+        f.write('COPY %s/empty.txt [000000]J%04d.TXT\n' % (tmp, i))
+PY
+out=$(./ods2 "$img" "@$TMP/more2.ods2" 2>&1)
+check "a plain ods2 does not extend an index file that has extension headers (refused with the reason)" "yes" "$(echo "$out" | grep -q 'does not extend an index file that has extension headers' && echo yes || echo no)"
+check "... and no extension header was made or lost (chain $before)" "$before" "$(chain_length "$img")"
+check "... and ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
+check "ods5check warns of an INDEXF.SYS extension header ods2v2 made (ODS-2; CORPUS 37)" "1" "$(env -u ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT python3 -I tests/ods5check.py "$TMP/chain0.img" 2>&1 | grep -c 'looks like one ods2v2 made')"
+$INIT "$TMP/chain5.img" 8192 --structure=5 --cluster=1 --maxfiles=1500 --label=CHAIN5 >/dev/null 2>&1
+ODS2_TEST_INDEXF=step=2,nomerge $FAULT "$TMP/chain5.img" "@$TMP/few.ods2" >/dev/null 2>&1
+check "... and on ODS-5 (level 5 header behind a level 2.1 primary)" "1" "$(env -u ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT python3 -I tests/ods5check.py "$TMP/chain5.img" 2>&1 | grep -c 'looks like one ods2v2 made')"
+check "... and not on a volume without extension headers" "0" "$(env -u ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT python3 -I tests/ods5check.py "$TMP/noext.img" 2>&1 | grep -c 'looks like one ods2v2 made')"
+check "... and the volume is still read (a chain of $before extension headers)" "1" "$(./ods2 "$TMP/chain0.img" 'DIR [000000]H0001.TXT' 2>&1 | grep -c 'H0001.TXT')"
 
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then

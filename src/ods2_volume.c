@@ -1961,6 +1961,21 @@ static bool indexf_test_noreserve(void)
 #endif
 }
 
+/* ods2v2 never creates an INDEXF.SYS extension header on its own (CORPUS 37: OpenVMS V8.4 cannot use the layout this code wrote:
+   ANALYZE/DISK_STRUCTURE gives %ANALDISK-F-OPENINDEX, every file behind the first extension header is "no such file", and VMS
+   can create nothing). The code that makes and grows them stays for the tests, behind the fault-injection build's
+   ODS2_TEST_INDEXF hook (`noext` in the hook turns it off again): LAYOUT NOT ACCEPTED BY VMS. Re-enabled only after VMS
+   accepts a layout (ANALYZE clean, files created, INDEXF.SYS extended). */
+static bool indexf_ext_creation_allowed(void)
+{
+#ifdef ODS2_FAULT_INJECTION
+    const char *e = getenv("ODS2_TEST_INDEXF");
+    return e != NULL && strstr(e, "noext") == NULL;
+#else
+    return false;
+#endif
+}
+
 /* Bytes of map area still free in header `h`. */
 static size_t map_room(const uint8_t *h)
 {
@@ -2085,7 +2100,11 @@ static unsigned indexf_pick_slot(ods2_volume_t *vol, uint32_t first_vbn, unsigne
     return 0;
 }
 
-/* Allocates more blocks to INDEXF.SYS and maps them, so more headers fit; `indexf_header` (file 1's header, the caller's
+/* LAYOUT NOT ACCEPTED BY VMS (CORPUS 37): without the test hook (indexf_ext_creation_allowed) this function never makes an
+   extension header and never grows an index file that has one: it takes a piece for the primary header's map, or refuses with
+   nothing written. The extension-header code below is for the tests only.
+
+   Allocates more blocks to INDEXF.SYS and maps them, so more headers fit; `indexf_header` (file 1's header, the caller's
    copy) comes back updated, and the change is on the disk when this returns ok. Up to 256 blocks at a time, half the file's
    size once it is big (at most 16384 blocks, one Format 2 pointer); falls back to a single cluster if no run that long is
    free. The new piece is mapped with the smallest retrieval pointer that describes it, or lengthens the last pointer when
@@ -2115,11 +2134,12 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
     uint8_t tail[512], ext[512], primary[512];
     unsigned tail_num = 1, ext_count = 0, slot = 0;
     size_t reserve = indexf_test_noreserve() ? 4 : 8;
-    bool nomerge = indexf_test_nomerge(), fits, need_ext;
+    bool nomerge = indexf_test_nomerge(), fits, need_ext, ext_ok;
     unsigned attempt;
     ods2_result_t r;
 
     if (total > hiblk) hiblk = total;                      /* the file's size is its map's, not a count kept beside it */
+    ext_ok = indexf_ext_creation_allowed();
     if (hiblk >= 4096) {
         /* A big index file grows by half its size, at most 16384 blocks (one Format 2 pointer) */
         want = hiblk / 2;
@@ -2130,6 +2150,11 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
     if (want == 0) want = vol->home.cluster;
     r = indexf_tail(vol, indexf_header, tail, &tail_num, &ext_count);
     if (!r.ok) return r;
+    if (tail_num != 1 && !ext_ok) {
+        /* as at f70cee8: an index file with extension headers is read, not extended (nothing is written) */
+        return fail("INDEXF.SYS has extension headers and its map is full: ods2v2 does not extend an index file that has "
+                    "extension headers (the layout it would write is not accepted by VMS, CORPUS 37)");
+    }
     for (attempt = 0; ; attempt++) {
         uint8_t trial[512];
         r = ods2_allocate_blocks(vol, want, &lbn, &got);
@@ -2147,7 +2172,7 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
         memcpy(trial, tail, 512);
         fits = indexf_map_append(trial, lbn, got, !nomerge);
         if (indexf_test_noreserve() || attempt > 0 ||
-            (fits && (map_room(trial) >= reserve || indexf_pick_slot(vol, (uint32_t) hiblk + 1, got, n) != 0))) {
+            (fits && (!ext_ok || map_room(trial) >= reserve || indexf_pick_slot(vol, (uint32_t) hiblk + 1, got, n) != 0))) {
             memcpy(tail, trial, 512);
             break;
         }
@@ -2162,10 +2187,10 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
         /* Still no room: a header slot for an extension header to carry the pointer cannot be read before the pointer that
            maps it, and no slot is free inside the file when it needs to grow. Refused, nothing written. */
         ods2_free_blocks(vol, lbn, got);
-        return fail("INDEXF.SYS's last header has no room for another extent and has no extension header: the index "
-                    "file cannot grow");
+        return fail("INDEXF.SYS's last header has no room for another extent: the index file cannot grow (ods2v2 does not "
+                    "write INDEXF.SYS extension headers: the layout it would write is not accepted by VMS, CORPUS 37)");
     }
-    need_ext = map_room(tail) < reserve;
+    need_ext = ext_ok && map_room(tail) < reserve;
     if (need_ext) {
         slot = indexf_pick_slot(vol, (uint32_t) hiblk + 1, got, n);
         if (slot == 0) need_ext = false;                   /* only the reserve: the next growth tries again */
