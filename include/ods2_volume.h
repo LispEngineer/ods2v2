@@ -73,6 +73,7 @@ typedef struct {
     struct ods2_txn *txn;
     int            txn_depth;
     uint32_t       volsize;      /* SCB$L_VOLSIZE of BITMAP.SYS (0 if it could not be read): no write goes at or past it */
+    bool           indexf_chain_ok; /* INDEXF.SYS's extension header chain was followed to its end at mount; false: read only */
     bool           write_failed; /* sticky: a change failed part way through its write; no more writes on this mount */
 } ods2_volume_t;
 

@@ -766,16 +766,18 @@ def main():
 
 def vbn2lbn(ext, vbn):
     # ext: [(lbn, count), ...] in VBN order; the starting VBNs are kept beside the list (a list grows only by +=)
+    # the cache holds the list itself, so its id cannot be reused by another list while the entry lives (review 27 N7);
+    # a list that was added to is rebuilt (length or last element changed)
     cache = _VBN_STARTS.get(id(ext))
-    if cache is None or cache[0] != len(ext) or (ext and cache[2] != ext[-1]):
+    if cache is None or cache[0] is not ext or cache[1] != len(ext) or (ext and cache[3] != ext[-1]):
         starts = []
         v = 1
         for l, c in ext:
             starts.append(v)
             v += c
-        cache = (len(ext), starts, ext[-1] if ext else None)
+        cache = (ext, len(ext), starts, ext[-1] if ext else None)
         _VBN_STARTS[id(ext)] = cache
-    starts = cache[1]
+    starts = cache[2]
     i = bisect.bisect_right(starts, vbn) - 1
     if i < 0:
         return None

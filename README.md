@@ -661,12 +661,20 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
 - INDEXF.SYS is extended as new files need it, anywhere on a volume of any size (Format 1 retrieval pointers
   below LBN 4,194,304, Format 2 above it): by 256 blocks at a time while it is under 4,096 blocks, then by half
   its size, at most 16,384 blocks (one Format 2 pointer). New blocks that follow the last piece lengthen its
-  pointer; otherwise they get a pointer of their own, and when a header's map area is full the next pointer
-  goes into an INDEXF.SYS **extension header** (made in a free header slot of the blocks just added, up to the
-  65,535 headers of FH2$W_SEG_NUM; mount follows the whole chain). The writing of those extension headers has
-  not been checked on VMS (no VMS-made index file with one was available); tests/ods5check.py and the tests
-  here read them back. Volumes made by older ods2v2 whose primary header's map is already full and has no
-  extension header cannot grow the index file (new files are refused: "no room for another extent").
+  pointer; otherwise they get a pointer of their own. The last header of the chain always keeps room for one more
+  pointer of any size (8 bytes): when a growth would leave less, the chain gets an INDEXF.SYS **extension header** (made
+  in a free header slot of the blocks just added, up to the 65,535 headers of FH2$W_SEG_NUM; mount follows the whole
+  chain, and a volume whose chain cannot be followed to its end is mounted read-only). The writes of a growth go in an
+  order in which an interruption leaves a sound volume or one that heals at the next new file (the new extension header
+  first, then its bit, then the last header with the pointer and the link, then the primary): `make test` interrupts
+  every write of three kinds of growth (tests/fault_inject.py, index_*). Between the last two writes the primary's HIBLK
+  and EFBLK are behind the map for a moment (the checker says so); the next new file repairs them from the map. The
+  writing of those extension headers has not been checked on VMS (no VMS-made index file with one was available); on
+  an ODS-5 volume they are written at level 5 behind a primary of level 2.1, and what VMS does there is not measured
+  either. tests/ods5check.py and the tests here read them back. Volumes made by an older ods2v2 whose last header
+  has less than 6 bytes of map left and no extension header grow by a short piece (2 blocks or more, a Format 1
+  pointer, below LBN 4,194,304) that carries the extension header; above that LBN, or with a cluster factor over 256,
+  such a volume cannot grow the index file (new files are refused: "no room for another extent").
 - File numbers are 24 bits (up to 16,777,215, FID_NMX << 16 | FID_NUM), bounded by the volume's MAXIMUM_FILES
   and its index bitmap; an entry naming a file by a relative volume number (a volume set) is refused.
 - A directory is limited to 65,536 blocks (32 MiB of records), the most one
@@ -682,7 +690,9 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
   65,535 headers of FH2$W_SEG_NUM; reading, deleting and creating a file in thousands of pieces works); the directories
   and the bitmap file keep arrays of 1,024 extents and refuse, with a message, a file with more rather than use part of
   it. A directory of 32 blocks or more is searched by halving its blocks (a name lookup reads about log2(blocks) blocks);
-  a directory is still read whole for each insert or delete.
+  a directory is still read whole for each insert or delete, and an insert into one of 32 blocks or more refuses a name and
+  version that is in it already (the search finds nothing in a directory that is not in order, so a create would have added
+  it a second time).
 - `ods2_init` gives BADBLK.SYS the blocks past the last whole cluster when the size is not a multiple of the cluster, as VMS
   INITIALIZE does (V8.4 ANALYZE reports `ALLOCCLR` and `FREESPADRIFT` for a volume that leaves them to nobody);
   `SET VOLUME/PARTIAL_CLUSTER` does the same for a volume made by an older `ods2_init`, and `ods5check.py` warns of one.

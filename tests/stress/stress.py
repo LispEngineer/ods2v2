@@ -608,7 +608,7 @@ class Harness:
             if self.profile == 'indexf':
                 args.append('--maxfiles=%d' % r.choice([300, 600, 1500]))
             if self.opts.get('target'):
-                args.append('--target=%s' % self.opts['target'])      # device geometry in the SCB (ld = physical VAX96 LD driver, ra = SIMH VAX)
+                args.append('--target=%s' % self.opts['target'])      # device geometry in the SCB (ld = the LD driver of a physical VAX, ra = SIMH VAX)
             self.note('init: ' + ' '.join(args[1:]))
             res = subprocess.run(args, capture_output=True, env=ENV, text=True)
             if res.returncode != 0:
@@ -710,7 +710,7 @@ class Harness:
         shutil.rmtree(out, ignore_errors=True)
         r = run_ods2(self.img, 'EXPORT/LINKS/VERSIONS [000000...]*.* ' + out)
         errs = [l for l in r.text.split('\n') if '%ODS2-E-' in l or '%ODS2-F-' in l]
-        # KNOWN, not a bug: BADBLK.SYS of the VAX-made PHVS2 image maps 3 blocks of which the last lies 1 block past the end of the image file
+        # KNOWN, not a bug: BADBLK.SYS of a VAX-made image maps 3 blocks of which the last lies 1 block past the end of the image file
         errs = [l for l in errs if 'BADBLK.SYS' not in l]
         if r.crash or errs:
             self.fail('%s: EXPORT failed: %s' % (tag, r.text[-600:]))
@@ -1363,7 +1363,7 @@ class Harness:
         sfx = self.names.dir_name()
         for what in range(3):
             if what == 0:
-                # KNOWN (review 6 #6, ods5-wr2 is fixing): CREATE/DIRECTORY with no room leaks a file number.
+                # KNOWN (review 6 #6, fixed since): CREATE/DIRECTORY with no room leaks a file number.
                 # Run it on a throwaway copy, report what the checker says, keep the main volume clean.
                 cp = self.img + '.fullmkdir'
                 shutil.copyfile(self.img, cp)
@@ -1667,7 +1667,7 @@ class Harness:
 
     def scenario_reserved(self):
         """review 6 #1: DELETE / LINK of the reserved files. Run on throwaway copies. Expected today: DELETE is not
-        refused (KNOWN, ods5-wr2 is fixing on ods5-int); once fixed, every one of these must be refused and leave the
+        refused (KNOWN when this was written; fixed since); once fixed, every one of these must be refused and leave the
         volume exactly as it was (image md5 before = after)."""
         names = ['INDEXF.SYS', 'BITMAP.SYS', 'BADBLK.SYS', 'CORIMG.SYS', 'VOLSET.SYS', 'CONTIN.SYS', 'BACKUP.SYS',
                  'BADLOG.SYS', 'SECURITY.SYS', '000000.DIR']

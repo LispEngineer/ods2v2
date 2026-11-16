@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
-"""script_vs_single.py - the write buffer (ods5-del: a change is kept in memory and written only after it succeeded) is
+"""script_vs_single.py - the write buffer (a change is kept in memory and written only after it succeeded) is
 state kept between commands of ONE process.  Differential test: the stress harness runs a random operation sequence with one
 ods2 process per command (every step verified as in S1); the very same command lines are then replayed on a copy of the
 starting image as ONE script in ONE process.  Same sequence, same results: every command must succeed or fail exactly as

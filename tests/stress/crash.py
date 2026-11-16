@@ -59,7 +59,7 @@ def run_fault(img, cmd, k=None, count=False, timeout=300):
 
 
 GARBAGE_DIRS = []      # counted: an unlisted new directory with a garbage first block
-TRANSIENT = [r'two entries for', r'out of order']     # ods5-wr2 (F2 fix): a split/move may leave a name listed twice or briefly out of order
+TRANSIENT = [r'two entries for', r'out of order']     # (F2 fix): a split/move may leave a name listed twice or briefly out of order
 TRANSIENT_OPS = ('COPY', 'MKDIR', 'LINK', 'SYMLINK', 'IMPORT', 'SCRIPT', 'DELETE', 'RMDIR')   # DELETE/RMDIR: removing an emptied directory block shifts the following blocks up (seen in seed 207, ods5 22f0811)
 
 

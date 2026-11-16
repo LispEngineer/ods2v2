@@ -44,7 +44,7 @@ DEV_TOOLS = read_home_block read_file_header ods2_ls ods2_cat ods2_mkdir \
 $(BUILD)/ods2_make_loop: tests/ods2_make_loop.c $(VOLUME_SRCS) include/ods2_volume.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_make_loop.c $(VOLUME_SRCS) -o $@
 
-TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_dir_eof_selftest $(BUILD)/ods2_verlimit_selftest $(BUILD)/ods2_fid_selftest $(BUILD)/ods2_integrity_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest $(BUILD)/ods5_names_selftest $(BUILD)/ods5_directory_selftest $(BUILD)/ods5_header_selftest $(BUILD)/ods5_indexf_chain_selftest $(BUILD)/ods5_write_selftest $(BUILD)/ods5_review_selftest $(BUILD)/ods2_records_selftest $(BUILD)/ods2_acl_selftest
+TESTS = $(BUILD)/ods2_ondisk_selftest $(BUILD)/ods2_checksum_selftest $(BUILD)/ods2_validate_selftest $(BUILD)/ods2_bitmap_selftest $(BUILD)/ods2_indexf_selftest $(BUILD)/ods2_retrieval_selftest $(BUILD)/ods2_root_header_selftest $(BUILD)/ods2_directory_selftest $(BUILD)/ods2_volume_selftest $(BUILD)/ods2_wildcard_selftest $(BUILD)/ods2_read_file_selftest $(BUILD)/ods2_header_build_selftest $(BUILD)/ods2_directory_write_selftest $(BUILD)/ods2_path_selftest $(BUILD)/ods2_versions_selftest $(BUILD)/ods2_dirsearch_selftest $(BUILD)/ods2_time_selftest $(BUILD)/ods2_file_alloc_selftest $(BUILD)/ods2_dir_order_selftest $(BUILD)/ods2_dir_eof_selftest $(BUILD)/ods2_verlimit_selftest $(BUILD)/ods2_fid_selftest $(BUILD)/ods2_integrity_selftest $(BUILD)/ods2_large_file_selftest $(BUILD)/ods2_record_attrs_selftest $(BUILD)/ods2_indexf_large_selftest $(BUILD)/ods2_text_var_selftest $(BUILD)/ods5_names_selftest $(BUILD)/ods5_directory_selftest $(BUILD)/ods5_header_selftest $(BUILD)/ods5_indexf_chain_selftest $(BUILD)/ods5_write_selftest $(BUILD)/ods5_review_selftest $(BUILD)/ods2_records_selftest $(BUILD)/ods2_acl_selftest
 
 .PHONY: all test test-large tools dev-tools release clean starter-volume
 
@@ -113,6 +113,9 @@ $(BUILD)/ods2_directory_write_selftest: tests/ods2_directory_write_selftest.c sr
 
 $(BUILD)/ods2_path_selftest: tests/ods2_path_selftest.c src/ods2_path.c src/ods2_wildcard.c include/ods2_path.h include/ods2_wildcard.h src/ods5_names.c src/ods5_fold_table.h include/ods5_names.h | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_path_selftest.c src/ods2_path.c src/ods2_wildcard.c src/ods5_names.c -o $@
+
+$(BUILD)/ods2_dirsearch_selftest: tests/ods2_dirsearch_selftest.c src/ods2_init.c include/ods2_init.h $(VOLUME_SRCS) include/ods2_volume.h include/ods2_directory.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_dirsearch_selftest.c src/ods2_init.c $(VOLUME_SRCS) -o $@
 
 $(BUILD)/ods2_versions_selftest: tests/ods2_versions_selftest.c $(VOLUME_SRCS) include/ods2_volume.h include/ods2_directory.h samples/synthetic_disk.img | $(BUILD)
 	$(CC) $(CFLAGS) $(SANFLAGS) tests/ods2_versions_selftest.c $(VOLUME_SRCS) -o $@
@@ -259,6 +262,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@$(BUILD)/ods2_directory_write_selftest
 	@echo "--- ods2_path_selftest ---"
 	@$(BUILD)/ods2_path_selftest
+	@echo "--- ods2_dirsearch_selftest ---"
+	@$(BUILD)/ods2_dirsearch_selftest
 	@echo "--- ods2_versions_selftest ---"
 	@$(BUILD)/ods2_versions_selftest
 	@echo "--- ods2_time_selftest ---"
@@ -351,6 +356,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_frag_check.sh
 	@echo "--- cli_indexf_ext_check ---"
 	@sh tests/cli_indexf_ext_check.sh
+	@echo "--- cli_indexf_stall_check ---"
+	@sh tests/cli_indexf_stall_check.sh
 	@echo "--- cli_bitmap_check ---"
 	@sh tests/cli_bitmap_check.sh
 	@echo "--- cli_dirsearch_check ---"

@@ -114,6 +114,37 @@ check "ODS-2: the extension header's slot is not given out: six more files, noth
     "$(python3 -I tests/ods5check.py "$img" 2>&1 | grep '^ERROR' | grep -vc 'valid but its index bitmap bit is clear')"
 check "ODS-2: the extension header is still there (segment 1)" "1" "$(./ods2_dump_header "$img" "$E" 2>&1 | grep -c 'seg_num=1')"
 
+# a volume whose index file chain cannot be followed to its end is not written (review 27 N4), and still read
+i=0
+$INIT "$TMP/broken.img" 8192 --structure=2 --cluster=1 --maxfiles=1500 --label=BROKEN >/dev/null 2>&1
+while [ "$(chain_length "$TMP/broken.img")" -lt 1 ]; do
+    i=$((i + 1))
+    ODS2_TEST_INDEXF=step=2,nomerge $FAULT "$TMP/broken.img" "COPY $TMP/empty.txt [000000]G$i.TXT" >/dev/null 2>&1
+    [ $i -lt 400 ] || break
+done
+E=$(./ods2_dump_header "$TMP/broken.img" 1 | sed -n 's/.*ext_fid=(\([0-9]*\),.*/\1/p' | head -1)
+python3 -I - "$TMP/broken.img" "$E" <<'PY'
+import struct, sys
+img, e = sys.argv[1], int(sys.argv[2])
+f = open(img, 'r+b')
+f.seek(512); home = f.read(512)
+ib, ibsz, cl = struct.unpack_from('<I', home, 24)[0], struct.unpack_from('<H', home, 32)[0], struct.unpack_from('<H', home, 14)[0]
+f.seek((ib + ibsz) * 512); h = f.read(512)
+o = h[1] * 2; end = o + h[58] * 2; idx = []
+while o < end:
+    w = struct.unpack_from('<H', h, o)[0]; fmt = w >> 14
+    if fmt == 1: idx.append((((w >> 8) & 0x3F) << 16 | struct.unpack_from('<H', h, o + 2)[0], (w & 0xFF) + 1)); o += 4
+    elif fmt == 2: idx.append((struct.unpack_from('<I', h, o + 2)[0], (w & 0x3FFF) + 1)); o += 6
+    else: o += 2
+vbn, v, lbn = 4 * cl + ibsz + e, 1, None
+for l, c in idx:
+    if vbn < v + c: lbn = l + vbn - v; break
+    v += c
+f.seek(lbn * 512); f.write(bytes(512))                 # the extension header is gone
+PY
+check "the volume with a lost extension header is mounted read-only (a COPY is refused)" "2 1" "$($FAULT "$TMP/broken.img" "COPY $TMP/empty.txt [000000]NOPE.TXT" 2>&1 | grep -c 'mounted read-only\|COPYERR' | tr '\n' ' ')$($FAULT "$TMP/broken.img" "COPY $TMP/empty.txt [000000]NOPE.TXT" 2>&1 | grep -c 'COPYERR')"
+check "... and it is still read" "1" "$(./ods2 "$TMP/broken.img" 'DIR [000000]G1.TXT' 2>&1 | grep -c 'G1.TXT')"
+
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_indexf_stall_check: $fails FAILED"

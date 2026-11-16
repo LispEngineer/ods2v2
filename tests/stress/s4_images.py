@@ -66,7 +66,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('outdir')
     ap.add_argument('--only', nargs='*')
-    ap.add_argument('--target', help='device the images are for: ld (physical VAX96, LD driver), ra (SIMH VAX), ... passed to ods2_init --target= (default: ods2_init as it is)')
+    ap.add_argument('--target', help='device the images are for: ld (a physical VAX, LD driver), ra (SIMH VAX), ... passed to ods2_init --target= (default: ods2_init as it is)')
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
     for name in (a.only or SPECS):

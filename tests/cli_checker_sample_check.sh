@@ -46,6 +46,23 @@ ib = struct.unpack_from('<I', home, 24)[0]; sz = struct.unpack_from('<H', home, 
 f.seek((ib + sz + 2) * 512 + 510); f.write(b'\x01\x02')      # header 3's checksum
 PY
 check "a damaged reserved header is found by the sampled run too: exit status 1" "1" "$($CHK --sample=7 "$img" >/dev/null 2>&1; echo $?)"
+# the VBN lookup's cache is keyed by the list: lists that come and go, with equal length and equal last extent, must not share
+# a table (review 27 N7: CPython reuses ids)
+check "vbn2lbn: lists of equal length and last extent that come and go each map right" "ok" "$(python3 -I - <<'PY'
+import sys
+sys.path.insert(0, 'tests')
+import ods5check
+bad = 0
+for i in range(2000):
+    first = 1000 + i * 17
+    lst = [(first, 5 + i % 7), (50000, 5)]
+    want = first + 2
+    if ods5check.vbn2lbn(lst, 3) != want or ods5check.vbn2lbn(lst, 5 + i % 7 + 2) != 50001:
+        bad += 1
+    del lst
+print('ok' if bad == 0 else 'bad %d' % bad)
+PY
+)"
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
     echo "cli_checker_sample_check: $fails FAILED"

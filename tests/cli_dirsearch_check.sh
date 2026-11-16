@@ -3,9 +3,9 @@
 #
 # cli_dirsearch_check.sh - a directory of 32 blocks or more is searched by halving blocks (LARGE_VOLUMES.md 8): a name lookup
 # reads about log2(blocks) blocks instead of all, and a lookup that finds no such name stops at the first name past it. The
-# directory here has 3,000 names (about 190 blocks) with versions that run across block boundaries. Every find and every
-# miss must give the same answer as the whole-directory walk did: first, last, a name between two others, a name before the
-# first and after the last, every version of a name, a name whose versions straddle blocks. Called by `make test`; run from the
+# directory here has 3,000 names (about 190 blocks), one version each (COPY makes version 1 only: the names with many versions,
+# which run across records and blocks, are tests/ods2_dirsearch_selftest.c). Every find and every miss must give the same
+# answer as the whole-directory walk did: first, last, a name between two others, a name before the first and after the last. Called by `make test`; run from the
 # project root.
 
 TMP=samples/cli_dirsearch_tmp
@@ -48,7 +48,7 @@ while [ $n -le 5997 ]; do
 done
 check "names that sort between two existing ones (sampled odd numbers) are not found" "0" "$bad"
 check "a name before the first and one after the last are not found" "1 1" "$(t A.TXT | grep -c "not found") $(t Z.TXT | grep -c "not found")"
-# versions: COPY adds ;2 (a second file of that name) at several places; the halving search must find every version
+# COPY onto an existing name makes no second version (it makes version 1 only)
 for n in 0 1500 5998; do
     nm=$(printf 'N%05d.TXT' $n)
     echo "version two of $n" > "$TMP/v.txt"

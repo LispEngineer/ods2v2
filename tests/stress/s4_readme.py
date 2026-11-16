@@ -10,7 +10,7 @@ import ods5read, stress   # noqa: E402
 out, rev = os.path.abspath(sys.argv[1]), sys.argv[2]
 src_text = sys.argv[3] if len(sys.argv) > 3 else 'origin/ods5 %s' % rev
 WHAT = {
-    's4-repair-f2': "REPAIR image: B321's s4-f2-fresh as VAX96 left it (written by ods2v2 before the stream MRS/LRL fix), after `SET FILE/ATTRIBUTES=(MRS:0) [000000...]*.*` with 110b503: 2 files changed (PYHKEUJA1$. MRS 512 -> 0, LRL 512 -> 1488; JD.K MRS 512 -> 0, LRL 512 -> 91), see s4-repair-f2.CHANGES.TXT; nothing else, no file's bytes changed. Bug A's directory [..Y.-U7NL] is still in it (checker: 1 warning, on purpose): its files are `unreachable-bugA` in MANIFEST_VMS",
+    's4-repair-f2': "REPAIR image: B321's s4-f2-fresh as a real VAX left it (written by ods2v2 before the stream MRS/LRL fix), after `SET FILE/ATTRIBUTES=(MRS:0) [000000...]*.*` with 110b503: 2 files changed (PYHKEUJA1$. MRS 512 -> 0, LRL 512 -> 1488; JD.K MRS 512 -> 0, LRL 512 -> 91), see s4-repair-f2.CHANGES.TXT; nothing else, no file's bytes changed. Bug A's directory [..Y.-U7NL] is still in it (checker: 1 warning, on purpose): its files are `unreachable-bugA` in MANIFEST_VMS",
     'up2-starter': "upstream's own ods2 (branch fix-integrity 4aa2507) on its starter volume (VMS 7.1 INITIALIZE, RA92, label TRANSFER -> UP2START): 100 random COPY / DELETE / CREATE/DIRECTORY / SET FILE/VERSION_LIMIT operations, then a directory split phase (70 files with 39.39-character names in one directory, half deleted)",
     'up2-asim6': "V7.3-2-made ODS2T6 corpus volume (asim6-ods2t6) + the same 100 operations and split phase with upstream's ods2 (label UP2A6)",
     'up2-phvs2': "VAX V7.3-made ODS-2 volume (phvs2-ods2v) + the same 100 operations and split phase (label UP2PH)",
@@ -73,9 +73,9 @@ for f in sorted(glob.glob(os.path.join(out, '*.img'))):
         for chunk in iter(lambda: fh.read(1 << 20), b''):
             h.update(chunk)
     sums.append('%s  %s.img' % (h.hexdigest(), name))
-txt = """# S4: after-images of the ods5-stress harness, for VMS to confirm
+txt = """# S4: after-images of the stress harness, for VMS to confirm
 
-Made %s (-0500) by the stress campaign with ods2v2 built from %s (the stress branch ods5-stress adds tests only). Every image was built by the stress harness: after EVERY
+Made %s (-0500) by the stress campaign with ods2v2 built from %s (the stress branch adds tests only). Every image was built by the stress harness: after EVERY
 operation tests/ods5check.py (0 errors, 0 warnings), an independent reader (names, sizes, MD5 of every file = the model) and ods2's EXPORT agreed; the final images were checked again (0/0, just before this file was written).
 All images are mode 444; SHA-256 in SHA256SUMS.TXT. Labels are unique, so any number can be mounted together.
 
@@ -93,8 +93,8 @@ Suggested run on VMS (per image): MOUNT it (read-only is enough; V8.4: `MOUNT/NO
 `NAME.VERLIMITS.TXT` lists the entries whose DIR$W_VERLIMIT is not 32767 (`limit spec`): ods2v2 writes 32767 (or the parent directory's default) for everything it creates; the few others were set on purpose by SET FILE/VERSION_LIMIT in the random operations (2, 3, 5, 32, 100, 32766) and must show up in VMS's DIRECTORY/FULL as that limit ("No version limit" for 32767).
 File dates: the images were made with ods2v2's file dates in the guests' zone (EST, ODS2_TZ=America/New_York; an earlier set of mine was made with TZ=UTC by mistake and showed FUTCREDAT on VMS). Volume sizes are a whole number of clusters (V8.4 ANALYZE reports ALLOCCLR / FREESPADRIFT for a partial last cluster that ods2v2 and the VAX V7.3 / VMS 7.1 INITIALIZE leave allocated).
 Lines `skip-rms-org <spec>` in MANIFEST_VMS are VMS-made RMS indexed or relative files: CHECKSUM reads those by record, so their md5 (of the file's blocks) is not comparable. Files whose names need ^U (UCS-2) escapes cannot be CHECKSUMmed on V8.4 (status 10C2816A): COPY such a file to an ASCII name first, then CHECKSUM the copy.
-Directories whose name has a character above ISO Latin-1 (^U escapes, UCS-2) cannot be opened BY NAME on plain OpenVMS V8.4: VMS cannot find even the ones it makes itself (ods5-vms2, ASIM5, 9-NOV-2026; `[^U0417]`, `[^U65E5^U672C]` made by VMS: -RMS-E-DNF, ISO Latin-1 names like `[CAF^E9]` work). On V8.4-2L2 (ASIM12) VMS-made directories with such names ARE found by name. They are listed by wildcard DIRECTORY and open by file ID (`[60,2,0]`): on plain V8.4 verify the files below such directories by file ID, not by path; on V8.4-2L2 by path.
-Version-limit check (added after the real VAX96 found ods2v2 writing version limit 1 instead of VMS's 32767, so that VMS purged ;1 when ;2 was made): on a WRITABLE mount of a COPY of the image, `COPY` (DCL) some small file onto the name of an
+Directories whose name has a character above ISO Latin-1 (^U escapes, UCS-2) cannot be opened BY NAME on plain OpenVMS V8.4: VMS cannot find even the ones it makes itself (measured on a real OpenVMS V8.4 system, 9-NOV-2026; `[^U0417]`, `[^U65E5^U672C]` made by VMS: -RMS-E-DNF, ISO Latin-1 names like `[CAF^E9]` work). On V8.4-2L2 VMS-made directories with such names ARE found by name. They are listed by wildcard DIRECTORY and open by file ID (`[60,2,0]`): on plain V8.4 verify the files below such directories by file ID, not by path; on V8.4-2L2 by path.
+Version-limit check (added after a real VAX found ods2v2 writing version limit 1 instead of VMS's 32767, so that VMS purged ;1 when ;2 was made): on a WRITABLE mount of a COPY of the image, `COPY` (DCL) some small file onto the name of an
 ods2v2-made file of the manifest (so VMS creates the next version, e.g. `COPY SYS$LOGIN:LOGIN.COM DKA0:[D]F.TXT`), then `DIRECTORY DKA0:[D]F.TXT;*`: **both ;1 (the old one, unchanged) and the new ;2 must be listed**. Do the same for a directory-listed alias or symlink name and for
 one file in each of the three kinds of directory (the root [000000], a subdirectory, a big one). Also `DIRECTORY/FULL` on an ods2v2-made file and on a VMS-made one next to it: nothing may differ but dates, ids and sizes.
 The images are what ods2v2 leaves after normal, completed commands; interrupted-write and damaged-image behaviour is not in them.

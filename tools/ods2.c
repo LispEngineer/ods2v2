@@ -1747,7 +1747,14 @@ static FILE *spool_create(char *tried, size_t tried_cap)
         }
         unlink(path);
         f = fdopen(fd, "w+b");
-        if (f == NULL) { close(fd); continue; }
+        if (f == NULL) {
+            /* the directory is named in the message too (review 27 N9) */
+            int saved = errno;
+            close(fd);
+            used += (size_t) snprintf(tried + used, used < tried_cap ? tried_cap - used : 0, "%s%s: %s", i ? "; " : "", dirs[i],
+                                      strerror(saved));
+            continue;
+        }
         return f;
     }
     if (n == 0) snprintf(tried, tried_cap, "no directory to use (TMPDIR is not set)");
@@ -3852,6 +3859,9 @@ int main(int argc, char **argv)
     } else if (r.ok && vol.volsize == 0) {
         /* without the volume size nothing bounds a write to the volume (upstream issue #23) */
         fprintf(stderr, "%%ODS2-W-READONLY, %s: the storage control block's volume size is 0 or unreadable; "
+                        "mounted read-only\n", argv[1]);
+    } else if (r.ok && !vol.indexf_chain_ok) {
+        fprintf(stderr, "%%ODS2-W-READONLY, %s: INDEXF.SYS's extension header chain cannot be followed to its end; "
                         "mounted read-only\n", argv[1]);
     } else if (r.ok && vol.version0) {
         fprintf(stderr, "%%ODS2-W-STRUCLEV0, %s: HM2$W_STRUCLEV version is 0; "

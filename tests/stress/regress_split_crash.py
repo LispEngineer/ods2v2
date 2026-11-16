@@ -71,7 +71,7 @@ for level, cluster in (((2, 1), (2, 4)) if UP2 else ((2, 1), (5, 1), (2, 4), (5,
                         print('INFO level %d cluster %d: after the interrupted insert of entry %d (fault after write %d) a name is listed twice;'
                               ' DELETE of it removes one entry and leaves %d (dangling: %s)' % (level, cluster, i, k, len(left), all(v3.files[e] is None or v3.info[v3.files[e]] is None for e in left)))
                 os.unlink(t2)
-            # a name listed twice is allowed (ods5-wr2's split order), but must not be permanent after a follow-up DELETE
+            # a name listed twice is allowed (the split order of the directory insert), but must not be permanent after a follow-up DELETE
         
         subprocess.run([ODS2, img, cmd], check=True, capture_output=True)
 # part 2: DELETE that empties a directory block (the following blocks move up): same rule, the other names stay listed

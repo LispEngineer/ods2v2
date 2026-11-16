@@ -287,10 +287,17 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
     {
         const char *why = "could not decode INDEXF.SYS's own retrieval pointers";
         /* A fragmented index file continues in extension headers (FH2$W_EXT_FID); if one cannot be read the extents
-           known so far are kept. */
-        if (!indexf_extents_load(vol, indexf_header, false, &why)) {
+           known so far are kept for reading. A volume is written only when INDEXF.SYS's whole chain can be followed
+           (review 27 N4): a growth would otherwise build on a chain it has not seen. */
+        vol->indexf_chain_ok = indexf_extents_load(vol, indexf_header, true, &why);
+        if (!vol->indexf_chain_ok && !indexf_extents_load(vol, indexf_header, false, &why)) {
             ods2_dismount(vol);
             return fail(why);
+        }
+        if (writable && !vol->indexf_chain_ok) {
+            ods2_dismount(vol);
+            return fail("INDEXF.SYS's extension header chain cannot be followed to its end: the volume can be read, "
+                        "not written");
         }
     }
 
@@ -1949,9 +1956,10 @@ static unsigned indexf_pick_slot(ods2_volume_t *vol, uint32_t first_vbn, unsigne
    free. The new piece is mapped with the smallest retrieval pointer that describes it, or lengthens the last pointer when
    it follows it directly. When the map area of the last header of the chain would be left with less than 8 bytes (room
    for one more pointer of any size), the chain gets an EXTENSION header: made in a free slot of the new blocks (the header
-   is written to its block directly; the last header maps the blocks), as the place for the next pointers; it
-   carries the next. (Not measured on VMS: no VMS-made index file with an extension
-   header was available.)
+   is written to its block directly; the last header maps the blocks), as the place for the next pointers. A pointer
+   that does not fit the last header takes a short piece instead (a Format 1 pointer, 4 bytes) or is refused: the
+   extension header that would carry it could not be read before the pointer that maps it. (Not measured on VMS: no
+   VMS-made index file with an extension header was available.)
 
    Crash safety (review 27 F2): the writes go in this order, and every point between them is a state that is sound or
    heals at the next create. (1) the new blocks are zeroed (they are only allocated: a leak); (2) the new extension
@@ -3775,6 +3783,26 @@ ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_n
     return txn_end(vol, r);
 }
 
+/* True when the directory held in `blocks` already has an entry for `name` and `version`. A directory of ODS2_DIR_BSEARCH_MIN
+   blocks or more is searched by halving, which finds nothing in one that is not in the order the search expects (damage, another
+   tool): a lookup that missed would let a create add a second entry of the name (review 27 N5). The insert holds the whole
+   directory already, so this costs one more pass over it. */
+static bool loaded_directory_has_entry(const ods2_volume_t *vol, const uint8_t *blocks, unsigned used, const char *name,
+                                       uint16_t version)
+{
+    unsigned b;
+    for (b = 0; b < used; b++) {
+        ods2_dir_entry_t e[ODS2_DIR_MAX_ENTRIES_PER_BLOCK];
+        unsigned bad = 0;
+        int n = ods2_parse_directory_records(blocks + (size_t) b * 512, 512, vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, e,
+                                             ODS2_DIR_MAX_ENTRIES_PER_BLOCK, &bad), i;
+        for (i = 0; i < n && i < ODS2_DIR_MAX_ENTRIES_PER_BLOCK; i++) {
+            if (e[i].version == version && ods2_dir_name_compare(e[i].name, strlen(e[i].name), name, strlen(name)) == 0) return true;
+        }
+    }
+    return false;
+}
+
 static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
                                            const char *name, uint16_t version, ods2_fid_t fid,
                                            uint8_t extra_flags)
@@ -3795,6 +3823,11 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
     r = load_directory(vol, dir_header, 1, &blocks, &used);
     if (!r.ok) return r;
 
+    if (used >= ODS2_DIR_BSEARCH_MIN && loaded_directory_has_entry(vol, blocks, used, name, version)) {
+        free(blocks);
+        return fail("a directory entry with this name and version exists already: not added (a lookup did not find it: is the "
+                    "directory out of order?)");
+    }
     t = ods2_dir_choose_block(blocks, used, name);
     verlimit = ((const ods2_head_core_t *) dir_header)->recattr.versions;   /* the directory's default version limit */
     if (ods2_insert_dir_entry_vl(blocks + (size_t) t * 512, 512, name, version, fid,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
-"""regress_verlimit.py - the version limit (DIR$W_VERLIMIT) of the directory records ods2v2 writes (found on the real VAX96:
+"""regress_verlimit.py - the version limit (DIR$W_VERLIMIT) of the directory records ods2v2 writes (found on a real VAX:
 ods2v2 wrote 1, so VMS purged ;1 when a user made ;2).
 
 Part 1 (the rule, from VMS-made images only): in the pure VMS-made corpus volumes every entry VMS made for a file or a directory
