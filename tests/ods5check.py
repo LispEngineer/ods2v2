@@ -29,7 +29,13 @@ ods5check.py - an independent structure check of an ODS-2/ODS-5 disk image
 VMS-made images, sharing no code with ods2v2. Prints one line per finding and a
 summary; exit status 1 if there is any error.
 
-usage: ods5check.py [-v] [--ignore-order] image
+usage: ods5check.py [-v] [--ignore-order] [--sample=K] image
+
+--sample=K (K >= 2) is for volumes with millions of headers: only headers 1-16 and every Kth one after them are read
+(each one's own structure is checked: checksum, structure level, FID/slot agreement, ident area, map, EFBLK/HIBLK), and the
+index file, its bitmap and the index-bitmap/EOF rules are checked in full; the directories, the storage bitmap, extension
+chains and the cross-checks between them need every header and are NOT done (the output says so). Without it the whole
+volume is checked, which holds every header and ident in memory (about 2 KB each: 60,000 files take 3 s and 140 MB).
 
 Checks: home block copies and checksums; header checksums, structure level,
 FID/slot agreement, ident area (FI2/FI5: control byte, name length, MPOFFSET),
@@ -40,6 +46,7 @@ name order, name type flags vs name, every FID exists and is in use, backlink
 of every file points at a directory that lists it, header name = the directory
 entry of the primary link, link count where the volume keeps one).
 """
+import bisect
 import os
 import re
 import struct, sys, time
@@ -243,10 +250,16 @@ def main():
     args = sys.argv[1:]
     verbose = False
     ignore_order = False
+    sample = 0
     while args and args[0].startswith('-'):
         a = args.pop(0)
         if a == '-v':
             verbose = True
+        elif a.startswith('--sample='):
+            sample = int(a[9:])
+            if sample < 2:
+                print('--sample=K needs K >= 2')
+                return 2
         elif a == '--ignore-order':
             ignore_order = True
     if not args:
@@ -317,7 +330,7 @@ def main():
     deleted = set()
     pending = set()   # marked for delete, FID intact
     headers_pending = {}
-    for n in range(1, nheaders + 1):
+    for n in (range(1, nheaders + 1) if not sample else sorted(set(range(1, min(16, nheaders) + 1)) | set(range(sample, nheaders + 1, sample)))):
         b = read_header(n)
         if b is None:
             fnd.err('header %d is not mapped by INDEXF.SYS' % n)
@@ -355,10 +368,11 @@ def main():
                 fnd.info('header %d: garbage slot (not in use)' % n)
     print('headers: %d valid, %d deleted' % (len(headers), len(deleted)))
     # bits set beyond what exists
-    for n in range(nheaders + 1, v.ibmapsize * 4096 + 1):
-        if idx_used(n):
-            fnd.err('index bitmap bit %d set beyond the index file EOF' % n)
-            break
+    if nheaders // 8 < len(ibm) and (ibm[nheaders // 8 + 1:].strip(b'\0') or ibm[nheaders // 8] & ~((1 << (nheaders % 8)) - 1) & 0xFF):
+        for n in range(nheaders + 1, v.ibmapsize * 4096 + 1):
+            if idx_used(n):
+                fnd.err('index bitmap bit %d set beyond the index file EOF' % n)
+                break
 
     # --- per header: map, ident, fat ---
     owner = {}  # lbn cluster -> fid (for double allocation)
@@ -408,7 +422,7 @@ def main():
         exts = decode_map(b, fnd, where)
         cur = b
         segs = [n]
-        while True:
+        while not sample:        # (a sampled run does not have the extension headers)
             efn = u16(cur, 14) | (cur[19] << 16)
             if efn == 0:
                 break
@@ -431,7 +445,7 @@ def main():
         hiblk = swap32(u32(b, 24))
         efblk = swap32(u32(b, 28))
         ffbyte = u16(b, 32)
-        if total != hiblk:
+        if total != hiblk and not (sample and (u16(b, 14) | (b[19] << 16)) != 0):
             fnd.err('%s: HIBLK %d but extents hold %d blocks' % (where, hiblk, total))
         if efblk > hiblk + 1 and not (hiblk == 0):
             fnd.err('%s: EFBLK %d beyond HIBLK %d' % (where, efblk, hiblk))
@@ -462,6 +476,11 @@ def main():
         if u32(b, 52) & 0x2000:  # directory
             if b[20] & 0xF != 2:
                 fnd.warn('%s: directory with record type %d' % (where, b[20] & 0xF))
+    if sample:
+        print('sampled: %d of %d headers read (1-16 and every %dth); extension chains, the storage bitmap, the directories and the '
+              'cross-checks were NOT done' % (len(headers) + len(deleted) + len(pending), nheaders, sample))
+        print('%d error(s), %d warning(s)' % (len(fnd.errors), len(fnd.warnings)))
+        return 1 if fnd.errors else 0
     # --- storage bitmap ---
     if 2 not in headers:
         fnd.err('no BITMAP.SYS')
@@ -746,12 +765,27 @@ def main():
 
 
 def vbn2lbn(ext, vbn):
-    v = 1
-    for l, c in ext:
-        if vbn < v + c:
-            return l + vbn - v
-        v += c
+    # ext: [(lbn, count), ...] in VBN order; the starting VBNs are kept beside the list (a list grows only by +=)
+    cache = _VBN_STARTS.get(id(ext))
+    if cache is None or cache[0] != len(ext) or (ext and cache[2] != ext[-1]):
+        starts = []
+        v = 1
+        for l, c in ext:
+            starts.append(v)
+            v += c
+        cache = (len(ext), starts, ext[-1] if ext else None)
+        _VBN_STARTS[id(ext)] = cache
+    starts = cache[1]
+    i = bisect.bisect_right(starts, vbn) - 1
+    if i < 0:
+        return None
+    l, c = ext[i]
+    if vbn < starts[i] + c:
+        return l + vbn - starts[i]
     return None
+
+
+_VBN_STARTS = {}
 
 
 if __name__ == '__main__':
