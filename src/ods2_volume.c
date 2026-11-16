@@ -402,6 +402,8 @@ static void fault_point(void)
    straight to free clusters and is done after everything else that can fail (create_file). */
 typedef struct {
     uint32_t lbn;
+    size_t   prev;       /* index + 1 of the write before this one to the same lbn, 0 = none */
+    bool     dropped;    /* the block was freed after this write: it is not written at commit (txn_forget_blocks) */
     uint8_t  data[512];
 } txn_write_t;
 
@@ -439,7 +441,7 @@ static const uint8_t *txn_find(const ods2_volume_t *vol, uint32_t lbn)
     if (t == NULL || t->n == 0) return NULL;
     {
         size_t at = t->table[txn_slot(t, lbn)];
-        return at != 0 ? t->w[at - 1].data : NULL;
+        return at != 0 && !t->w[at - 1].dropped ? t->w[at - 1].data : NULL;
     }
 }
 
@@ -466,10 +468,36 @@ static ods2_result_t txn_add(ods2_volume_t *vol, uint32_t lbn, const uint8_t *bl
     }
     if ((t->n + 1) * 2 > t->table_cap && !txn_grow_table(t)) return fail("out of memory keeping a change of the volume");
     t->w[t->n].lbn = lbn;
+    t->w[t->n].prev = t->table[txn_slot(t, lbn)];
+    t->w[t->n].dropped = false;
     memcpy(t->w[t->n].data, block, 512);
     t->n++;
     t->table[txn_slot(t, lbn)] = t->n;
     return ok();
+}
+
+/* Blocks freed inside a change are no longer the change's: a write kept for one of them must not be made at commit, when
+   the blocks may belong to something else (review 28 F1: the clusters are given to the next file at once and its content
+   is written straight to the image). Every kept write to a block of lbn .. lbn+count-1 is dropped. */
+static void txn_forget_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned count)
+{
+    struct ods2_txn *t = vol->txn;
+    size_t i;
+    if (t == NULL || t->n == 0 || count == 0) return;
+    if (count < t->n) {
+        unsigned k;
+        for (k = 0; k < count; k++) {
+            size_t at = t->table[txn_slot(t, lbn + k)];
+            while (at != 0) {
+                t->w[at - 1].dropped = true;
+                at = t->w[at - 1].prev;
+            }
+        }
+    } else {
+        for (i = 0; i < t->n; i++) {
+            if (t->w[i].lbn >= lbn && t->w[i].lbn - lbn < count) t->w[i].dropped = true;
+        }
+    }
 }
 
 /* Reads a block as the change in progress sees it. */
@@ -657,7 +685,9 @@ static ods2_result_t txn_end(ods2_volume_t *vol, ods2_result_t r)
     vol->txn = NULL;
     if (t == NULL) return r;
     if (r.ok) {
-        for (i = 0; i < t->n && r.ok; i++) r = raw_write_block(vol, t->w[i].lbn, t->w[i].data);
+        for (i = 0; i < t->n && r.ok; i++) {
+            if (!t->w[i].dropped) r = raw_write_block(vol, t->w[i].lbn, t->w[i].data);
+        }
         if (!r.ok) {
             /* part of the change is on the disk and the rest is not: nothing more is written through this
                mount (R9-2), and the INDEXF.SYS cache goes back to what it was before the change, as the
@@ -1996,8 +2026,7 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
     r = indexf_tail(vol, indexf_header, tail, &tail_num, &ext_count);
     if (!r.ok) return r;
     for (attempt = 0; ; attempt++) {
-        uint8_t zero[512], trial[512];
-        unsigned v;
+        uint8_t trial[512];
         r = ods2_allocate_blocks(vol, want, &lbn, &got);
         if (!r.ok && want > (256u / vol->home.cluster) * vol->home.cluster && want > vol->home.cluster) {
             want = (256u / vol->home.cluster) * vol->home.cluster; /* no run that long: the smaller step */
@@ -2009,17 +2038,6 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
             r = ods2_allocate_blocks(vol, want, &lbn, &got);
         }
         if (!r.ok) return r;
-        /* The new blocks are zeroed (review 6, finding 7): the clusters hold whatever was in them, and
-           header images left in free space (an earlier index file, a BACKUP save set kept as a file) would
-           be seen by ANALYZE as valid headers, to be resurrected by REPAIR. Done before they are mapped. */
-        memset(zero, 0, sizeof(zero));
-        for (v = 0; v < got; v++) {
-            r = ods2_write_block(vol, lbn + v, zero);
-            if (!r.ok) {
-                ods2_free_blocks(vol, lbn, got);
-                return r;
-            }
-        }
         /* what the last header becomes, in memory */
         memcpy(trial, tail, 512);
         fits = indexf_map_append(trial, lbn, got, !nomerge);
@@ -2046,6 +2064,23 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
     if (need_ext) {
         slot = indexf_pick_slot(vol, (uint32_t) hiblk + 1, got, n);
         if (slot == 0) need_ext = false;                   /* only the reserve: the next growth tries again */
+    }
+    {
+        /* The piece that is kept is zeroed now, not before it was known to be kept (review 28 F1: a piece zeroed in the
+           change's buffer and then given back had its zeros written over the content of the file that was given the
+           blocks next). The clusters hold whatever was in them, and header images left in free space (an earlier index
+           file, a BACKUP save set kept as a file) would be seen by ANALYZE as valid headers, to be resurrected by REPAIR
+           (review 6, finding 7): zeroed before they are mapped. */
+        uint8_t zero[512];
+        unsigned v;
+        memset(zero, 0, sizeof(zero));
+        for (v = 0; v < got; v++) {
+            r = ods2_write_block(vol, lbn + v, zero);
+            if (!r.ok) {
+                ods2_free_blocks(vol, lbn, got);
+                return r;
+            }
+        }
     }
     hiblk += got;
     memcpy(primary, indexf_header, 512);
@@ -4125,6 +4160,8 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
         return fail("lbn/block_count must be cluster-aligned (exactly what "
                     "ods2_allocate_blocks() returned)");
     }
+
+    txn_forget_blocks(vol, lbn, block_count);      /* a write kept for these blocks is not made at commit */
 
     r = ods2_read_header(vol, 2, bitmap_header); /* BITMAP.SYS is always file 2 */
     if (!r.ok) return r;
