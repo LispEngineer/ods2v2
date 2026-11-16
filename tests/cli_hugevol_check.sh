@@ -26,6 +26,17 @@ rm -rf "$TMP"
 mkdir -p "$TMP"
 head -c 300000 /dev/urandom > "$TMP/f.bin"
 
+# the edges of the two warnings, with nothing else done to the volume (sparse images; CORPUS 35.3: V7.3-2 mounts 2,147,475,456 and
+# refuses one more; 35.1 and HP's "OpenVMS V8.4 New Features" 2.4: V8.4 mounts 65534 x 255 x 255 = 4,261,348,350 and no more);
+# nothing is printed when the command is refused (2^32 - 15 blocks is one too many)
+for edge in "2147475455 0 0" "2147475456 0 0" "2147475457 1 0" "4261348350 1 0" "4261348351 1 1" "4294967281 0 0"; do
+    set -- $edge
+    img="$TMP/e$1.img"
+    $INIT "$img" $1 --structure=2 --label=EDGE >/dev/null 2>"$TMP/err"
+    check "$1 blocks: warnings V7.3-2 / V8.4 (the VAX is said to be not measured)" "$2 $3 $2" \
+        "$(grep -c 'V7.3-2.*2,147,475,456' "$TMP/err") $(grep -c 'V8.4 mounts at most 4,261,348,350' "$TMP/err") $(grep -c 'VAX V7.3 is not measured' "$TMP/err")"
+    rm -f "$img"
+done
 for blocks in 2147475456 2147483632 2147483664 4294967280; do
     img="$TMP/h$blocks.img"
     if ! $INIT "$img" $blocks --structure=5 --label=HUGE >/dev/null 2>"$TMP/err"; then
