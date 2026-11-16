@@ -3,7 +3,7 @@
 # fuzz_campaign.sh OUTFILE ITERATIONS SEED - fuzz_write.py on several VMS-made images in parallel (project root)
 out=${1:-fuzz-write}; iters=${2:-2000}; seed=${3:-1}
 mkdir -p "$out"
-W=${STRESS_WORK:-$HOME/tmp/ods5-st/work}
+W=${STRESS_WORK:-$HOME/tmp/ods5-stress/work}
 # at most 6 jobs at a time, each in a 4 GB scope (24 GB total); never uncapped
 for im in m1-hl-after-asim12 m1-nohl-after-asim12 m1-ods2-after-asim12 m23-after-asim12 m2b-after-asim12 w1c-f5-after-asim12 w1c-f2-after-asim12 phvs2-ods2v-20261108 asim12-ods5t-20261108 asim12-ods2t-20261108; do
     echo "$im"

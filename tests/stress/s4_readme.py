@@ -75,7 +75,7 @@ for f in sorted(glob.glob(os.path.join(out, '*.img'))):
     sums.append('%s  %s.img' % (h.hexdigest(), name))
 txt = """# S4: after-images of the ods5-stress harness, for VMS to confirm
 
-Made %s (-0500) by ods5-st (Claude Sonnet 5.5) with ods2v2 built from %s (the stress branch ods5-stress adds tests only). Every image was built by the stress harness: after EVERY
+Made %s (-0500) by the stress campaign with ods2v2 built from %s (the stress branch ods5-stress adds tests only). Every image was built by the stress harness: after EVERY
 operation tests/ods5check.py (0 errors, 0 warnings), an independent reader (names, sizes, MD5 of every file = the model) and ods2's EXPORT agreed; the final images were checked again (0/0, just before this file was written).
 All images are mode 444; SHA-256 in SHA256SUMS.TXT. Labels are unique, so any number can be mounted together.
 

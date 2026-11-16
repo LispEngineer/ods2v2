@@ -32,7 +32,7 @@ import stress     # noqa: E402
 
 FAULT = os.environ.get('FAULT_ODS2', os.path.join(ROOT, 'ods2_fault'))
 UP2 = os.environ.get('CRASH_UP2') == '1'      # upstream's ods2 (ODS-2 only, no IMPORT/LINK/SYMLINK, own SET FILE/VERSION_LIMIT) built with tests/stress/fault_shim.c
-STARTER = os.environ.get('STARTER', os.path.expanduser('~/tmp/ods5-st/work/up2/transfer.dsk'))
+STARTER = os.environ.get('STARTER', os.path.expanduser('~/tmp/ods5-stress/work/up2/transfer.dsk'))
 CHECKER = stress.CHECKER
 
 # errors that a half-done operation may leave (same list as tests/fault_inject.py): leaks and dangling states only

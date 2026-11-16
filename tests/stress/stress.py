@@ -32,7 +32,7 @@ ODS2_READ = os.environ.get('ODS2_READ')     # binary for read-only commands (EXP
 ODS2_INIT = os.environ.get('ODS2_INIT', os.path.join(ROOT, 'ods2_init'))
 CHECKER = os.path.join(ROOT, 'tests', 'ods5check.py')
 CORPUS = os.path.expanduser('~/tmp/ods5-cli')
-WORK = os.environ.get('STRESS_WORK', os.path.expanduser('~/tmp/ods5-st/work'))
+WORK = os.environ.get('STRESS_WORK', os.path.expanduser('~/tmp/ods5-stress/work'))
 
 ENV = dict(os.environ)
 ENV['ASAN_OPTIONS'] = 'detect_leaks=1:abort_on_error=0:exitcode=77'
