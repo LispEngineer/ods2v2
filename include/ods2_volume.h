@@ -200,6 +200,12 @@ ods2_result_t ods2_decode_all_extents(ods2_volume_t *vol, const uint8_t *header,
                                        ods2_extent_t *extents_out, size_t max_extents,
                                        int *count_out);
 
+/* The same, into a list this function allocates (free() it; NULL for a file with no extents): no limit on the number of
+   extents or of extension headers but memory and FH2$W_SEG_NUM's 65,535. ods2_decode_all_extents() is the fixed-array form for
+   callers that hold only a few (it refuses a file with more than `max_extents`, never shortens the list). */
+ods2_result_t ods2_decode_all_extents_alloc(ods2_volume_t *vol, const uint8_t *header,
+                                             ods2_extent_t **extents_out, int *count_out);
+
 /* Reads a file's entire logical content (respecting FAT$L_EFBLK/
    FAT$W_FFBYTE - the end-of-file mark - not just its physical
    allocation, which is normally larger) into a caller-allocated

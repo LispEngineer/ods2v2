@@ -898,34 +898,50 @@ ods2_result_t ods2_allocate_extent(ods2_volume_t *vol, unsigned max_blocks,
    looping forever. */
 #define ODS2_MAX_HEADER_SEGMENTS 64
 
-ods2_result_t ods2_decode_all_extents(ods2_volume_t *vol, const uint8_t *header,
-                                       ods2_extent_t *extents_out, size_t max_extents,
-                                       int *count_out)
+/* The most headers one file can have: FH2$W_SEG_NUM is a word. The chain is followed to its end; each extension header must
+   be the next segment number of this file (extension_header_ok), so a circular chain stops at the second visit. */
+#define ODS2_SEGMENT_LIMIT 65535
+
+ods2_result_t ods2_decode_all_extents_alloc(ods2_volume_t *vol, const uint8_t *header,
+                                             ods2_extent_t **extents_out, int *count_out)
 {
     uint8_t current[512];
+    ods2_extent_t *list = NULL;
+    size_t cap = 0;
     int total = 0;
-    int segment;
+    unsigned segment;
 
+    *extents_out = NULL;
+    *count_out = 0;
     memcpy(current, header, 512);
 
-    for (segment = 0; segment < ODS2_MAX_HEADER_SEGMENTS; segment++) {
+    for (segment = 0; segment < ODS2_SEGMENT_LIMIT; segment++) {
         const ods2_head_core_t *core = (const ods2_head_core_t *) current;
-        int n = decode_header_extents(current,
-                                       extents_out + total,
-                                       (max_extents > (size_t) total)
-                                           ? max_extents - (size_t) total : 0);
-        if (n == ODS2_DECODE_TOO_MANY) {
-            /* never a shortened list: a reader would stop short of the file's end, a delete would free only
-               the extents it was given and leak the rest */
-            return fail("this file has more extents than ods2v2 can hold (1024): refused");
-        }
-        if (n < 0) {
+        ods2_extent_t part[256];      /* a header's map area holds at most 255 words: 127 pointers */
+        int n = decode_header_extents(current, part, sizeof(part) / sizeof(part[0]));
+
+        if (n == ODS2_DECODE_TOO_MANY || n < 0) {
+            free(list);
             return fail("could not decode retrieval pointers for a header segment");
         }
-        total += n;
+        if (n > 0) {
+            if ((size_t) total + (size_t) n > cap) {
+                size_t ncap = cap == 0 ? 256 : cap * 2;
+                ods2_extent_t *bigger;
+                while (ncap < (size_t) total + (size_t) n) ncap *= 2;
+                if (ncap > (size_t) 0x7fffffff / sizeof(ods2_extent_t)) { free(list); return fail("too many extents"); }
+                bigger = realloc(list, ncap * sizeof(*list));
+                if (bigger == NULL) { free(list); return fail("out of memory reading a file's retrieval pointers"); }
+                list = bigger;
+                cap = ncap;
+            }
+            memcpy(list + total, part, (size_t) n * sizeof(*list));
+            total += n;
+        }
 
         if (ods2_fid_number(core->ext_fid) == 0) {
             /* No further extension header - done. */
+            *extents_out = list;
             *count_out = total;
             return ok();
         }
@@ -933,18 +949,42 @@ ods2_result_t ods2_decode_all_extents(ods2_volume_t *vol, const uint8_t *header,
         {
             ods2_fid_t expect = core->ext_fid;
             ods2_result_t r = ods2_read_header(vol, ods2_fid_number(expect), current);
-            if (!r.ok) return r;
+            if (!r.ok) { free(list); return r; }
             if (!extension_header_ok(current, expect,
                                      ods2_fid_number(((const ods2_head_core_t *) header)->fid),
-                                     (unsigned) segment + 1)) {
+                                     segment + 1)) {
+                free(list);
                 return fail("an extension header is not the next segment of this file "
                             "(wrong file number, segment number, back link or checksum): damaged");
             }
         }
     }
 
+    free(list);
     return fail("extension header chain exceeded maximum segment limit "
                 "(possibly corrupted or circular ext_fid chain)");
+}
+
+/* The fixed-array form, for callers that hold a few extents (system files, directories): the same walk, and a file with
+   more than `max_extents` pieces is refused, never given as a shortened list (a reader would stop short of the file's end,
+   a delete would free only the extents it was given and leak the rest). */
+ods2_result_t ods2_decode_all_extents(ods2_volume_t *vol, const uint8_t *header,
+                                       ods2_extent_t *extents_out, size_t max_extents,
+                                       int *count_out)
+{
+    ods2_extent_t *list = NULL;
+    int total = 0;
+    ods2_result_t r = ods2_decode_all_extents_alloc(vol, header, &list, &total);
+
+    if (!r.ok) return r;
+    if ((size_t) total > max_extents) {
+        free(list);
+        return fail("this file has more extents than this caller can hold: refused");
+    }
+    if (total > 0) memcpy(extents_out, list, (size_t) total * sizeof(*list));
+    free(list);
+    *count_out = total;
+    return ok();
 }
 
 /* Walks every entry of a directory, one block at a time, handing each
@@ -1187,15 +1227,15 @@ ods2_result_t ods2_read_file_stream(ods2_volume_t *vol, const uint8_t *header,
        of blocks, too many to look up one by one, and too much to hold
        in memory at once (issue #16). */
     if (content_len > 0) {
-        ods2_extent_t extents[ODS2_MAX_EXTENTS];
+        ods2_extent_t *extents = NULL;
         size_t chunk_cap = content_len < ODS2_STREAM_CHUNK ? (size_t) content_len : ODS2_STREAM_CHUNK;
         uint8_t *chunk;
         int n, i;
 
-        r = ods2_decode_all_extents(vol, header, extents, ODS2_MAX_EXTENTS, &n);
+        r = ods2_decode_all_extents_alloc(vol, header, &extents, &n);
         if (!r.ok) return r;
         chunk = malloc(chunk_cap);
-        if (chunk == NULL) return fail("could not allocate a read buffer");
+        if (chunk == NULL) { free(extents); return fail("could not allocate a read buffer"); }
         for (i = 0; i < n && written < content_len && r.ok; i++) {
             uint64_t want = content_len - written;
             uint64_t run = (uint64_t) extents[i].block_count * 512u;
@@ -1220,6 +1260,7 @@ ods2_result_t ods2_read_file_stream(ods2_volume_t *vol, const uint8_t *header,
             }
         }
         free(chunk);
+        free(extents);
         if (r.ok && written < content_len) {
             r = fail("requested VBN is not covered by this file's extents");
         }
@@ -2705,39 +2746,89 @@ ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
     }
 }
 
+/* What creating a file keeps for its pieces and its headers, grown as the file needs (a file may take thousands of extents
+   and, up to FH2$W_SEG_NUM, 65,535 headers); freed by create_file on every path. */
+typedef struct {
+    ods2_extent_t *extents;
+    size_t         extent_cap;
+    int           *seg_first, *seg_count;
+    unsigned      *seg_file_number;
+    uint16_t      *seg_seq;
+    size_t         seg_cap;
+} create_scratch_t;
+
+/* room for `count` extents / `count` segments; false when out of memory */
+static bool scratch_extent_room(create_scratch_t *sc, size_t count)
+{
+    if (count > sc->extent_cap) {
+        size_t ncap = sc->extent_cap == 0 ? 64 : sc->extent_cap * 2;
+        ods2_extent_t *bigger;
+        while (ncap < count) ncap *= 2;
+        bigger = realloc(sc->extents, ncap * sizeof(*bigger));
+        if (bigger == NULL) return false;
+        sc->extents = bigger;
+        sc->extent_cap = ncap;
+    }
+    return true;
+}
+
+static bool scratch_seg_room(create_scratch_t *sc, size_t count)
+{
+    if (count > sc->seg_cap) {
+        size_t ncap = sc->seg_cap == 0 ? 8 : sc->seg_cap * 2;
+        int *a, *b;
+        unsigned *c;
+        uint16_t *d;
+        while (ncap < count) ncap *= 2;
+        a = realloc(sc->seg_first, ncap * sizeof(*a));
+        if (a == NULL) return false;
+        sc->seg_first = a;
+        b = realloc(sc->seg_count, ncap * sizeof(*b));
+        if (b == NULL) return false;
+        sc->seg_count = b;
+        c = realloc(sc->seg_file_number, ncap * sizeof(*c));
+        if (c == NULL) return false;
+        sc->seg_file_number = c;
+        d = realloc(sc->seg_seq, ncap * sizeof(*d));
+        if (d == NULL) return false;
+        sc->seg_seq = d;
+        sc->seg_cap = ncap;
+    }
+    return true;
+}
+
 static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_header,
                                       const char *name, ods2_content_source_t *src,
                                       const ods2_record_attrs_t *attrs, unsigned special,
-                                      ods2_fid_t *new_fid_out);
+                                      ods2_fid_t *new_fid_out, create_scratch_t *sc);
 
 static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_header,
                                  const char *name, ods2_content_source_t *src,
                                  const ods2_record_attrs_t *attrs, unsigned special,
                                  ods2_fid_t *new_fid_out)
 {
+    create_scratch_t sc = { NULL, 0, NULL, NULL, NULL, NULL, 0 };
+    ods2_result_t r;
     TXN_BEGIN_OR_RETURN(vol);
-    return txn_end(vol, create_file_impl(vol, parent_header, name, src, attrs, special, new_fid_out));
+    r = create_file_impl(vol, parent_header, name, src, attrs, special, new_fid_out, &sc);
+    free(sc.extents); free(sc.seg_first); free(sc.seg_count); free(sc.seg_file_number); free(sc.seg_seq);
+    return txn_end(vol, r);
 }
 
 static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_header,
                                       const char *name, ods2_content_source_t *src,
                                       const ods2_record_attrs_t *attrs, unsigned special,
-                                      ods2_fid_t *new_fid_out)
+                                      ods2_fid_t *new_fid_out, create_scratch_t *sc)
 {
     uint64_t content_len = src->length;
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
     uint64_t blocks_needed;
     size_t blocks_remaining;
-    ods2_extent_t extents[ODS2_MAX_EXTENTS];
     int extent_count = 0;
     size_t total_allocated = 0;
     unsigned max_request;
-    int seg_first[ODS2_MAX_HEADER_SEGMENTS];
-    int seg_count[ODS2_MAX_HEADER_SEGMENTS];
-    unsigned seg_file_number[ODS2_MAX_HEADER_SEGMENTS];
-    uint16_t seg_seq[ODS2_MAX_HEADER_SEGMENTS];
     int segments = 0, numbered = 0, pos, seg;
-    int lowest_written = ODS2_MAX_HEADER_SEGMENTS; /* headers seg.. on disk */
+    int lowest_written = 0x7fffffff; /* headers seg.. on disk */
     ods2_header_spec_t spec;
     uint8_t new_header[512];
     ods2_result_t r;
@@ -2803,7 +2894,8 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
     /* The primary header's file number first, before the content can
        take the space INDEXF.SYS may need to grow for its header (see
        allocate_file_number()). */
-    r = allocate_file_number(vol, &seg_file_number[0], &seg_seq[0]);
+    if (!scratch_seg_room(sc, 1)) return fail("out of memory");
+    r = allocate_file_number(vol, &sc->seg_file_number[0], &sc->seg_seq[0]);
     if (!r.ok) return r;
     numbered = 1;
 
@@ -2815,9 +2907,8 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
         unsigned chunk_request = (blocks_remaining < max_request)
                                      ? (unsigned) blocks_remaining : max_request;
 
-        if (extent_count >= ODS2_MAX_EXTENTS) {
-            r = fail("the volume's free space is too fragmented to hold this file "
-                     "(it would need more than 1024 separate pieces)");
+        if (!scratch_extent_room(sc, (size_t) extent_count + 1)) {
+            r = fail("out of memory allocating the file's pieces");
             goto undo;
         }
         r = ods2_allocate_extent(vol, chunk_request, &chunk_lbn, &chunk_allocated);
@@ -2825,8 +2916,8 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
             r = fail("not enough free space on the volume for this file");
             goto undo;
         }
-        extents[extent_count].lbn = chunk_lbn;
-        extents[extent_count].block_count = chunk_allocated;
+        sc->extents[extent_count].lbn = chunk_lbn;
+        sc->extents[extent_count].block_count = chunk_allocated;
         extent_count++;
         total_allocated += chunk_allocated;
         blocks_remaining = (chunk_allocated >= blocks_remaining) ? 0
@@ -2844,20 +2935,24 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
     for (pos = 0; pos < extent_count; ) {
         int fit;
         spec.seg_num = (uint16_t) segments; /* where the Map Area starts depends on it at level 5 */
-        fit = ods2_header_extents_that_fit_at(extents + pos, extent_count - pos,
+        fit = ods2_header_extents_that_fit_at(sc->extents + pos, extent_count - pos,
                                               ods2_header_map_offset(&spec));
         if (fit <= 0) {
             r = fail("internal error: an allocated extent cannot be described by "
                      "any retrieval pointer format (should be unreachable)");
             goto undo;
         }
-        if (segments >= ODS2_MAX_HEADER_SEGMENTS) {
+        if (segments >= ODS2_SEGMENT_LIMIT) {
             r = fail("the volume's free space is too fragmented to hold this file "
-                     "(it would need more than 64 file headers)");
+                     "(it would need more than 65,535 file headers)");
             goto undo;
         }
-        seg_first[segments] = pos;
-        seg_count[segments] = fit;
+        if (!scratch_seg_room(sc, (size_t) segments + 1)) {
+            r = fail("out of memory planning the file's headers");
+            goto undo;
+        }
+        sc->seg_first[segments] = pos;
+        sc->seg_count[segments] = fit;
         segments++;
         pos += fit;
     }
@@ -2866,7 +2961,7 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
        end-of-file, its bit marked in use - for every extension header
        too. */
     while (numbered < segments) {
-        r = allocate_file_number(vol, &seg_file_number[numbered], &seg_seq[numbered]);
+        r = allocate_file_number(vol, &sc->seg_file_number[numbered], &sc->seg_seq[numbered]);
         if (!r.ok) goto undo;
         numbered++;
     }
@@ -2904,28 +2999,28 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
        disk. Each extension header has its own FID, its segment
        number, and a back link to the primary header (spec 3.5.2.16). */
     for (seg = segments - 1; seg >= 0; seg--) {
-        ods2_fid_set_number(&spec.fid, seg_file_number[seg]);
-        spec.fid.fid_seq = seg_seq[seg];
+        ods2_fid_set_number(&spec.fid, sc->seg_file_number[seg]);
+        spec.fid.fid_seq = sc->seg_seq[seg];
         spec.seg_num = (uint16_t) seg;
         memset(&spec.ext_fid, 0, sizeof(spec.ext_fid));
         if (seg + 1 < segments) {
-            ods2_fid_set_number(&spec.ext_fid, seg_file_number[seg + 1]);
-            spec.ext_fid.fid_seq = seg_seq[seg + 1];
+            ods2_fid_set_number(&spec.ext_fid, sc->seg_file_number[seg + 1]);
+            spec.ext_fid.fid_seq = sc->seg_seq[seg + 1];
         }
         memset(&spec.backlink, 0, sizeof(spec.backlink));
         if (seg == 0) {
             spec.backlink = parent_core->fid;
         } else {
-            ods2_fid_set_number(&spec.backlink, seg_file_number[0]);
-            spec.backlink.fid_seq = seg_seq[0];
+            ods2_fid_set_number(&spec.backlink, sc->seg_file_number[0]);
+            spec.backlink.fid_seq = sc->seg_seq[0];
         }
-        spec.extents = extents + seg_first[seg];
-        spec.extent_count = seg_count[seg];
+        spec.extents = sc->extents + sc->seg_first[seg];
+        spec.extent_count = sc->seg_count[seg];
         if (!ods2_build_file_header(new_header, &spec)) {
             r = fail("could not construct new file's header");
             goto undo;
         }
-        r = ods2_write_header(vol, seg_file_number[seg], new_header);
+        r = ods2_write_header(vol, sc->seg_file_number[seg], new_header);
         if (!r.ok) goto undo;
         lowest_written = seg;
     }
@@ -2942,7 +3037,7 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
        entry) is still only in memory, and reaches the image after this, in the order the crash-safety rules
        need - so the content is on the disk before any header refers to it, and a refused copy has not
        written a byte. */
-    r = write_extents(vol, extents, extent_count, src);
+    r = write_extents(vol, sc->extents, extent_count, src);
     if (!r.ok) goto undo;
 
     *new_fid_out = spec.fid;
@@ -2956,7 +3051,7 @@ undo:
        is never reused (spec 5.1.7). */
     for (seg = lowest_written; seg < segments; seg++) {
         memset(new_header, 0, sizeof(new_header));
-        if (ods2_read_header(vol, seg_file_number[seg], new_header).ok) {
+        if (ods2_read_header(vol, sc->seg_file_number[seg], new_header).ok) {
             ods2_head_core_t *core = (ods2_head_core_t *) new_header;
             core->filechar |= 0x8000u; /* FH2$M_MARKDEL */
             core->fid.fid_num = 0;
@@ -2964,14 +3059,14 @@ undo:
             core->fid.fid_rvn = 0;
             new_header[510] = 0;
             new_header[511] = 0;
-            ods2_write_header(vol, seg_file_number[seg], new_header);
+            ods2_write_header(vol, sc->seg_file_number[seg], new_header);
         }
     }
     for (pos = 0; pos < extent_count; pos++) {
-        ods2_free_blocks(vol, extents[pos].lbn, extents[pos].block_count);
+        ods2_free_blocks(vol, sc->extents[pos].lbn, sc->extents[pos].block_count);
     }
     for (seg = 0; seg < numbered; seg++) {
-        mark_index_bitmap(vol, seg_file_number[seg], false);
+        mark_index_bitmap(vol, sc->seg_file_number[seg], false);
     }
     return r;
 }
@@ -3890,6 +3985,30 @@ static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_n
                                          const char *name, int version, uint16_t *version_out,
                                          ods2_delete_info_t *info);
 
+/* What a delete keeps in memory for the file it removes: the extent list and the extension headers, sized by the file (a file
+   may have thousands of extents and, up to FH2$W_SEG_NUM, 65,535 headers). Freed by delete_version_impl on every path. */
+typedef struct {
+    ods2_extent_t *extents;
+    uint8_t (*ext_headers)[512];
+    unsigned *ext_numbers;
+} delete_scratch_t;
+
+static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_number,
+                                         const char *name, int version, uint16_t *version_out,
+                                         ods2_delete_info_t *info, delete_scratch_t *sc);
+
+static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_number,
+                                         const char *name, int version, uint16_t *version_out,
+                                         ods2_delete_info_t *info)
+{
+    delete_scratch_t sc = { NULL, NULL, NULL };
+    ods2_result_t r = delete_version_body(vol, dir_file_number, name, version, version_out, info, &sc);
+    free(sc.extents);
+    free(sc.ext_headers);
+    free(sc.ext_numbers);
+    return r;
+}
+
 ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_number,
                                        const char *name, int version, uint16_t *version_out,
                                        ods2_delete_info_t *info)
@@ -3898,20 +4017,21 @@ ods2_result_t ods2_delete_version_info(ods2_volume_t *vol, unsigned dir_file_num
     return txn_end(vol, delete_version_impl(vol, dir_file_number, name, version, version_out, info));
 }
 
-static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_number,
+static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_number,
                                          const char *name, int version, uint16_t *version_out,
-                                         ods2_delete_info_t *info)
+                                         ods2_delete_info_t *info, delete_scratch_t *sc)
 {
     uint16_t target_version;
     uint8_t dir_header[512];
     ods2_fid_t target_fid;
     uint8_t target_header[512];
     ods2_head_core_t *target_core;
-    ods2_extent_t extents[ODS2_MAX_EXTENTS];
+    ods2_extent_t *extents = NULL;
     int extent_count;
     int i;
-    uint8_t ext_headers[ODS2_MAX_HEADER_SEGMENTS][512];
-    unsigned ext_numbers[ODS2_MAX_HEADER_SEGMENTS];
+    uint8_t (*ext_headers)[512] = NULL;
+    unsigned *ext_numbers = NULL;
+    size_t ext_cap = 0;
     int ext_count = 0;
     ods2_result_t r;
 
@@ -4064,8 +4184,9 @@ static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_n
 
     /* Read everything the delete needs before anything is changed, so that a failure here (a damaged
        map, an extension header that cannot be read) leaves the file as it was. */
-    r = ods2_decode_all_extents(vol, target_header, extents, ODS2_MAX_EXTENTS, &extent_count);
+    r = ods2_decode_all_extents_alloc(vol, target_header, &sc->extents, &extent_count);
     if (!r.ok) return r;
+    extents = sc->extents;
     for (i = 0; i < extent_count; i++) {
         /* ods2_free_blocks() refuses an extent that is not whole clusters: refuse here, before anything is
            buffered (R9-6) */
@@ -4077,9 +4198,22 @@ static ods2_result_t delete_version_impl(ods2_volume_t *vol, unsigned dir_file_n
     {
         ods2_fid_t next = target_core->ext_fid;
         while (ods2_fid_number(next) != 0) {
-            if (ext_count >= ODS2_MAX_HEADER_SEGMENTS) {
+            if (ext_count >= ODS2_SEGMENT_LIMIT) {
                 return fail("extension header chain exceeded maximum segment limit "
                             "(possibly corrupted or circular ext_fid chain)");
+            }
+            if ((size_t) ext_count >= ext_cap) {
+                size_t ncap = ext_cap == 0 ? 16 : ext_cap * 2;
+                uint8_t (*nh)[512] = realloc(sc->ext_headers, ncap * sizeof(*nh));
+                unsigned *nn;
+                if (nh == NULL) return fail("out of memory reading the file's extension headers");
+                sc->ext_headers = nh;
+                nn = realloc(sc->ext_numbers, ncap * sizeof(*nn));
+                if (nn == NULL) return fail("out of memory reading the file's extension headers");
+                sc->ext_numbers = nn;
+                ext_headers = nh;
+                ext_numbers = nn;
+                ext_cap = ncap;
             }
             ext_numbers[ext_count] = ods2_fid_number(next);
             r = ods2_read_header(vol, ods2_fid_number(next), ext_headers[ext_count]);

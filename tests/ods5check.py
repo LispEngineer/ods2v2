@@ -412,7 +412,7 @@ def main():
             efn = u16(cur, 14) | (cur[19] << 16)
             if efn == 0:
                 break
-            if efn in segs or len(segs) > 64:
+            if efn in segs or len(segs) > 65535:
                 fnd.err('%s: extension chain loops' % where)
                 break
             nb = headers.get(efn)

@@ -317,6 +317,8 @@ int main(void)
         ods2_fid_t head, chain[SEGMENTS];
         uint8_t h[512], ext_hdr[512];
         ods2_extent_t ext[PER], got[ODS2_MAX_EXTENTS];
+        uint32_t owned[SEGMENTS * PER];       /* the clusters the extension headers map, really allocated */
+        int nowned = 0, k;
         ods2_header_spec_t spec;
         int seg, e, n;
         uint16_t sum;
@@ -332,13 +334,19 @@ int main(void)
             assert(ods2_create_file(&vol, root, nm, (const uint8_t *) "x", 1, 2, &chain[seg]).ok);
         }
         for (seg = SEGMENTS - 1; seg >= 1; seg--) {          /* the extension headers, last to first */
-            for (e = 0; e < PER; e++) { ext[e].lbn = 2000000u + (uint32_t) ((unsigned) seg * PER + (unsigned) e) * 2u; ext[e].block_count = 1; }
+            for (e = 0; e < PER; e++) {
+                uint32_t lbn;
+                unsigned got_blocks;
+                assert(ods2_allocate_extent(&vol, vol.home.cluster, &lbn, &got_blocks).ok && got_blocks == vol.home.cluster);
+                ext[e].lbn = lbn; ext[e].block_count = got_blocks;
+                owned[nowned++] = lbn;
+            }
             memset(&spec, 0, sizeof(spec));
             spec.fid = chain[seg];
             spec.backlink = head;
             spec.seg_num = (uint16_t) seg;
             if (seg + 1 < SEGMENTS) spec.ext_fid = chain[seg + 1];
-            spec.extents = ext; spec.extent_count = PER; spec.hiblk = PER; spec.efblk = 1;
+            spec.extents = ext; spec.extent_count = PER; spec.hiblk = PER * vol.home.cluster; spec.efblk = 1;
             spec.ident_name = "FRAG.DAT;1";
             assert(ods2_build_file_header(ext_hdr, &spec));
             assert(ods2_write_header(&vol, chain[seg].fid_num, ext_hdr).ok);
@@ -356,14 +364,15 @@ int main(void)
             snprintf(problem_seen, sizeof(problem_seen), "%s", r.problem);
             r = ods2_read_file_block(&vol, h, 1000, blk);
             assert(!r.ok);
-            arm(NOLIMIT);
+            for (k = 0; k < nowned; k++) assert(!cluster_free(&vol, owned[k]));
+            /* the delete is not limited by the 1,024 of the fixed arrays: every extent of every extension header is
+               freed, and so are the 14 extension headers' file numbers */
             r = ods2_delete_version(&vol, 4, "FRAG.DAT", 1, NULL);
-            assert(!r.ok && strstr(r.problem, "more extents") != NULL);
-            assert(disarm(NOLIMIT) == 0);
-            ods2_fault_forget();
-            assert(count_named(&vol, 4, "FRAG.DAT") == 1);
+            assert(r.ok);
+            assert(count_named(&vol, 4, "FRAG.DAT") == 0);
+            for (k = 0; k < nowned; k++) assert(cluster_free(&vol, owned[k]));
         }
-        printf("PASS: a file with 1,079 extents is refused for reading and deleting (%s), nothing written\n", problem_seen);
+        printf("PASS: a file with 1,079 extents is refused by the fixed-array reader (%s), and deleted whole: all %d clusters of its extension headers free\n", problem_seen, nowned);
     }
 
     /* ---- headers and directory blocks that are damaged are not rewritten ---- */

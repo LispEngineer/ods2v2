@@ -210,6 +210,42 @@ int main(void)
         printf("PASS: Formats 1, 2 and 3 mixed in one map area round-trip exactly\n");
     }
 
+    /* The boundary values of every format (LARGE_VOLUMES.md 6): each LBN across 2^22 - 1, 2^22, 2^31 and 2^32 - 2, each count
+       across 1, 256, 257, 16384, 16385 and 2^30, encoded and decoded back exactly, in the size the format table says. */
+    {
+        static const uint32_t lbns[] = { 0, 1, 0x3ffffeu, 0x3fffffu, 0x400000u, 0x7fffffffu, 0x80000000u, 0xfffffffeu };
+        static const uint32_t counts[] = { 1, 2, 255, 256, 257, 16383, 16384, 16385, (1u << 30) - 1, 1u << 30 };
+        size_t li, ci, checked = 0;
+        for (li = 0; li < sizeof(lbns) / sizeof(lbns[0]); li++) {
+            for (ci = 0; ci < sizeof(counts) / sizeof(counts[0]); ci++) {
+                uint8_t map[8];
+                ods2_extent_t out[2];
+                uint32_t lbn = lbns[li], count = counts[ci];
+                size_t want, got;
+                bool f1 = count <= 256 && lbn < 0x3fffffu;
+                want = f1 ? 4 : (count <= 16384 ? 6 : 8);
+                assert(ods2_retrieval_pointer_size(lbn, count) == want);
+                got = ods2_encode_retrieval_pointer(map, lbn, count);
+                assert(got == want);
+                assert(ods2_decode_retrieval_pointers(map, got / 2, out, 2) == 1);
+                assert(out[0].lbn == lbn && out[0].block_count == count);
+                /* a map area cut short is reported, not read past */
+                assert(ods2_decode_retrieval_pointers(map, got / 2 - 1, out, 2) == -1);
+                checked++;
+            }
+        }
+        /* a list longer than the caller's array is never shortened */
+        {
+            uint8_t map[40];
+            ods2_extent_t out[10];
+            size_t used = 0, k;
+            for (k = 0; k < 10; k++) used += ods2_encode_retrieval_pointer(map + used, (uint32_t) (100 * k), 5);
+            assert(ods2_decode_retrieval_pointers(map, used / 2, out, 3) == ODS2_DECODE_TOO_MANY);
+            assert(ods2_decode_retrieval_pointers(map, used / 2, out, 10) == 10);
+        }
+        printf("PASS: %zu (LBN, count) boundary combinations round-trip in the format sizes the table gives; short maps and long lists are reported\n", checked);
+    }
+
     /* Unrepresentable extents write nothing. */
     {
         uint8_t encoded[8] = { 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa };

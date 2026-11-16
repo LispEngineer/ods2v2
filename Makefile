@@ -347,6 +347,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_spool_check.sh
 	@echo "--- cli_hugevol_check ---"
 	@sh tests/cli_hugevol_check.sh
+	@echo "--- cli_frag_check ---"
+	@sh tests/cli_frag_check.sh
 	@echo "--- cli_ods5_integrity_check ---"
 	@sh tests/cli_ods5_integrity_check.sh
 	@echo "--- cli_deep_check (trees deeper than 255 levels) ---"
@@ -392,6 +394,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 test-large: tools ods2_dump_header
 	@echo "--- cli_nmx_big_check ---"
 	@sh tests/cli_nmx_big_check.sh
+	@echo "--- cli_frag_check (12,000 files: 6,000 extents, more than 64 extension headers) ---"
+	@FRAG_FILES=12000 sh tests/cli_frag_check.sh
 
 release: CFLAGS += -O2
 release: SANFLAGS =
