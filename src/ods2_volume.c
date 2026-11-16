@@ -158,6 +158,61 @@ static unsigned max_dir_depth(void)
 
 static void load_scb_volsize(ods2_volume_t *vol);
 
+/* INDEXF.SYS's extent cache: replaced as a whole (a change that is dropped puts the old list back) or appended to. */
+static bool indexf_extents_room(ods2_volume_t *vol, size_t count)
+{
+    if (count > vol->indexf_extent_cap) {
+        size_t ncap = vol->indexf_extent_cap == 0 ? 64 : vol->indexf_extent_cap * 2;
+        ods2_extent_t *bigger;
+        while (ncap < count) ncap *= 2;
+        bigger = realloc(vol->indexf_extents, ncap * sizeof(*bigger));
+        if (bigger == NULL) return false;
+        vol->indexf_extents = bigger;
+        vol->indexf_extent_cap = ncap;
+    }
+    return true;
+}
+
+/* Reads INDEXF.SYS's whole map into the cache: `primary` (file 1's header) and every extension header after it, which are
+   themselves inside the index file and found through the extents known so far. A chain that cannot be followed to its end
+   keeps what was read before it unless `strict`; the number of headers is FH2$W_SEG_NUM's, 65,535 (each must be the next
+   segment of file 1, so a loop stops at its second visit). Returns false when the primary's own map is unusable or memory
+   is out. */
+static bool indexf_extents_load(ods2_volume_t *vol, const uint8_t *primary, bool strict, const char **why)
+{
+    uint8_t current[512];
+    ods2_extent_t part[256];
+    int n;
+    unsigned segment;
+
+    vol->indexf_extent_count = 0;
+    n = decode_header_extents(primary, part, sizeof(part) / sizeof(part[0]));
+    if (n <= 0) { if (why) *why = "could not decode INDEXF.SYS's own retrieval pointers"; return false; }
+    if (!indexf_extents_room(vol, (size_t) n)) { if (why) *why = "out of memory"; return false; }
+    memcpy(vol->indexf_extents, part, (size_t) n * sizeof(part[0]));
+    vol->indexf_extent_count = n;
+    memcpy(current, primary, sizeof(current));
+    for (segment = 0; segment < 65535u; segment++) {
+        const ods2_head_core_t *core = (const ods2_head_core_t *) current;
+        uint8_t next[512];
+        if (ods2_fid_number(core->ext_fid) == 0) break;
+        if (!ods2_read_header(vol, ods2_fid_number(core->ext_fid), next).ok ||
+            !extension_header_ok(next, core->ext_fid, 1, segment + 1)) {
+            if (strict) { if (why) *why = "an INDEXF.SYS extension header cannot be read"; return false; }
+            break;
+        }
+        n = decode_header_extents(next, part, sizeof(part) / sizeof(part[0]));
+        if (n < 0) { if (strict) { if (why) *why = "an INDEXF.SYS extension header does not decode"; return false; } break; }
+        if (n == 0) { memcpy(current, next, sizeof(current)); continue; }   /* an empty map: the next link is still followed */
+        if (!indexf_extents_room(vol, (size_t) vol->indexf_extent_count + (size_t) n)) { if (why) *why = "out of memory"; return false; }
+        memcpy(vol->indexf_extents + vol->indexf_extent_count, part, (size_t) n * sizeof(part[0]));
+        vol->indexf_extent_count += n;
+        memcpy(current, next, sizeof(current));
+    }
+    return true;
+}
+
+
 static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
                                      const char *fopen_mode, bool writable)
 {
@@ -216,41 +271,13 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
         }
     }
 
-    vol->indexf_extent_count = decode_header_extents(indexf_header,
-        vol->indexf_extents, ODS2_MAX_EXTENTS);
-    if (vol->indexf_extent_count == ODS2_DECODE_TOO_MANY) {
-        ods2_dismount(vol);
-        return fail("INDEXF.SYS has more extents than ods2v2 can hold (1024): the volume is not mounted");
-    }
-    if (vol->indexf_extent_count <= 0) {
-        ods2_dismount(vol);
-        return fail("could not decode INDEXF.SYS's own retrieval pointers");
-    }
-
-    /* A fragmented index file continues in extension headers (FH2$W_EXT_FID),
-       which are themselves headers inside the index file: found through the
-       extents known so far, each one adding its own. If one cannot be read the
-       extents known so far are kept. */
     {
-        uint8_t current[512];
-        int segment;
-        memcpy(current, indexf_header, sizeof(current));
-        for (segment = 0; segment < ODS2_MAX_HEADER_SEGMENTS_MOUNT; segment++) {
-            const ods2_head_core_t *core = (const ods2_head_core_t *) current;
-            uint8_t next[512];
-            int n;
-            if (ods2_fid_number(core->ext_fid) == 0) break;
-            if (!ods2_read_header(vol, ods2_fid_number(core->ext_fid), next).ok) break;
-            if (!extension_header_ok(next, core->ext_fid, 1, (unsigned) segment + 1)) break;
-            n = decode_header_extents(next, vol->indexf_extents + vol->indexf_extent_count,
-                                      (size_t) (ODS2_MAX_EXTENTS - vol->indexf_extent_count));
-            if (n == ODS2_DECODE_TOO_MANY) {
-                ods2_dismount(vol);
-                return fail("INDEXF.SYS has more extents than ods2v2 can hold (1024): the volume is not mounted");
-            }
-            if (n <= 0) break;
-            vol->indexf_extent_count += n;
-            memcpy(current, next, sizeof(current));
+        const char *why = "could not decode INDEXF.SYS's own retrieval pointers";
+        /* A fragmented index file continues in extension headers (FH2$W_EXT_FID); if one cannot be read the extents
+           known so far are kept. */
+        if (!indexf_extents_load(vol, indexf_header, false, &why)) {
+            ods2_dismount(vol);
+            return fail(why);
         }
     }
 
@@ -358,7 +385,7 @@ struct ods2_txn {
     size_t        n, cap;
     size_t       *table;       /* open addressing: index + 1 of the latest write of an lbn, 0 = empty */
     size_t        table_cap;   /* a power of two */
-    ods2_extent_t saved_extents[ODS2_MAX_EXTENTS];
+    ods2_extent_t *saved_extents;   /* INDEXF.SYS's extent cache as it was when the change began */
     int           saved_extent_count;
 };
 
@@ -528,7 +555,16 @@ static ods2_result_t txn_begin(ods2_volume_t *vol)
         vol->txn = calloc(1, sizeof(*vol->txn));
 #endif
         if (vol->txn == NULL) return fail("out of memory: the change cannot be prepared, nothing is written");
-        memcpy(vol->txn->saved_extents, vol->indexf_extents, sizeof(vol->txn->saved_extents));
+        vol->txn->saved_extents = malloc((size_t) (vol->indexf_extent_count > 0 ? vol->indexf_extent_count : 1) *
+                                         sizeof(*vol->txn->saved_extents));
+        if (vol->txn->saved_extents == NULL) {
+            free(vol->txn);
+            vol->txn = NULL;
+            return fail("out of memory: the change cannot be prepared, nothing is written");
+        }
+        if (vol->indexf_extent_count > 0) {
+            memcpy(vol->txn->saved_extents, vol->indexf_extents, (size_t) vol->indexf_extent_count * sizeof(ods2_extent_t));
+        }
         vol->txn->saved_extent_count = vol->indexf_extent_count;
     }
     vol->txn_depth++;
@@ -538,6 +574,15 @@ static ods2_result_t txn_begin(ods2_volume_t *vol)
 #define TXN_BEGIN_OR_RETURN(vol) do { ods2_result_t b_ = txn_begin(vol); if (!b_.ok) return b_; } while (0)
 
 static ods2_result_t raw_write_block(ods2_volume_t *vol, uint32_t lbn, const uint8_t *block);
+
+/* puts INDEXF.SYS's extent cache back to what it was when the change began (room was made for it then) */
+static void indexf_extents_restore(ods2_volume_t *vol, const struct ods2_txn *t)
+{
+    if (t->saved_extent_count > 0 && indexf_extents_room(vol, (size_t) t->saved_extent_count)) {
+        memcpy(vol->indexf_extents, t->saved_extents, (size_t) t->saved_extent_count * sizeof(ods2_extent_t));
+        vol->indexf_extent_count = t->saved_extent_count;
+    }
+}
 
 /* The end of a change: written if `r` says it succeeded, dropped if not. Returns `r`, or the failure of a write
    at commit. A nested change commits or drops with the outermost one. */
@@ -558,13 +603,12 @@ static ods2_result_t txn_end(ods2_volume_t *vol, ods2_result_t r)
                mount (R9-2), and the INDEXF.SYS cache goes back to what it was before the change, as the
                disk may not have its new header */
             vol->write_failed = true;
-            memcpy(vol->indexf_extents, t->saved_extents, sizeof(t->saved_extents));
-            vol->indexf_extent_count = t->saved_extent_count;
+            indexf_extents_restore(vol, t);
         }
     } else {
-        memcpy(vol->indexf_extents, t->saved_extents, sizeof(t->saved_extents));
-        vol->indexf_extent_count = t->saved_extent_count;
+        indexf_extents_restore(vol, t);
     }
+    free(t->saved_extents);
     free(t->w);
     free(t->table);
     free(t);
@@ -652,6 +696,10 @@ void ods2_dismount(ods2_volume_t *vol)
         fclose(vol->fp);
         vol->fp = NULL;
     }
+    free(vol->indexf_extents);
+    vol->indexf_extents = NULL;
+    vol->indexf_extent_cap = 0;
+    vol->indexf_extent_count = 0;
 }
 
 static bool header_lbn(ods2_volume_t *vol, unsigned file_number, uint32_t *lbn_out)
@@ -1529,7 +1577,6 @@ static ods2_result_t write_indexf_header(ods2_volume_t *vol, uint8_t *indexf_hea
 {
     uint16_t checksum = ods2_checksum(indexf_header, 255);
     ods2_result_t r;
-    int count;
 
     indexf_header[510] = (uint8_t) (checksum & 0xff);
     indexf_header[511] = (uint8_t) (checksum >> 8);
@@ -1539,14 +1586,10 @@ static ods2_result_t write_indexf_header(ods2_volume_t *vol, uint8_t *indexf_hea
         r = ods2_write_block(vol, vol->home.altidxlbn, indexf_header);
         if (!r.ok) return r;
     }
-    count = decode_header_extents(indexf_header, vol->indexf_extents, ODS2_MAX_EXTENTS);
-    if (count == ODS2_DECODE_TOO_MANY) {
-        return fail("INDEXF.SYS would need more extents than ods2v2 can hold (1024)");
+    {
+        const char *why = "INDEXF.SYS's header no longer decodes after updating it";
+        if (!indexf_extents_load(vol, indexf_header, true, &why)) return fail(why);
     }
-    if (count <= 0) {
-        return fail("INDEXF.SYS's header no longer decodes after updating it");
-    }
-    vol->indexf_extent_count = count;
     return ok();
 }
 

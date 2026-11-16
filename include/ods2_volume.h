@@ -55,7 +55,8 @@ typedef struct {
        the first 16 (which can be located directly from home block
        fields alone; anything past that genuinely requires walking
        INDEXF.SYS's own content, which is what this enables). */
-    ods2_extent_t  indexf_extents[ODS2_MAX_EXTENTS];
+    ods2_extent_t *indexf_extents;      /* grown as needed (INDEXF.SYS's primary header and its whole extension chain) */
+    size_t         indexf_extent_cap;
     int            indexf_extent_count;
     /* A change to the volume (a delete, a create, a link) is made in memory first and written when it is
        known to succeed: every check that can fail runs before the first write to the image, so a refused
