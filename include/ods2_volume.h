@@ -399,6 +399,12 @@ bool ods2_image_short(ods2_volume_t *vol, char *msg, size_t cap);
    repairs it (one header write, and the stray bit), and `ods5check` reports it until then (review 28 a). */
 bool ods2_indexf_growth_unfinished(ods2_volume_t *vol);
 
+/* True when INDEXF.SYS has an extension header that looks like one ods2v2 wrote (e0bad43 and earlier test builds): the map at word
+   100 on an ODS-2 volume (VMS-made ones have it at word 50), or a level 5 header behind a level 2.1 primary. OpenVMS V8.4
+   crashes (BUGCHECK UNXSIGNAL, CORPUS 37/38) on the first file creation on such a volume; reading is safe. A heuristic: no
+   VMS-made extension header of INDEXF.SYS has been seen, and if VMS made one like that this is wrong. */
+bool ods2_indexf_ext_looks_ods2v2(ods2_volume_t *vol);
+
 /* True, with a message in msg, when the storage control block (BITMAP.SYS VBN 1) is one OpenVMS ANALYZE would
    call invalid (%ANALDISK-W-CHKSCB); read only. */
 bool ods2_scb_problem(ods2_volume_t *vol, char *msg, size_t cap);

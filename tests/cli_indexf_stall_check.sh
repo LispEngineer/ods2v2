@@ -267,7 +267,12 @@ check "ods5check warns of an INDEXF.SYS extension header ods2v2 made (ODS-2; COR
 $INIT "$TMP/chain5.img" 8192 --structure=5 --cluster=1 --maxfiles=1500 --label=CHAIN5 >/dev/null 2>&1
 ODS2_TEST_INDEXF=step=2,nomerge $FAULT "$TMP/chain5.img" "@$TMP/few.ods2" >/dev/null 2>&1
 check "... and on ODS-5 (level 5 header behind a level 2.1 primary)" "1" "$(env -u ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT python3 -I tests/ods5check.py "$TMP/chain5.img" 2>&1 | grep -c 'looks like one ods2v2 made')"
-check "... and not on a volume without extension headers" "0" "$(env -u ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT python3 -I tests/ods5check.py "$TMP/noext.img" 2>&1 | grep -c 'looks like one ods2v2 made')"
+check "... as an ERROR with the VMS consequence (CORPUS 37/38)" "1" "$(env -u ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT python3 -I tests/ods5check.py "$TMP/chain0.img" 2>&1 | grep '^ERROR' | grep -c 'BUGCHECK UNXSIGNAL.*/NOWRITE')"
+check "ods2 says so at mount (%ODS2-W-INDEXEXT), ODS-2 read-write" "1" "$(./ods2 "$TMP/chain0.img" 'SHOW VOLUME' 2>&1 | grep -c 'W-INDEXEXT.*BUGCHECK UNXSIGNAL')"
+chmod 444 "$TMP/chain5.img"
+check "... and ODS-5, read-only (image not writable)" "1" "$(./ods2 "$TMP/chain5.img" 'SHOW VOLUME' 2>&1 | grep -c 'W-INDEXEXT.*BUGCHECK UNXSIGNAL')"
+check "... and not on a volume without extension headers" "0" "$(./ods2 "$TMP/noext.img" 'SHOW VOLUME' 2>&1 | grep -c 'W-INDEXEXT')"
+check "... and not on a volume without extension headers (checker)" "0" "$(env -u ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT python3 -I tests/ods5check.py "$TMP/noext.img" 2>&1 | grep -c 'looks like one ods2v2 made')"
 check "... and the volume is still read (a chain of $before extension headers)" "1" "$(./ods2 "$TMP/chain0.img" 'DIR [000000]H0001.TXT' 2>&1 | grep -c 'H0001.TXT')"
 
 rm -rf "$TMP"

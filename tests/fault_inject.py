@@ -18,6 +18,7 @@ Exit status 1 if any check failed; the report names the operation, level and k.
 """
 import argparse, hashlib, os, random, re, shutil, subprocess, sys
 
+os.environ['ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT'] = '1'   # the index_* operations make INDEXF.SYS extension headers on purpose
 ODS2 = os.environ.get('FAULT_ODS2', './ods2_fault')
 INIT = './ods2_init'
 CHECK = ['python3', '-I', 'tests/ods5check.py']

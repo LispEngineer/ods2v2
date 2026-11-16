@@ -3849,6 +3849,12 @@ int main(int argc, char **argv)
         else if (footer_state == 2) fprintf(stderr, "%%ODS2-W-SIMHFOOTER, %s\n", scb_msg);
         image_short = ods2_image_short(&vol, scb_msg, sizeof(scb_msg));
         if (image_short) fprintf(stderr, "%%ODS2-W-IMAGESHORT, %s\n", scb_msg);
+        if (ods2_indexf_ext_looks_ods2v2(&vol)) {
+            fprintf(stderr, "%%ODS2-W-INDEXEXT, INDEXF.SYS has an extension header that looks like one ods2v2 made (map at word "
+                            "100 on ODS-2, or level 5 behind a level 2.1 primary): V8.4 crashes (BUGCHECK UNXSIGNAL) on the "
+                            "first file creation on this volume (CORPUS 37/38): mount it on VMS only with /NOWRITE. This may be "
+                            "wrong: it is a guess at what VMS does not write\n");
+        }
         if (ods2_indexf_growth_unfinished(&vol)) {
             fprintf(stderr, "%%ODS2-W-INDEXGROWTH, INDEXF.SYS's last growth was interrupted (its map holds more blocks than its "
                             "header says, or a header number is marked past it); nothing is lost, and the first change made "

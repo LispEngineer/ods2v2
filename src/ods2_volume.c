@@ -1858,6 +1858,23 @@ bool ods2_indexf_growth_unfinished(ods2_volume_t *vol)
     return indexf_growth_state(vol, primary, &behind, &stray).ok && (behind || stray != 0);
 }
 
+bool ods2_indexf_ext_looks_ods2v2(ods2_volume_t *vol)
+{
+    uint8_t cur[512];
+    unsigned level, count;
+
+    if (ods2_read_header(vol, 1, cur).ok == false) return false;
+    level = ((const ods2_head_core_t *) cur)->struclev >> 8;
+    for (count = 0; count < 65535u && ods2_fid_number(((const ods2_head_core_t *) cur)->ext_fid) != 0; count++) {
+        unsigned next = ods2_fid_number(((const ods2_head_core_t *) cur)->ext_fid);
+        const ods2_head_core_t *c;
+        if (!ods2_read_header(vol, next, cur).ok) return false;
+        c = (const ods2_head_core_t *) cur;
+        if ((!vol->ods5 && c->mpoffset == 100) || (c->struclev >> 8) != level) return true;
+    }
+    return false;
+}
+
 /* The repair: HIBLK from the map (and EFBLK over the highest header marked in use inside it), and the one bit marked beyond the
    map cleared (a growth interrupted after its new extension header's bit was set and before the header was linked: the
    number belongs to nothing). */

@@ -439,9 +439,11 @@ def main():
                 # lab: 15 of 15) and, on ODS-5, at structure level 5 behind a primary of level 2.1. No VMS-made extension header
                 # of INDEXF.SYS has been seen: if VMS made one like that, this warning is wrong.
                 FUTURE_SEEN['ods2v2_ext'] = True
-                fnd.warn('%s: extension header %d looks like one ods2v2 made (map at word 100 on ODS-2, or level 5 behind a level 2.1 primary): this may be wrong, no VMS-made one has been seen; OpenVMS V8.4 '
-                         'cannot use that layout (CORPUS 37: ANALYZE/DISK_STRUCTURE gives OPENINDEX, files behind the first '
-                         'extension header are "no such file"); do not take this volume to VMS' % (where, efn))
+                fnd.err('%s: extension header %d looks like one ods2v2 made (map at word 100 on ODS-2, or level 5 behind a level 2.1 '
+                        'primary): V8.4 crashes (BUGCHECK UNXSIGNAL) on the first file creation on this volume (CORPUS 37/38): '
+                        'mount it on VMS only with /NOWRITE (ANALYZE gives OPENINDEX, files behind the first extension header '
+                        'are "no such file"). This may be wrong: it is a guess at what VMS does not write, and no VMS-made '
+                        'extension header of INDEXF.SYS has been seen' % (where, efn))
             if u16(nb, 4) != len(segs):
                 fnd.err('%s: extension header %d has segment number %d, expected %d' % (where, efn, u16(nb, 4), len(segs)))
             if u16(nb, 66) | (nb[71] << 16) != n:
