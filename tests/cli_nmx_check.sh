@@ -77,7 +77,7 @@ checker_rest() { # the checker's findings other than the marked bits
 }
 
 # A file number whose low 16 bits are 0 (65536, 131072, ...) is never used: FID_NUM 0 means "no file", and on VMS (the 70,000-file
-# run of ods5-vms2) DUMP/HEADER of file 65536 gives %DUMP-E-BADHEADER while 65535 and 65537 are normal. The allocator skips such
+# run on VMS) DUMP/HEADER of file 65536 gives %DUMP-E-BADHEADER while 65535 and 65537 are normal. The allocator skips such
 # numbers (the first VMS run is to show what VMS does with the bit and the slot).
 for level in 2 5; do
     img="$TMP/skip.img"; rm -f "$img"
@@ -89,7 +89,7 @@ for level in 2 5; do
         got="$got $(fid_of "$img" "[000000]S$i.TXT")"
     done
     check "ODS-$level: the allocator skips file number 65536 (FID_NUM 0): 65534 65535 65537 65538" "65534 65535 65537 65538" "$(echo $got)"
-    # what VMS does with the number (ods5-vms2's 70,000-file volume, V8.4: last file 70081): its index-bitmap bit is SET (in
+    # what VMS does with the number (a 70,000-file volume made on V8.4: last file 70081): its index-bitmap bit is SET (in
     # use) and its header slot is never written (zeros: checksum 0, level 0), so the checker's "bit set but no valid header"
     # does not apply to it, and a file after it does not take its place
     check "ODS-$level: the index bitmap bit of file 65536 is set, as on VMS (bit 65535), and the slot holds no header" "1 1" \

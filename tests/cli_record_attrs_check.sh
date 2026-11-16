@@ -92,7 +92,7 @@ n=$((n + 1))
 check "RFM:UDF with sizes 0" "rtype=0x00 rattrib=0x00 rsize=0 maxrec=0" "$(hdr $n)"
 $ODS2 $DISK "COPY $TMP/notes.txt [000000]PLAIN.TXT" >/dev/null 2>&1
 n=$((n + 1))
-# plain COPY chooses per file (ods5-wr2, after VMS V7.3-2 failed with RMS-W-RTB on binary files written as
+# plain COPY chooses per file (after VMS V7.3-2 failed with RMS-W-RTB on binary files written as
 # Stream_LF with MRS 512): text is Stream_LF with CR carriage control, LRL the longest line ("line one" 8), MRS 0, as
 # VMS's own text files are; binary is fixed 512-byte records, no carriage control, exact end-of-file byte
 check "plain COPY of text: Stream_LF, RAT CR, LRL = longest line, MRS 0" \

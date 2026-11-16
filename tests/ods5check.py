@@ -461,7 +461,7 @@ def main():
         if n <= 10 and v.level == 5 and (v.volchar & 0x40) and u16(b, 74) < 1:
             # the reserved files (their headers are structure level 2.1 even on ODS-5): V8.4 INITIALIZE with /HARDLINKS gives
             # them count 1; a volume made by INITIALIZE and then SET VOLUME/VOLUME_CHARACTERISTICS=HARDLINKS keeps 0, and V8.4
-            # ANALYZE prints %ANALDISK-W-LINKCOUNT "linkcount set at 0 when it should be 1" (reported by ods5-vms3)
+            # ANALYZE prints %ANALDISK-W-LINKCOUNT "linkcount set at 0 when it should be 1" (reported from the VMS lab)
             fnd.warn('%s: link count 0 on a volume with HARDLINKS (V8.4 ANALYZE: %%ANALDISK-W-LINKCOUNT, the count should be 1)' % where)
         if b[7] == 5:
             # FH2$W_LINKCOUNT as VMS V8.4 writes it (measured on VMS-made images only: ODS5T/ODS5T6 with

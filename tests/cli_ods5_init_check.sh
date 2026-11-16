@@ -235,7 +235,7 @@ $ODS2 "$TMP/gs.img" "SET VOLUME/GEOMETRY=0,15" >/dev/null 2>&1; check "SET VOLUM
 $ODS2 "$TMP/gs.img" "SET VOLUME/GEOMETRY=38,38/LABEL=BOTH" >/dev/null 2>&1
 check "geometry and label together: both set" "513 2097152 1 38 38 1453 BOTH" "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/gs.img" show) $($ODS2 "$TMP/gs.img" 'SHOW VOLUME' 2>&1 | grep -o 'BOTH' | head -1)"
 
-# device types: the geometry each reports (measured by ods5-vms2 on VAX V7.3: LD 38 x 38 at 1 GiB, RA82 57 x 15, RA92 73 x 13)
+# device types: the geometry each reports (measured on VAX V7.3: LD 38 x 38 at 1 GiB, RA82 57 x 15, RA92 73 x 13)
 $INIT "$TMP/tg.img" 1G --structure=2 --label=TGT --target=ld >/dev/null 2>&1
 check "ods2_init --target=ld on 1 GiB: 38 x 38 x 1453 (what LDA5: reports)" "513 2097152 1 38 38 1453" "$(python3 -I "$TMP/scb.py" $ODS2 "$TMP/tg.img" show)"
 out=$($ODS2 "$TMP/tg.img" "SET VOLUME/GEOMETRY=ra" 2>&1)

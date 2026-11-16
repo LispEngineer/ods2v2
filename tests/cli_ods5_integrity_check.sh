@@ -578,7 +578,7 @@ img="$TMP/s10b.img"
 $INIT "$img" 8192 --structure=2 --label=FILE10 >/dev/null 2>&1
 check "ODS-2: LINK to file 10 when it is SECURITY.SYS is refused" "1" "$($ODS2 "$img" 'LINK [000000]AL.TXT [000000]SECURITY.SYS' >/dev/null 2>&1; echo $?)"
 
-# ---- records (ods5-vms2 batch C, VAX V7.3): VMS TYPE refuses Stream, Stream_LF and Stream_CR files with RAT:PRN
+# ---- records (batch C, VAX V7.3): VMS TYPE refuses Stream, Stream_LF and Stream_CR files with RAT:PRN
 # (RMS-F-RAT). COPY/IMPORT never make one (/ATTRIBUTES included), and TYPE refuses one made another way.
 for level in 2 5; do
     img="$TMP/rp$level.img"
@@ -610,7 +610,7 @@ PY
     done
 done
 
-# ---- ods5-vms2 batch C (VAX V7.3 ODS-2): VMS DELETE refuses the reserved files (RMS-E-PRV) but SET FILE/REMOVE,
+# ---- batch C (VAX V7.3 ODS-2): VMS DELETE refuses the reserved files (RMS-E-PRV) but SET FILE/REMOVE,
 # which takes only the directory entry, was accepted on all ten and left LOSTHEADER. ods2v2 has no REMOVE; an
 # entry-only removal here is DELETE of an alias or a dangling entry, and it is refused for a reserved file too,
 # in whatever directory the entry is. Test: the entries for each reserved file copied into [D], then DELETE [D]name.
@@ -655,7 +655,7 @@ for level in 2 5; do
     check "ODS-$level: $listed entries for reserved files in [D]: removing each (the REMOVE case) is refused" "0 $before" "$bad $(md5sum < "$img")"
 done
 
-# ---- F8 (ods5-st): on a volume without HARDLINKS, deleting the primary name of a file that has an alias leaves
+# ---- F8 (the stress campaign): on a volume without HARDLINKS, deleting the primary name of a file that has an alias leaves
 # the alias behind, as VMS does. When the file number is then reused (a new sequence number) the stale alias must
 # never open the new file: it is "not found" for TYPE and DIR/FULL; ods5check reports it as a WARNING (VMS makes
 # this state), not an error; ods2v2's own DELETE of the alias removes the entry and nothing else.
@@ -693,7 +693,7 @@ check "F8: DELETE of the stale alias removes the entry" "removed 0" "$msg $rc"
 check "F8: the new file is untouched" "new file content" "$($ODS2 "$img" "TYPE [000000]Q.TXT" 2>&1)"
 check "F8: after removing the alias ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
 
-# ---- depth (operator's choice, via ods5-orch): OpenVMS VAX V7.3 reaches 7 levels below [000000] on an ODS-2 volume;
+# ---- depth (operator's choice, via the project's coordinator): OpenVMS VAX V7.3 reaches 7 levels below [000000] on an ODS-2 volume;
 # CREATE/DIRECTORY (and IMPORT) deeper than that works but warns; ODS-5 volumes never warn.
 for level in 2 5; do
     img="$TMP/dp$level.img"

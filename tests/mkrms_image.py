@@ -7,7 +7,7 @@
 """mkrms_image.py ODS2 ODS2_INIT IMAGE OUTDIR -- build an ODS-5 test image of RMS sequential files with chosen
 record formats / attributes (raw bytes copied in with COPY, then the FAT in the file header patched and the
 header checksum redone).  Writes OUTDIR/MANIFEST.txt (name, rfm, rat, vfc, bytes) and the expected-text files
-for formats whose text is unambiguous.  By ods5-wr2 for Douglas P. Fields, Jr. (symbolics@lisp.engineer), MIT."""
+for formats whose text is unambiguous.  For Douglas P. Fields, Jr. (symbolics@lisp.engineer), MIT."""
 import os, struct, subprocess, sys
 
 RFM = dict(UDF=0, FIX=1, VAR=2, VFC=3, STM=4, STMLF=5, STMCR=6)
@@ -70,7 +70,7 @@ add('FIX_PRN.TXT',   'FIX',   PRN, b''.join(b'%-10s' % (b'r%d' % i) for i in ran
 add('FIX_CRFTN.TXT', 'FIX',   CR|FTN, b''.join(b'%-10s' % (b' r%d' % i) for i in range(1, 4)), rsize=10, maxrec=10)
 
 # the text VMS TYPE shows for each file, from the records VMS V8.4-2L2 wrote with TYPE/OUTPUT (batches m2 and m2b),
-# as Linux text (a carriage return after the data = a newline, a bare CR = overprint): ods5-wr2 batch m2, 9-NOV-2026
+# as Linux text (a carriage return after the data = a newline, a bare CR = overprint): batch m2, 9-NOV-2026
 VMS_EXPECT = {
     'FTN_ODD.TXT': b'nul\nother\n\ntwo\nend\n\n',
     'STMCR_NONE.TXT': b'one\ntwo\nthree\n',

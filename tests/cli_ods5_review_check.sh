@@ -1,7 +1,7 @@
 #!/bin/sh
 # MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
 #
-# cli_ods5_review_check.sh - the fixes of the ods5-read review (ods5-rev1):
+# cli_ods5_review_check.sh - the fixes of the ods5-read review:
 #  1 EXPORT never writes through a symbolic link below the destination (a directory and a symbolic
 #    link of one Linux name; a link already lying in the destination), IMPORT does not follow
 #    symbolic links of the tree it reads;

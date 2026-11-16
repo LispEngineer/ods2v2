@@ -432,7 +432,7 @@ int main(void)
                "a record that runs past it are not rewritten: the change is refused, nothing is written\n");
     }
 
-    /* ---- the order of CREATE/DIRECTORY ---- (ods5-st's crash campaign: 52 states over 14,605 runs left a valid but
+    /* ---- the order of CREATE/DIRECTORY ---- (the stress campaign's crash run: 52 states over 14,605 runs left a valid but
        unlisted directory header over a first block that was never initialised: written first, the header made a directory
        out of garbage). The first block, with its end marker, is written before the header, the header before the entry:
        after any number of writes, a header that is a live directory has a first block that is a valid empty block, or the

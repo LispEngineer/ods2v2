@@ -1700,7 +1700,7 @@ ods2_result_t ods2_find_free_file_number(ods2_volume_t *vol, unsigned start_from
         }
         /* A number whose low 16 bits are 0 (65536, 131072, ...) is never handed out: its FID_NUM would be 0, which means
            "no file". VMS made 70,000 files on a volume and DUMP/HEADER of file 65536 gave %DUMP-E-BADHEADER while 65535
-           and 65537 were normal (ods5-vms2); the slot stays as it is. */
+           and 65537 were normal (measured on VMS); the slot stays as it is. */
         if ((n & 0xFFFFu) == 0) continue;
 
         if (header_vbn(vol, n) >= efblk) {
@@ -4263,7 +4263,7 @@ ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const ch
 
 /* The disk geometry (sectors x tracks) a device type reports for a volume of `blocks` blocks, which the storage
    control block must record for OpenVMS VAX V7.3's ANALYZE (cylinders = ceil(blocks / (sectors * tracks)) always).
-   Measured by ods5-vms2 (CORPUS section 16) and in the corpus; `*measured` is false when this size was not one of
+   Measured on VMS (CORPUS section 16) and in the corpus; `*measured` is false when this size was not one of
    the sizes measured (or accepted by ANALYZE) for the geometry returned, and the answer is a prediction (confirm with SHOW DEVICE/FULL).
      ld      the LD driver's containers (LDDRIVER V8.3, VAX V7.3): measured at 29 sizes (CORPUS 16 and 30). CORPUS 31: the
              driver gives the same geometry every time for a size, and ANALYZE draws CHKSCB for a volume whose SCB has the
