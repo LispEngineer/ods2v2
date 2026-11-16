@@ -99,7 +99,9 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
     }
     c = opt->cluster;
     if (c == 0) c = (N >= (1u << 20)) ? 16 : (N >= (1u << 18)) ? 8 : (N >= (1u << 16)) ? 4 : 1;
-    if (c > 256) return fail("the cluster factor is at most 256 here");
+    /* VMS: HM2$W_CLUSTER and SCB$W_CLUSTER are words, and HM2$W_IBMAPVBN = 4c + 1 must fit a word too, so c is at most 16,383
+       (the documented INITIALIZE maximum is to be confirmed: LARGE_VOLUMES.md 4) */
+    if (c > 16383) return fail("the cluster factor is at most 16383 (the index bitmap's VBN, 4 x cluster + 1, must fit a word)");
     maxfiles = opt->maxfiles != 0 ? opt->maxfiles : (uint32_t) (N / (2 * (uint64_t) c + 2));
     if (maxfiles < 64) maxfiles = 64;
     if (maxfiles > 16711679u) maxfiles = 16711679u;

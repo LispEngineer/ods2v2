@@ -4726,7 +4726,6 @@ ods2_result_t ods2_set_volume_label(ods2_volume_t *vol, const char *label,
     char name[12];
     const char *why;
     uint8_t primary[512];
-    uint8_t (*blocks)[512] = NULL;
     uint32_t *lbns = NULL;
     unsigned v = vol->home.cluster, count, i, primary_index = 0;
     bool have_primary = false, have_backup = false;
@@ -4746,11 +4745,9 @@ ods2_result_t ods2_set_volume_label(ods2_volume_t *vol, const char *label,
 
     memcpy(primary, &vol->home, 512);
     count = 3u * v - 1u; /* VBNs 2 .. 3v */
-    blocks = malloc((size_t) count * 512u);
+    /* One block at a time (a cluster factor of 16,383 means 49,148 copies: 24 MiB): only the LBNs are kept. */
     lbns = malloc((size_t) count * sizeof(*lbns));
-    if (blocks == NULL || lbns == NULL) {
-        free(blocks);
-        free(lbns);
+    if (lbns == NULL) {
         return fail("could not allocate memory for the home block copies");
     }
 
@@ -4758,17 +4755,18 @@ ods2_result_t ods2_set_volume_label(ods2_volume_t *vol, const char *label,
        them are what they should be. */
     for (i = 0; i < count && r.ok; i++) {
         uint32_t vbn = i + 2, lbn;
+        uint8_t copy[512];
         if (!vbn_to_lbn(vol->indexf_extents, vol->indexf_extent_count, vbn, &lbn)) {
             r = fail("INDEXF.SYS doesn't map all of the home block's clusters");
             break;
         }
         lbns[i] = lbn;
         if (fseeko(vol->fp, (off_t) lbn * 512, SEEK_SET) != 0 ||
-            fread(blocks[i], 1, 512, vol->fp) != 512) {
+            fread(copy, 1, 512, vol->fp) != 512) {
             r = fail("could not read a home block copy");
             break;
         }
-        if (!is_home_copy(blocks[i], primary, lbn, vbn)) {
+        if (!is_home_copy(copy, primary, lbn, vbn)) {
             static char msg[200];
             snprintf(msg, sizeof msg, "the block at LBN %u (INDEXF.SYS VBN %u) isn't a "
                      "valid copy of the home block - nothing changed; check the volume "
@@ -4791,37 +4789,35 @@ ods2_result_t ods2_set_volume_label(ods2_volume_t *vol, const char *label,
 
     /* Relabel each copy, keeping its own HOMELBN/HOMEVBN, and write the
        primary last: until it is written VMS still sees one consistent
-       (old) label, and running this again finishes the job. */
-    if (r.ok) {
-        for (i = 0; i < count; i++) {
-            memcpy(((ods2_home_t *) blocks[i])->volname, name, 12);
-            set_home_checksums(blocks[i]);
-            if (!ods2_validate_home((const ods2_home_t *) blocks[i]).ok) {
-                r = fail("internal error: a relabelled home block doesn't validate");
-                break;
-            }
-        }
-    }
+       (old) label, and running this again finishes the job. Each copy is read again, changed, written and read back
+       before the next. */
     for (i = 0; r.ok && i <= count; i++) {
         unsigned k = (i < count) ? i : primary_index;
+        uint8_t copy[512], back[512];
         if (i < count && i == primary_index) continue;
-        r = ods2_write_block(vol, lbns[k], blocks[k]);
-    }
-    if (r.ok && fflush(vol->fp) != 0) r = fail("could not flush the home blocks");
-
-    /* Read every copy back. */
-    for (i = 0; r.ok && i < count; i++) {
-        uint8_t back[512];
-        if (fseeko(vol->fp, (off_t) lbns[i] * 512, SEEK_SET) != 0 ||
-            fread(back, 1, 512, vol->fp) != 512 || memcmp(back, blocks[i], 512) != 0) {
+        if (fseeko(vol->fp, (off_t) lbns[k] * 512, SEEK_SET) != 0 || fread(copy, 1, 512, vol->fp) != 512) {
+            r = fail("could not read a home block copy");
+            break;
+        }
+        memcpy(((ods2_home_t *) copy)->volname, name, 12);
+        set_home_checksums(copy);
+        if (!ods2_validate_home((const ods2_home_t *) copy).ok) {
+            r = fail("internal error: a relabelled home block doesn't validate");
+            break;
+        }
+        r = ods2_write_block(vol, lbns[k], copy);
+        if (!r.ok) break;
+        if (fflush(vol->fp) != 0) { r = fail("could not flush the home blocks"); break; }
+        if (fseeko(vol->fp, (off_t) lbns[k] * 512, SEEK_SET) != 0 ||
+            fread(back, 1, 512, vol->fp) != 512 || memcmp(back, copy, 512) != 0) {
             r = fail("a home block copy didn't read back as written");
+            break;
+        }
+        if (k == primary_index) {
+            memcpy(&vol->home, copy, 512);
+            if (copies_out) *copies_out = count;
         }
     }
-    if (r.ok) {
-        memcpy(&vol->home, blocks[primary_index], 512);
-        if (copies_out) *copies_out = count;
-    }
-    free(blocks);
     free(lbns);
     return r;
 }
