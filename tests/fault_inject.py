@@ -79,12 +79,25 @@ EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRAN
                  'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT}
 
 
-def check(img, op=None):
+# Growing INDEXF.SYS when its last header is an extension header changes two blocks that cannot be written as one: the
+# extension header (its map, its link) and the primary (HIBLK, EFBLK). Between the two writes the primary says fewer
+# blocks than the map holds, and the new extension header's bit lies past the end-of-file. Allowed for these operations
+# at the interrupted state only: the next create must heal both (the check after the follow-up COPYs allows nothing
+# of it, review 27 F2). A permanent HIBLK error, a header written over INDEXF.SYS's own extension header, a chain
+# that cannot grow: all caught by the second check and the follow-up COPYs.
+INDEX_TRANSIENT = [r'file 1: HIBLK \d+ but extents hold \d+ blocks', r'index bitmap bit \d+ set beyond the index file EOF',
+                   r'file 1: EFBLK \d+ beyond HIBLK']
+INDEX_OPS = ['index_ext1', 'index_tail', 'index_ext2']
+OP_ENV = {n: {'ODS2_TEST_INDEXF': 'step=2,nomerge'} for n in INDEX_OPS}
+
+
+def check(img, op=None, transient=True):
     rc, text = run(CHECK + [img])
     errs = [l for l in text.splitlines() if l.startswith('ERROR')]
     bad, leaks = [], []
+    extra = EXTRA_ALLOWED.get(op, []) + (INDEX_TRANSIENT if transient and op in INDEX_OPS else [])
     for l in errs:
-        if any(re.search(a, l) for a in ALLOWED + EXTRA_ALLOWED.get(op, [])):
+        if any(re.search(a, l) for a in ALLOWED + extra):
             leaks.append(l)
         else:
             bad.append(l)
@@ -119,8 +132,83 @@ def put_host(name, data):
     return p
 
 
+def index_state(img):
+    """INDEXF.SYS's chain: HIBLK, the extension header numbers, the map bytes in use in the last header"""
+    hiblk, chain, n, used = 0, [], 1, 0
+    while len(chain) < 70000:
+        rc, out = run(['./ods2_dump_header', img, str(n)])
+        m = re.search(r'ext_fid=\((\d+),', out)
+        u = re.search(r'map_inuse=(\d+)', out)
+        if n == 1:
+            hiblk = int(re.search(r'hiblk\(swapped\)=(\d+)', out).group(1))
+        used = int(u.group(1)) * 2 if u else 0
+        if not m or int(m.group(1)) == 0:
+            break
+        n = int(m.group(1))
+        chain.append(n)
+    return {'hiblk': hiblk, 'chain': chain, 'used': used}
+
+
+def setup_index(level, kind):
+    """A base volume in which the next COPY grows INDEXF.SYS in the way `kind` names (test hook: two blocks at a time, in
+    separate pieces, so that a few hundred empty files fill the maps): 'ixext1' makes the first extension header (the
+    primary is the last header), 'ixtail' adds a piece to the last extension header, 'ixext2' makes the second extension
+    header (the last extension header is nearly full)."""
+    img = os.path.join(WORK, 'base_%s_%d.img' % (kind, level))
+    assert run([INIT, img, '8192', '--structure=%d' % level, '--cluster=1', '--maxfiles=3000', '--label=FAULT'])[0] == 0
+    env = {'ODS2_TEST_INDEXF': 'step=2,nomerge'}
+    empty = put_host('empty.txt', b'')
+    for dst in ('A1.TXT', 'B.TXT'):
+        assert ods2(img, 'COPY %s [000000]%s' % (put_host('small.txt', b'one block of text\n'), dst), env)[0] == 0
+    counter = [0]
+
+    def copies(count):
+        script = os.path.join(WORK, 'ix.ods2')
+        with open(script, 'w') as f:
+            for _ in range(count):
+                counter[0] += 1
+                f.write('COPY %s [000000]G%05d.TXT\n' % (empty, counter[0]))
+        rc, out = ods2(img, '@' + script, env)
+        assert rc == 0, out
+
+    def step_until(fire, batch=8):
+        snap = img + '.snap'
+        for _ in range(2000):
+            shutil.copyfile(img, snap)
+            saved = counter[0]
+            before = index_state(img)
+            copies(batch)
+            if fire(before, index_state(img)):
+                shutil.copyfile(snap, img)
+                counter[0] = saved
+                for _ in range(batch):
+                    shutil.copyfile(img, snap)
+                    saved = counter[0]
+                    before = index_state(img)
+                    copies(1)
+                    if fire(before, index_state(img)):
+                        shutil.copyfile(snap, img)
+                        counter[0] = saved
+                        return
+                raise AssertionError('the growth was in the batch but not in its single steps')
+        raise AssertionError('no growth of the kind ' + kind)
+
+    ext1 = lambda b, a: not b['chain'] and a['chain']
+    if kind == 'ixext1':
+        step_until(ext1)
+    elif kind == 'ixtail':
+        step_until(ext1)
+        copies(1)
+        step_until(lambda b, a: a['hiblk'] > b['hiblk'] and a['chain'] == b['chain'] and b['chain'])
+    else:
+        step_until(lambda b, a: len(b['chain']) == 1 and len(a['chain']) == 2)
+    return img
+
+
 def setup(level, hardlinks, fill_for=None, cluster=None):
     """the base volume: files of several sizes (one fragmented over holes), subdirectories, links"""
+    if fill_for and fill_for.startswith('ix'):
+        return setup_index(level, fill_for)
     img = os.path.join(WORK, 'base_%d%s%s%s.img' % (level, 'h' if hardlinks else '', fill_for or '', cluster or ''))
     if os.path.exists(img):
         os.remove(img)
@@ -203,13 +291,16 @@ OPS = {
     'link_hardlinks': ('LINK [SUB]LNKB.TXT [000000]B.DAT', ['SUB/LNKB.TXT;1'], True, True, None),
     'symlink': ('SYMLINK [000000]SYMB.TXT B.DAT', ['SYMB.TXT;1'], True, False, None),
     'set_label': ('SET VOLUME/LABEL=RELABEL', [], False, False, None),
+    'index_ext1': ('COPY %(empty)s [000000]ZNEW.TXT', ['ZNEW.TXT;1'], False, False, 'ixext1'),
+    'index_tail': ('COPY %(empty)s [000000]ZNEW.TXT', ['ZNEW.TXT;1'], False, False, 'ixtail'),
+    'index_ext2': ('COPY %(empty)s [000000]ZNEW.TXT', ['ZNEW.TXT;1'], False, False, 'ixext2'),
     'insert_split': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'split'),
     'insert_split_mid': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'splitmid'),
     'insert_split_big': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'splitbig'),
     'insert_move_big': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'movebig'),
     'insert_move': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'move'),
 }
-QUICK = ['delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
+QUICK = ['index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
          'insert_split', 'insert_split_mid', 'insert_move']
 
 
@@ -246,7 +337,8 @@ def main():
             assert rc == 0
             trial = os.path.join(WORK, 'trial.img')
             shutil.copyfile(base, trial)
-            rc, out = ods2(trial, cmd, {'ODS2_FAULT_COUNT': '1'})
+            openv = OP_ENV.get(name, {})
+            rc, out = ods2(trial, cmd, dict(openv, ODS2_FAULT_COUNT='1'))
             m = re.search(r'ODS2_FAULT: (\d+) writes', out)
             if rc != 0 or not m:
                 print('FAIL: %s (ODS-%d): the operation itself failed on the base volume: %s' % (name, level, out.strip()))
@@ -259,7 +351,7 @@ def main():
             bad_here = 0
             for k in range(1, n + 1, args.every):
                 shutil.copyfile(base, trial)
-                rc, out = ods2(trial, cmd, {'ODS2_FAULT_AFTER_WRITES': str(k)})
+                rc, out = ods2(trial, cmd, dict(openv, ODS2_FAULT_AFTER_WRITES=str(k)))
                 prob = []
                 # the run that completes (k = n) must be clean: no duplicate allowance (R9-3)
                 allow = name if k < n else None
@@ -273,10 +365,16 @@ def main():
                     if p not in files and p not in targets:
                         prob.append('file %s lost' % p)
                 # one more COPY, then both checks again
-                rc3, out3 = ods2(trial, 'COPY %s [000000]ZZ.DAT' % followup)
+                rc3, out3 = ods2(trial, 'COPY %s [000000]ZZ.DAT' % followup, openv)
                 if rc3 != 0:
                     prob.append('the COPY after the fault failed: ' + out3.strip()[:120])
-                bad2, leaks2 = check(trial, allow)
+                if name in INDEX_OPS:
+                    # a second and a third COPY: a header written over INDEXF.SYS's extension header shows at the second
+                    for extra in ('ZZ2.DAT', 'ZZ3.DAT'):
+                        rcx, outx = ods2(trial, 'COPY %s [000000]%s' % (followup, extra), openv)
+                        if rcx != 0:
+                            prob.append('the COPY of %s after the fault failed: %s' % (extra, outx.strip()[:120]))
+                bad2, leaks2 = check(trial, allow, False)
                 prob += ['after COPY, checker: ' + b for b in bad2]
                 rc4, files2, text = tree(trial, 'after2')
                 for p, h in base_files.items():
