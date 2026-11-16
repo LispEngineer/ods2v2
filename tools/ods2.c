@@ -3849,6 +3849,11 @@ int main(int argc, char **argv)
         else if (footer_state == 2) fprintf(stderr, "%%ODS2-W-SIMHFOOTER, %s\n", scb_msg);
         image_short = ods2_image_short(&vol, scb_msg, sizeof(scb_msg));
         if (image_short) fprintf(stderr, "%%ODS2-W-IMAGESHORT, %s\n", scb_msg);
+        if (ods2_indexf_growth_unfinished(&vol)) {
+            fprintf(stderr, "%%ODS2-W-INDEXGROWTH, INDEXF.SYS's last growth was interrupted (its map holds more blocks than its "
+                            "header says, or a header number is marked past it); nothing is lost, and the first change made "
+                            "through a write mount repairs it\n");
+        }
     }
     {
         const char *names = getenv("ODS2_NAMES");

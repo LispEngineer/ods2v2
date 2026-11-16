@@ -83,13 +83,16 @@ EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRAN
 # extension header (its map, its link) and the primary (HIBLK, EFBLK). Between the two writes the primary says fewer
 # blocks than the map holds, and the new extension header's bit and slot lie past the end-of-file (the checker does not
 # find the header: "extension header missing"). Allowed for these operations
-# at the interrupted state only: the next create must heal both (the check after the follow-up COPYs allows nothing
-# of it, review 27 F2). A permanent HIBLK error, a header written over INDEXF.SYS's own extension header, a chain
+# at the interrupted state only: the first change of any kind (a relabel as well as a create) heals both, and the checks
+# after it and after the follow-up COPYs allow nothing of it (review 27 F2, review 28 a). A permanent HIBLK error, a header written over INDEXF.SYS's own extension header, a chain
 # that cannot grow: all caught by the second check and the follow-up COPYs.
 INDEX_TRANSIENT = [r'file 1: HIBLK \d+ but extents hold \d+ blocks', r'index bitmap bit \d+ set beyond the index file EOF',
-                   r'file 1: EFBLK \d+ beyond HIBLK', r'file 1: extension header \d+ missing']
+                   r'file 1: extension header \d+ missing']
 INDEX_OPS = ['index_ext1', 'index_tail', 'index_ext2']
 OP_ENV = {n: {'ODS2_TEST_INDEXF': 'step=2,nomerge'} for n in INDEX_OPS}
+
+
+SEEN = {}
 
 
 def check(img, op=None, transient=True):
@@ -98,6 +101,9 @@ def check(img, op=None, transient=True):
     bad, leaks = [], []
     extra = EXTRA_ALLOWED.get(op, []) + (INDEX_TRANSIENT if transient and op in INDEX_OPS else [])
     for l in errs:
+        for a in extra:
+            if re.search(a, l):
+                SEEN[a] = SEEN.get(a, 0) + 1
         if any(re.search(a, l) for a in ALLOWED + extra):
             leaks.append(l)
         else:
@@ -365,6 +371,16 @@ def main():
                         prob.append('file %s changed' % p)
                     if p not in files and p not in targets:
                         prob.append('file %s lost' % p)
+                if name in INDEX_OPS:
+                    # the first change of any kind repairs an interrupted growth, not only a create (review 28 a): a
+                    # relabel, then the checker must show nothing of the transient
+                    trial3 = os.path.join(WORK, 'trial3.img')
+                    shutil.copyfile(trial, trial3)
+                    rcl, outl = ods2(trial3, 'SET VOLUME/LABEL=HEALED', openv)
+                    badl, leakl = check(trial3, allow, False)
+                    if rcl != 0:
+                        prob.append('SET VOLUME/LABEL after the fault failed: ' + outl.strip()[:120])
+                    prob += ['after SET VOLUME/LABEL, checker: ' + b for b in badl]
                 # one more COPY, then both checks again
                 rc3, out3 = ods2(trial, 'COPY %s [000000]ZZ.DAT' % followup, openv)
                 if rc3 != 0:
@@ -411,6 +427,8 @@ def main():
             print('%s: %s (ODS-%d): %d writes, %d states tested (%d clean, %d leaked), %d bad' % (
                 'FAIL' if bad_here else 'PASS', name, level, n, counts['clean'] + counts['leak'],
                 counts['clean'], counts['leak'], bad_here))
+    if SEEN:
+        print('fault_inject: interrupted-growth messages seen: ' + '; '.join('%s x%d' % (k, v) for k, v in sorted(SEEN.items())))
     if not args.keep:
         shutil.rmtree(WORK, ignore_errors=True)
     if failures:

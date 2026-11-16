@@ -65,6 +65,7 @@ typedef struct {
     size_t         bm_hint;
     bool           bm_valid;
     unsigned       idx_highest;         /* the highest file number marked in use in the index bitmap, when idx_highest_valid: */
+    bool           indexf_checked;      /* the first change of a write mount has looked at INDEXF.SYS's last growth (see below) */
     bool           idx_highest_valid;   /* kept by every change to the bitmap, so a create does not read all of it */
     /* A change to the volume (a delete, a create, a link) is made in memory first and written when it is
        known to succeed: every check that can fail runs before the first write to the image, so a refused
@@ -392,6 +393,11 @@ int ods2_image_footer(ods2_volume_t *vol, char *msg, size_t cap);
  * size than the volume it holds). The volume can be read. False when the size is not known (VOLSIZE 0), when the block that
  * should be the storage control block is not one (the placeholder of the starter volume: it stays writable) or when it fits. */
 bool ods2_image_short(ods2_volume_t *vol, char *msg, size_t cap);
+
+/* True when INDEXF.SYS's last growth was interrupted between its writes: its map holds more blocks than FH2$L_HIBLK says, or a
+   file number is marked in use beyond what the map covers. Nothing is lost; the first change made through a write mount
+   repairs it (one header write, and the stray bit), and `ods5check` reports it until then (review 28 a). */
+bool ods2_indexf_growth_unfinished(ods2_volume_t *vol);
 
 /* True, with a message in msg, when the storage control block (BITMAP.SYS VBN 1) is one OpenVMS ANALYZE would
    call invalid (%ANALDISK-W-CHKSCB); read only. */

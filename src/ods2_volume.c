@@ -627,6 +627,21 @@ static void load_scb_volsize(ods2_volume_t *vol)
 
 /* Opens a change. It fails, and the operation with it, if the buffer cannot be had (R9-1: running unbuffered
    would be the old, unsafe way) or if an earlier write to this image failed (R9-2). */
+static ods2_result_t indexf_repair_growth(ods2_volume_t *vol);
+
+/* The first change of any kind made through a write mount repairs an interrupted growth of the index file (review 28 a), not
+   only a create: once per mount, before the change's own buffer exists (it is one header and a bit). Every write path
+   calls it: txn_begin() for the changes, and the ones that write without a buffer. */
+static ods2_result_t first_change(ods2_volume_t *vol)
+{
+    ods2_result_t h;
+    if (!vol->writable || vol->indexf_checked || vol->txn != NULL) return ok();
+    h = indexf_repair_growth(vol);
+    if (!h.ok) return h;
+    vol->indexf_checked = true;
+    return ok();
+}
+
 static ods2_result_t txn_begin(ods2_volume_t *vol)
 {
     if (!vol->writable) return ok();
@@ -634,6 +649,10 @@ static ods2_result_t txn_begin(ods2_volume_t *vol)
         if (vol->write_failed) {
             return fail("an earlier write to the disk image failed: nothing more is written through this "
                         "mount (run ANALYZE/DISK_STRUCTURE/REPAIR on VMS if the image is in doubt)");
+        }
+        {
+            ods2_result_t h = first_change(vol);
+            if (!h.ok) return h;
         }
 #ifdef ODS2_FAULT_INJECTION
         vol->txn = getenv("ODS2_FAULT_NOMEM_TXN") != NULL ? NULL : calloc(1, sizeof(*vol->txn));
@@ -1787,6 +1806,75 @@ static ods2_result_t write_indexf_header(ods2_volume_t *vol, uint8_t *indexf_hea
     {
         const char *why = "INDEXF.SYS's header no longer decodes after updating it";
         if (!indexf_extents_load(vol, indexf_header, true, &why)) return fail(why);
+    }
+    return ok();
+}
+
+static uint32_t indexf_total_blocks(const ods2_volume_t *vol);
+static ods2_result_t header_ok_for_write(const uint8_t *h, unsigned file_number);
+
+/* Whether INDEXF.SYS's last growth was interrupted (review 28 a): *hiblk_behind says the map holds more blocks than HIBLK, and
+   *stray_from is the highest file number marked in use whose header lies beyond the map (0 if none). */
+static ods2_result_t indexf_growth_state(ods2_volume_t *vol, uint8_t *primary, bool *hiblk_behind, unsigned *stray_from)
+{
+    const ods2_head_core_t *core = (const ods2_head_core_t *) primary;
+    uint32_t mapped = indexf_total_blocks(vol), hib;
+    unsigned highest;
+    ods2_result_t r = ods2_read_header(vol, 1, primary);
+
+    *hiblk_behind = false;
+    *stray_from = 0;
+    if (!r.ok) return r;
+    hib = ods2_word_swap32(core->recattr.hiblk);
+    *hiblk_behind = mapped > hib;
+    r = highest_used_file_number(vol, &highest);
+    if (!r.ok) return r;
+    if (highest > 0 && header_vbn(vol, highest) > (mapped > hib ? mapped : hib)) *stray_from = highest;
+    return ok();
+}
+
+bool ods2_indexf_growth_unfinished(ods2_volume_t *vol)
+{
+    uint8_t primary[512];
+    bool behind;
+    unsigned stray;
+    return indexf_growth_state(vol, primary, &behind, &stray).ok && (behind || stray != 0);
+}
+
+/* The repair: HIBLK from the map (and EFBLK over the highest header marked in use inside it), and the bits marked beyond the
+   map cleared (a growth interrupted after its new extension header's bit was set and before the header was linked: the
+   number belongs to nothing). */
+static ods2_result_t indexf_repair_growth(ods2_volume_t *vol)
+{
+    uint8_t primary[512];
+    ods2_head_core_t *core = (ods2_head_core_t *) primary;
+    bool behind, changed = false;
+    unsigned stray, n, guard = 0;
+    uint32_t mapped = indexf_total_blocks(vol);
+    ods2_result_t r = indexf_growth_state(vol, primary, &behind, &stray);
+
+    if (!r.ok) return ok();                       /* an unreadable index file is reported by the change itself */
+    if (!behind && stray == 0) return ok();
+    if (!header_ok_for_write(primary, 1).ok) return ok();
+    if (behind) {
+        unsigned highest;
+        core->recattr.hiblk = ods2_word_swap32(mapped);
+        if (core->highwater != 0) core->highwater = mapped + 1;
+        r = highest_used_file_number(vol, &highest);
+        if (!r.ok) return r;
+        if (highest > 0 && header_vbn(vol, highest) <= mapped && header_vbn(vol, highest) + 1 > ods2_word_swap32(core->recattr.efblk)) {
+            core->recattr.efblk = ods2_word_swap32(header_vbn(vol, highest) + 1);
+            core->recattr.ffbyte = 0;
+        }
+        changed = true;
+    }
+    for (n = stray; n > 0 && header_vbn(vol, n) > mapped && guard < 100000u; n--, guard++) {
+        r = mark_index_bitmap(vol, n, false);
+        if (!r.ok) return r;
+    }
+    if (changed) {
+        r = write_indexf_header(vol, primary);
+        if (!r.ok) return r;
     }
     return ok();
 }
@@ -4905,6 +4993,10 @@ ods2_result_t ods2_set_volume_label(ods2_volume_t *vol, const char *label,
     ods2_result_t r = ok();
 
     if (copies_out) *copies_out = 0;
+    if (vol->writable) {
+        r = first_change(vol);                     /* a relabel streams the home block copies without a buffer */
+        if (!r.ok) return r;
+    }
     if (!vol->writable) {
         return not_writable(vol);
     }

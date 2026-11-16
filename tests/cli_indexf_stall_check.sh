@@ -142,6 +142,34 @@ check "ODS-2: the extension header's slot is not given out: six more files, noth
     "$(python3 -I tests/ods5check.py "$img" 2>&1 | grep '^ERROR' | grep -vc 'valid but its index bitmap bit is clear')"
 check "ODS-2: the extension header is still there (segment 1)" "1" "$(./ods2_dump_header "$img" "$E" 2>&1 | grep -c 'seg_num=1')"
 
+# an interrupted growth (the map holds more blocks than HIBLK says) is reported at mount, and the first change of any kind
+# repairs it: here a relabel (review 28 a)
+img="$TMP/unfinished.img"
+$INIT "$img" 8192 --structure=2 --cluster=1 --maxfiles=1500 --label=UNFIN >/dev/null 2>&1
+i=0
+while [ "$(chain_length "$img")" -lt 1 ]; do
+    i=$((i + 1))
+    ODS2_TEST_INDEXF=step=2,nomerge $FAULT "$img" "COPY $TMP/empty.txt [000000]G$i.TXT" >/dev/null 2>&1
+    [ $i -lt 400 ] || break
+done
+python3 -I - "$img" <<'PY'
+import struct, sys
+f = open(sys.argv[1], 'r+b')
+f.seek(512); home = f.read(512)
+alt, ib, ibsz = struct.unpack_from('<I', home, 8)[0], struct.unpack_from('<I', home, 24)[0], struct.unpack_from('<H', home, 32)[0]
+f.seek((ib + ibsz) * 512); p = bytearray(f.read(512))
+hi = (struct.unpack_from('<H', p, 24)[0] << 16) | struct.unpack_from('<H', p, 26)[0]
+hi -= 2                                                  # the map holds two blocks more than HIBLK says
+struct.pack_into('<HH', p, 24, hi >> 16, hi & 0xFFFF)
+struct.pack_into('<H', p, 510, sum(struct.unpack_from('<255H', p, 0)) & 0xFFFF)
+f.seek((ib + ibsz) * 512); f.write(p); f.seek(alt * 512); f.write(p)
+PY
+check "the checker sees the interrupted growth" "yes" "$(python3 -I tests/ods5check.py "$img" 2>&1 | grep -q 'HIBLK .* but extents hold' && echo yes || echo no)"
+check "mount says so (%ODS2-W-INDEXGROWTH)" "1" "$(./ods2 "$img" 'SHOW VOLUME' 2>&1 | grep -c 'W-INDEXGROWTH')"
+./ods2 "$img" 'SET VOLUME/LABEL=HEALED' >/dev/null 2>&1
+check "a relabel repaired it: ods5check clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
+check "... and mount says nothing" "0" "$(./ods2 "$img" 'SHOW VOLUME' 2>&1 | grep -c 'W-INDEXGROWTH')"
+
 # a volume whose index file chain cannot be followed to its end is not written (review 27 N4), and still read
 i=0
 $INIT "$TMP/broken.img" 8192 --structure=2 --cluster=1 --maxfiles=1500 --label=BROKEN >/dev/null 2>&1
