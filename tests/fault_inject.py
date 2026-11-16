@@ -81,12 +81,13 @@ EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRAN
 
 # Growing INDEXF.SYS when its last header is an extension header changes two blocks that cannot be written as one: the
 # extension header (its map, its link) and the primary (HIBLK, EFBLK). Between the two writes the primary says fewer
-# blocks than the map holds, and the new extension header's bit lies past the end-of-file. Allowed for these operations
+# blocks than the map holds, and the new extension header's bit and slot lie past the end-of-file (the checker does not
+# find the header: "extension header missing"). Allowed for these operations
 # at the interrupted state only: the next create must heal both (the check after the follow-up COPYs allows nothing
 # of it, review 27 F2). A permanent HIBLK error, a header written over INDEXF.SYS's own extension header, a chain
 # that cannot grow: all caught by the second check and the follow-up COPYs.
 INDEX_TRANSIENT = [r'file 1: HIBLK \d+ but extents hold \d+ blocks', r'index bitmap bit \d+ set beyond the index file EOF',
-                   r'file 1: EFBLK \d+ beyond HIBLK']
+                   r'file 1: EFBLK \d+ beyond HIBLK', r'file 1: extension header \d+ missing']
 INDEX_OPS = ['index_ext1', 'index_tail', 'index_ext2']
 OP_ENV = {n: {'ODS2_TEST_INDEXF': 'step=2,nomerge'} for n in INDEX_OPS}
 

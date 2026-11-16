@@ -7,6 +7,8 @@
 # the next pointer goes into an extension header of INDEXF.SYS (made in a free slot of the blocks just added), up to
 # FH2$W_SEG_NUM's 65,535 headers; mount follows the whole chain. ODS2_TEST_INDEXF=step=2,nomerge (the ods2_fault build only)
 # makes the index file grow two blocks at a time in separate pieces so that a few hundred files fill the map area.
+# The pieces here are Format 1 pointers (4 bytes), which never leave a header with 4 bytes of map: Format 2 pieces, the
+# interruption of a growth and a stuck index file are tests/cli_indexf_stall_check.sh and tests/fault_inject.py (index_*).
 # Not measured on VMS: no VMS-made index file with an extension header was available. Called by `make test`; run from the
 # project root.
 
@@ -72,6 +74,16 @@ PY
     out=$(ODS2_TEST_INDEXF=step=2,nomerge $FAULT "$img" "IMPORT $TMP/tree [000000]" 2>&1)
     check "ODS-$level: the freed header slots are reused, and the index file can still grow: the tree imported again" "1" "$(echo "$out" | grep -c "IMPORTED, $FILES files")"
     check "ODS-$level: ods5check: clean again" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
+done
+
+# one block at a time (review 27 F3): a piece of one block has no slot for an extension header besides the new file's own;
+# the header is made when a later piece has one, and the index file goes on growing
+for level in 2 5; do
+    img="$TMP/one$level.img"
+    $INIT "$img" 8192 --structure=$level --cluster=1 --maxfiles=1500 --label=ONE$level >/dev/null 2>&1
+    out=$(ODS2_TEST_INDEXF=step=1,nomerge $FAULT "$img" "IMPORT $TMP/tree [000000]" 2>&1)
+    check "ODS-$level: IMPORT of $FILES files, INDEXF.SYS growing one block at a time" "1" "$(echo "$out" | grep -c "IMPORTED, $FILES files")"
+    check "ODS-$level: ods5check is clean (one block at a time)" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
 done
 
 rm -rf "$TMP"

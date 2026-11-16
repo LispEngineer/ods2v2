@@ -63,7 +63,7 @@ done
 
 # the stuck state made by the old rule, and the way out
 img="$TMP/stuck.img"
-$INIT "$img" 120000 --structure=2 --cluster=1 --maxfiles=$((TOTAL + 2000)) --label=STUCK >/dev/null 2>&1
+$INIT "$img" 120000 --structure=2 --cluster=1 --maxfiles=$((TOTAL + 8000)) --label=STUCK >/dev/null 2>&1
 out=$(ODS2_TEST_INDEXF=step=258,nomerge,noreserve $FAULT "$img" "@$TMP/make.ods2" 2>&1)
 check "old rule (noreserve): the index file gets stuck (creates refused: no room for another extent)" "yes" "$(echo "$out" | grep -q 'cannot grow\|no room for another extent' && echo yes || echo no)"
 cp "$img" "$TMP/stuck0.img"
@@ -81,6 +81,38 @@ PY
 out=$(ODS2_TEST_INDEXF=step=258,nomerge $FAULT "$img" "@$TMP/more.ods2" 2>&1)
 check "and keeps growing: 5,600 more files, none refused" "0" "$(echo "$out" | grep -c '%ODS2-E-')"
 check "stuck volume after the way out: ods5check clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
+
+# a slot beyond EFBLK that holds INDEXF.SYS's own extension header is never given to a new file, even when its index
+# bitmap bit is clear (review 27 F2 c: the second COPY after an interrupted growth wrote its header over it)
+img="$TMP/guard.img"
+$INIT "$img" 8192 --structure=2 --cluster=1 --maxfiles=1500 --label=GUARD >/dev/null 2>&1
+i=0
+while [ "$(chain_length "$img")" -lt 1 ]; do
+    i=$((i + 1))
+    ODS2_TEST_INDEXF=step=2,nomerge $FAULT "$img" "COPY $TMP/empty.txt [000000]G$i.TXT" >/dev/null 2>&1
+    [ $i -lt 400 ] || break
+done
+E=$(./ods2_dump_header "$img" 1 | sed -n 's/.*ext_fid=(\([0-9]*\),.*/\1/p' | head -1)
+python3 -I - "$img" "$E" <<'PY'
+import struct, sys
+img, e = sys.argv[1], int(sys.argv[2])
+f = open(img, 'r+b')
+f.seek(512); home = f.read(512)
+alt, ib, ibsz, cl = struct.unpack_from('<I', home, 8)[0], struct.unpack_from('<I', home, 24)[0], struct.unpack_from('<H', home, 32)[0], struct.unpack_from('<H', home, 14)[0]
+# the extension header's bit is cleared, and the primary's EFBLK is put back to just before its slot (the new file's header is the last one inside)
+f.seek(ib * 512); bm = bytearray(f.read(512)); bm[(e - 1) // 8] &= ~(1 << ((e - 1) % 8)); f.seek(ib * 512); f.write(bm)
+f.seek((ib + ibsz) * 512); p = bytearray(f.read(512))
+vbn = cl * 4 + ibsz + e
+sw = lambda v: struct.pack('<HH', v >> 16, v & 0xFFFF)
+p[28:32] = sw(vbn); p[32:34] = b'\0\0'
+sum_ = sum(struct.unpack_from('<255H', p, 0)) & 0xFFFF
+struct.pack_into('<H', p, 510, sum_)
+f.seek((ib + ibsz) * 512); f.write(p); f.seek(alt * 512); f.write(p)
+PY
+for k in 1 2 3 4 5 6; do ODS2_TEST_INDEXF=step=2,nomerge $FAULT "$img" "COPY $TMP/empty.txt [000000]Z$k.TXT" >/dev/null 2>&1; done
+check "ODS-2: the extension header's slot is not given out: six more files, nothing wrong but the bit cleared on purpose" "0" \
+    "$(python3 -I tests/ods5check.py "$img" 2>&1 | grep '^ERROR' | grep -vc 'valid but its index bitmap bit is clear')"
+check "ODS-2: the extension header is still there (segment 1)" "1" "$(./ods2_dump_header "$img" "$E" 2>&1 | grep -c 'seg_num=1')"
 
 rm -rf "$TMP"
 if [ $fails -ne 0 ]; then
