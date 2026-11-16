@@ -349,6 +349,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_hugevol_check.sh
 	@echo "--- cli_frag_check ---"
 	@sh tests/cli_frag_check.sh
+	@echo "--- cli_indexf_ext_check ---"
+	@sh tests/cli_indexf_ext_check.sh
 	@echo "--- cli_ods5_integrity_check ---"
 	@sh tests/cli_ods5_integrity_check.sh
 	@echo "--- cli_deep_check (trees deeper than 255 levels) ---"

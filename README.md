@@ -631,10 +631,13 @@ in every structural test.
   directories (VMS's do); only `DIR` does.
 - INDEXF.SYS is extended as new files need it, anywhere on a volume of any size (Format 1 retrieval pointers
   below LBN 4,194,304, Format 2 above it): by 256 blocks at a time while it is under 4,096 blocks, then by half
-  its size, at most 16,384 blocks (one Format 2 pointer). Only the pointers its own header's map area holds are
-  available (about 51 Format 2 ones: roughly 510,000 files, more if the early steps were small); past that new
-  files are refused ("no room for another extent") and nothing else is affected. INDEXF.SYS extension headers
-  are read (a VMS volume that has them mounts) but not yet written.
+  its size, at most 16,384 blocks (one Format 2 pointer). New blocks that follow the last piece lengthen its
+  pointer; otherwise they get a pointer of their own, and when a header's map area is full the next pointer
+  goes into an INDEXF.SYS **extension header** (made in a free header slot of the blocks just added, up to the
+  65,535 headers of FH2$W_SEG_NUM; mount follows the whole chain). The writing of those extension headers has
+  not been checked on VMS (no VMS-made index file with one was available); tests/ods5check.py and the tests
+  here read them back. Volumes made by older ods2v2 whose primary header's map is already full and has no
+  extension header cannot grow the index file (new files are refused: "no room for another extent").
 - File numbers are 24 bits (up to 16,777,215, FID_NMX << 16 | FID_NUM), bounded by the volume's MAXIMUM_FILES
   and its index bitmap; an entry naming a file by a relative volume number (a volume set) is refused.
 - A directory is limited to 65,536 blocks (32 MiB of records), the most one

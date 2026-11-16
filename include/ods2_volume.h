@@ -58,6 +58,8 @@ typedef struct {
     ods2_extent_t *indexf_extents;      /* grown as needed (INDEXF.SYS's primary header and its whole extension chain) */
     size_t         indexf_extent_cap;
     int            indexf_extent_count;
+    unsigned       idx_highest;         /* the highest file number marked in use in the index bitmap, when idx_highest_valid: */
+    bool           idx_highest_valid;   /* kept by every change to the bitmap, so a create does not read all of it */
     /* A change to the volume (a delete, a create, a link) is made in memory first and written when it is
        known to succeed: every check that can fail runs before the first write to the image, so a refused
        or failed operation leaves the image byte for byte as it was (see txn_begin() in ods2_volume.c).

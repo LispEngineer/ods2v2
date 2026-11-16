@@ -604,9 +604,11 @@ static ods2_result_t txn_end(ods2_volume_t *vol, ods2_result_t r)
                disk may not have its new header */
             vol->write_failed = true;
             indexf_extents_restore(vol, t);
+            vol->idx_highest_valid = false;
         }
     } else {
         indexf_extents_restore(vol, t);
+        vol->idx_highest_valid = false;
     }
     free(t->saved_extents);
     free(t->w);
@@ -1410,7 +1412,12 @@ static ods2_result_t mark_index_bitmap(ods2_volume_t *vol, unsigned file_number,
         block[byte_in_block] &= (uint8_t) ~(1u << bit_in_byte);
     }
 
-    return ods2_write_block(vol, lbn, block);
+    r = ods2_write_block(vol, lbn, block);
+    if (r.ok && vol->idx_highest_valid) {
+        if (used && file_number > vol->idx_highest) vol->idx_highest = file_number;
+        else if (!used && file_number == vol->idx_highest) vol->idx_highest_valid = false;   /* rescanned when needed */
+    }
+    return r;
 }
 
 /* --- File number allocation (spec 5.1.6, 5.1.7) ---
@@ -1481,6 +1488,10 @@ static ods2_result_t highest_used_file_number(ods2_volume_t *vol, unsigned *high
     unsigned b, i;
     uint8_t block[512];
 
+    if (vol->idx_highest_valid) {
+        *highest_out = vol->idx_highest;
+        return ok();
+    }
     *highest_out = 0;
     for (b = 0; b < vol->home.ibmapsize; b++) {
         ods2_result_t r = read_index_bitmap_block(vol, b, block);
@@ -1497,6 +1508,8 @@ static ods2_result_t highest_used_file_number(ods2_volume_t *vol, unsigned *high
             }
         }
     }
+    vol->idx_highest = *highest_out;
+    vol->idx_highest_valid = true;
     return ok();
 }
 
@@ -1623,40 +1636,172 @@ ods2_result_t ods2_indexf_map_extent(uint8_t *indexf_header, uint32_t lbn, unsig
     return ok();
 }
 
-/* Allocates more blocks to INDEXF.SYS and maps them, so more headers
-   fit. Up to 256 blocks at a time; falls back to a single cluster if
-   no run that long is free. The new piece is mapped with the smallest
-   retrieval pointer that describes it - Format 1 below LBN 4,194,303,
-   Format 2 beyond (issue #14) - so INDEXF.SYS can grow anywhere on a
-   volume of any size. */
-static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, uint32_t *lbn_out,
-                                  unsigned *got_out)
+/* Test hooks (the fault-injection build only): ODS2_TEST_INDEXF=step=N[,nomerge] makes INDEXF.SYS grow N blocks at a time
+   (rounded to clusters) and never lengthen its last pointer, so a few hundred files fill the primary header's map area and
+   the extension-header code runs on a small volume. */
+static unsigned indexf_test_step(void)
 {
-    const ods2_head_core_t *core = (const ods2_head_core_t *) indexf_header;
+#ifdef ODS2_FAULT_INJECTION
+    const char *e = getenv("ODS2_TEST_INDEXF");
+    const char *k = e != NULL ? strstr(e, "step=") : NULL;
+    if (k != NULL && atoi(k + 5) > 0) return (unsigned) atoi(k + 5);
+#endif
+    return 0;
+}
+
+static bool indexf_test_nomerge(void)
+{
+#ifdef ODS2_FAULT_INJECTION
+    const char *e = getenv("ODS2_TEST_INDEXF");
+    return e != NULL && strstr(e, "nomerge") != NULL;
+#else
+    return false;
+#endif
+}
+
+/* Bytes of map area still free in header `h`. */
+static size_t map_room(const uint8_t *h)
+{
+    const ods2_head_core_t *core = (const ods2_head_core_t *) h;
     size_t map_offset = (size_t) core->mpoffset * 2;
     size_t map_bytes = (size_t) core->map_inuse * 2;
     size_t map_end = (size_t) core->acoffset * 2;
+    if (map_end > 510 || map_offset + map_bytes > map_end) return 0;
+    return map_end - (map_offset + map_bytes);
+}
+
+/* Puts (lbn, count) into the map of `h`: a new pointer at the end, or - when the new blocks follow the last pointer's
+   directly and the longer run still fits one pointer - the last pointer made longer (INDEXF.SYS grows in runs that are
+   usually adjacent: thousands of steps stay one pointer). False, `h` untouched, when there is no room. Does not touch
+   HIBLK. */
+static bool indexf_map_append(uint8_t *h, uint32_t lbn, unsigned count, bool merge)
+{
+    ods2_head_core_t *core = (ods2_head_core_t *) h;
+    size_t map_offset = (size_t) core->mpoffset * 2;
+    size_t map_bytes = (size_t) core->map_inuse * 2;
+    size_t size = ods2_retrieval_pointer_size(lbn, count);
+
+    if (size == 0) return false;
+    if (merge && map_bytes > 0) {
+        size_t w = 0, words = map_bytes / 2, last = (size_t) -1, last_size = 0;
+        ods2_extent_t le;
+        while (w < words) {
+            unsigned fmt = (unsigned) (h[map_offset + w * 2 + 1] >> 6);
+            size_t sw = fmt == 0 ? 1 : (fmt == 1 ? 2 : (fmt == 2 ? 3 : 4));
+            if (fmt != 0) { last = w; last_size = sw; }
+            w += sw;
+        }
+        if (last != (size_t) -1 && w == words &&
+            ods2_decode_retrieval_pointers(h + map_offset + last * 2, last_size, &le, 1) == 1 &&
+            (uint64_t) le.lbn + le.block_count == lbn && (uint64_t) le.block_count + count <= (1u << 30)) {
+            size_t nsize = ods2_retrieval_pointer_size(le.lbn, le.block_count + count);
+            if (nsize != 0 && nsize >= last_size * 2 && nsize - last_size * 2 <= map_room(h)) {
+                uint8_t enc[8];
+                if (ods2_encode_retrieval_pointer(enc, le.lbn, le.block_count + count) == nsize) {
+                    memcpy(h + map_offset + last * 2, enc, nsize);
+                    core->map_inuse = (uint8_t) ((map_bytes - last_size * 2 + nsize) / 2);
+                    return true;
+                }
+            }
+        }
+    }
+    if (size > map_room(h)) return false;
+    if (ods2_encode_retrieval_pointer(h + map_offset + map_bytes, lbn, count) != size) return false;
+    core->map_inuse = (uint8_t) ((map_bytes + size) / 2);
+    return true;
+}
+
+/* The last header of INDEXF.SYS's chain: `primary` itself, or the last extension header (read into `tail`). Returns the
+   tail's file number in *tail_num and how many extension headers there are in *ext_count. */
+static ods2_result_t indexf_tail(ods2_volume_t *vol, const uint8_t *primary, uint8_t *tail, unsigned *tail_num,
+                                 unsigned *ext_count)
+{
+    unsigned count = 0;
+    memcpy(tail, primary, 512);
+    *tail_num = 1;
+    while (ods2_fid_number(((const ods2_head_core_t *) tail)->ext_fid) != 0) {
+        unsigned next = ods2_fid_number(((const ods2_head_core_t *) tail)->ext_fid);
+        ods2_result_t r;
+        if (count >= 65535u) return fail("INDEXF.SYS's extension header chain does not end");
+        r = ods2_read_header(vol, next, tail);
+        if (!r.ok) return r;
+        *tail_num = next;
+        count++;
+    }
+    *ext_count = count;
+    return ok();
+}
+
+static void header_seal(uint8_t *h)
+{
+    uint16_t checksum = ods2_checksum(h, 255);
+    h[510] = (uint8_t) (checksum & 0xff);
+    h[511] = (uint8_t) (checksum >> 8);
+}
+
+/* After INDEXF.SYS has grown, its extension headers say the same total size as the primary does (every header of a
+   multi-header file carries the whole file's attributes: create_file writes them so). */
+static ods2_result_t indexf_ext_sizes(ods2_volume_t *vol, const uint8_t *primary)
+{
+    const ods2_head_core_t *pc = (const ods2_head_core_t *) primary;
+    unsigned next = ods2_fid_number(pc->ext_fid);
+    unsigned guard = 0;
+
+    while (next != 0 && guard++ < 65535u) {
+        uint8_t h[512];
+        ods2_head_core_t *c = (ods2_head_core_t *) h;
+        ods2_result_t r = ods2_read_header(vol, next, h);
+        unsigned following;
+        if (!r.ok) return r;
+        following = ods2_fid_number(c->ext_fid);
+        if (c->recattr.hiblk != pc->recattr.hiblk || c->recattr.efblk != pc->recattr.efblk || c->highwater != pc->highwater) {
+            c->recattr.hiblk = pc->recattr.hiblk;
+            c->recattr.efblk = pc->recattr.efblk;
+            if (c->highwater != 0) c->highwater = pc->highwater;
+            header_seal(h);
+            r = ods2_write_header(vol, next, h);
+            if (!r.ok) return r;
+        }
+        next = following;
+    }
+    return ok();
+}
+
+/* Allocates more blocks to INDEXF.SYS and maps them, so more headers fit. Up to 256 blocks at a time, half the file's size
+   once it is big (at most 16384 blocks, one Format 2 pointer); falls back to a single cluster if no run that long is
+   free. The new piece is mapped with the smallest retrieval pointer that describes it, or lengthens the last pointer
+   when it follows it directly. When the map area of the last header of the chain is used up, the pointer goes into an
+   EXTENSION header of INDEXF.SYS: made, in a free header slot of the new blocks (they are mapped already, so the header
+   can be found), as soon as the map has no room for another pointer, so the next growth has somewhere to go. (Not
+   measured on VMS: no VMS-made index file with an extension header was available.) */
+static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, uint32_t *lbn_out,
+                                  unsigned *got_out)
+{
+    ods2_head_core_t *core = (ods2_head_core_t *) indexf_header;
     unsigned want = (256u / vol->home.cluster) * vol->home.cluster;
     unsigned hiblk = ods2_word_swap32(core->recattr.hiblk);
     uint32_t lbn;
     unsigned got;
+    uint8_t tail[512];
+    unsigned tail_num = 1, ext_count = 0;
+    bool nomerge = indexf_test_nomerge();
     ods2_result_t r;
 
     if (hiblk >= 4096) {
-        /* A big index file grows by half its size, at most 16384 blocks (one Format 2 pointer): a volume
-           with a million files would otherwise need thousands of 256-block pointers, and the primary
-           header's map area holds about 77 pointers (there are no INDEXF.SYS extension headers here). */
+        /* A big index file grows by half its size, at most 16384 blocks (one Format 2 pointer) */
         want = hiblk / 2;
         if (want > 16384) want = 16384;
         want = (want / vol->home.cluster) * vol->home.cluster;
     }
+    if (indexf_test_step() != 0) want = (indexf_test_step() / vol->home.cluster) * vol->home.cluster;
     if (want == 0) want = vol->home.cluster;
-    /* Check first, before taking any blocks, that the smallest pointer
-       (4 bytes) could still fit; the exact size is checked after
-       allocation, once the LBN is known. */
-    if (map_end > 510 || map_offset + map_bytes + 4 > map_end) {
-        return fail("INDEXF.SYS's header has no room for another extent "
-                    "(would need an extension header - not yet implemented)");
+    r = indexf_tail(vol, indexf_header, tail, &tail_num, &ext_count);
+    if (!r.ok) return r;
+    /* Check first, before taking any blocks, that the smallest pointer (4 bytes) could still fit in the last header
+       (or lengthen its last pointer); the exact size is checked after allocation, once the LBN is known. */
+    if (map_room(tail) < 4) {
+        return fail("INDEXF.SYS's last header has no room for another extent and has no extension header: the "
+                    "index file cannot grow");
     }
     r = ods2_allocate_blocks(vol, want, &lbn, &got);
     if (!r.ok && want > (256u / vol->home.cluster) * vol->home.cluster && want > vol->home.cluster) {
@@ -1684,13 +1829,73 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
             }
         }
     }
-    r = ods2_indexf_map_extent(indexf_header, lbn, got);
-    if (!r.ok) {
-        /* ods2_allocate_blocks() has already marked them used; give
-           them back rather than leak them. */
+    if (!indexf_map_append(tail, lbn, got, !nomerge)) {
+        /* ods2_allocate_blocks() has already marked them used; give them back rather than leak them. */
         ods2_free_blocks(vol, lbn, got);
-        return r;
+        return fail("INDEXF.SYS's header has no room for another extent");
     }
+    if (tail_num == 1) memcpy(indexf_header, tail, 512);      /* the primary is the caller's copy, written by the caller */
+    hiblk += got;
+    core->recattr.hiblk = ods2_word_swap32(hiblk);
+    /* INITIALIZE leaves FH2$L_HIGHWATER at HIBLK + 1 on INDEXF.SYS; keep that relationship. */
+    if (core->highwater != 0) core->highwater = hiblk + 1;
+    if (tail_num != 1) {
+        header_seal(tail);
+        r = ods2_write_header(vol, tail_num, tail);       /* its place is inside the old extents: locatable */
+        if (!r.ok) return r;
+    }
+    {
+        const char *why = "INDEXF.SYS's extents do not decode after growing it";
+        if (!indexf_extents_load(vol, indexf_header, true, &why)) return fail(why);
+    }
+    /* the last header is nearly full: an extension header for the next growth, in a free slot of the new blocks (the last
+       one: the caller's own file number is the first free one) */
+    if (map_room(tail) < 4 && got >= 2) {
+        ods2_header_spec_t spec;
+        uint8_t ext[512];
+        unsigned slot = (unsigned) (hiblk - (uint32_t) vol->home.cluster * 4 - vol->home.ibmapsize);
+        if ((slot & 0xFFFFu) == 0) slot--;                 /* 65536, 131072, ...: FID_NUM 0 is "no file" */
+        ods2_head_core_t *tc = (ods2_head_core_t *) tail;
+        char ident[24] = "INDEXF.SYS;1";
+
+        memset(&spec, 0, sizeof(spec));
+        spec.level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
+        ods2_fid_set_number(&spec.fid, slot);
+        spec.fid.fid_seq = 1;
+        spec.backlink = core->fid;                         /* the primary header's FID (spec 3.5.2.16) */
+        spec.seg_num = (uint16_t) (ext_count + 1);
+        spec.filechar = core->filechar;
+        spec.rtype = core->recattr.rtype;
+        spec.rattrib = core->recattr.rattrib;
+        spec.rsize = core->recattr.rsize;
+        spec.maxrec = core->recattr.maxrec;
+        spec.hiblk = hiblk;
+        spec.efblk = ods2_word_swap32(core->recattr.efblk);
+        spec.ffbyte = core->recattr.ffbyte;
+        spec.highwater = core->highwater;
+        spec.link_count = (uint16_t) (indexf_header[ODS5_FH2_LINKCOUNT] | (indexf_header[ODS5_FH2_LINKCOUNT + 1] << 8));
+        spec.ident_name = ident;
+        if (!ods2_build_file_header(ext, &spec)) return fail("could not construct an INDEXF.SYS extension header");
+        r = ods2_write_header(vol, slot, ext);
+        if (!r.ok) return r;
+        ods2_fid_set_number(&tc->ext_fid, slot);
+        tc->ext_fid.fid_seq = 1;
+        if (tail_num == 1) {
+            core->ext_fid = tc->ext_fid;                  /* the primary is the caller's copy, written by the caller */
+        } else {
+            header_seal(tail);
+            r = ods2_write_header(vol, tail_num, tail);
+            if (!r.ok) return r;
+        }
+        r = mark_index_bitmap(vol, slot, true);
+        if (!r.ok) return r;
+        {
+            const char *why = "INDEXF.SYS's extension header does not decode";
+            if (!indexf_extents_load(vol, indexf_header, true, &why)) return fail(why);
+        }
+    }
+    r = indexf_ext_sizes(vol, indexf_header);
+    if (!r.ok) return r;
     *lbn_out = lbn;
     *got_out = got;
     return ok();
