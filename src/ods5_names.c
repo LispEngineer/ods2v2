@@ -417,6 +417,28 @@ size_t ods5_unescape(const char *spelling, size_t n, char *out, size_t cap)
     return len;
 }
 
+size_t ods5_unescape_filename(const char *spelling, size_t n, char *out, size_t cap)
+{
+    size_t len = ods5_unescape(spelling, n, out, cap);
+    size_t i;
+    bool unescaped_dot = false;
+
+    if (len == (size_t) -1) return len;
+    for (i = 0; i < n; i++) {
+        if (spelling[i] == '^' && i + 1 < n) { i++; continue; }
+        if (spelling[i] == '.') { unescaped_dot = true; break; }
+    }
+    /* no unescaped dot but a dot in the literal: all its dots were escaped, the type is the null one, and the stored name
+       ends with the dot ("a^.b" is stored "a.b.", where "a.b" is name a, type b). Without a dot at all
+       ods5_complete_name adds it as before. */
+    if (!unescaped_dot && strchr(out, '.') != NULL) {
+        if (len + 2 > cap) return (size_t) -1;
+        out[len++] = '.';
+        out[len] = '\0';
+    }
+    return len;
+}
+
 const char *ods5_find_unescaped(const char *s, char ch)
 {
     while (*s) {

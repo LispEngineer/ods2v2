@@ -87,6 +87,11 @@ size_t ods5_escape_name(const char *utf8, unsigned flags, char *out, size_t cap)
    characters are not special here. */
 size_t ods5_unescape(const char *spelling, size_t n, char *out, size_t cap);
 
+/* Spelling of a FILE name (n bytes) -> literal name, completed where the dot is ambiguous: like ods5_unescape, but a spelling
+   whose dots are all escaped ("a^.b") gets the null type's trailing dot ("a.b."), so that it is not read as name a, type
+   b ("a.b") by ods5_complete_name, which only sees the literal. Directory names do not use this. */
+size_t ods5_unescape_filename(const char *spelling, size_t n, char *out, size_t cap);
+
 /* Position of the first character of s that is the unescaped byte ch
    (skipping each ^ and the character after it), or NULL. */
 const char *ods5_find_unescaped(const char *s, char ch);

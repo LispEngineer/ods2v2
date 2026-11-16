@@ -2306,7 +2306,7 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
            stands for. Without a name on an ODS-5 volume, the host file's own
            name is used (UTF-8, as the host has it). */
         if (p->filename[0] != '\0') {
-            if (ods5_unescape(p->filename, strlen(p->filename), literal_name,
+            if (ods5_unescape_filename(p->filename, strlen(p->filename), literal_name,
                               sizeof(literal_name)) == (size_t) -1) {
                 report_error("%%ODS2-E-BADNAME, malformed ^ escape in the file name\n");
                 return;
@@ -2443,7 +2443,7 @@ static void cmd_symlink(ods2_volume_t *vol, const ods2_parsed_path_t *p, const c
         report_error("%%ODS2-E-BADPATH, no link name given\n");
         return;
     }
-    if (ods5_unescape(p->filename, strlen(p->filename), literal, sizeof(literal)) == (size_t) -1) {
+    if (ods5_unescape_filename(p->filename, strlen(p->filename), literal, sizeof(literal)) == (size_t) -1) {
         report_error("%%ODS2-E-BADNAME, malformed ^ escape in the link name\n");
         return;
     }
@@ -2482,8 +2482,8 @@ static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods
         report_error("%%ODS2-E-BADPATH, LINK needs a file name for the new entry and for the file\n");
         return;
     }
-    if (ods5_unescape(np->filename, strlen(np->filename), literal, sizeof(literal)) == (size_t) -1 ||
-        ods5_unescape(ep->filename, strlen(ep->filename), tliteral, sizeof(tliteral)) == (size_t) -1) {
+    if (ods5_unescape_filename(np->filename, strlen(np->filename), literal, sizeof(literal)) == (size_t) -1 ||
+        ods5_unescape_filename(ep->filename, strlen(ep->filename), tliteral, sizeof(tliteral)) == (size_t) -1) {
         report_error("%%ODS2-E-BADNAME, malformed ^ escape in a file name\n");
         return;
     }
@@ -3001,7 +3001,7 @@ static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw, 
        spelling (^-escapes): look up the characters it stands for. */
     {
         char literal[ODS2_PATH_MAX];
-        if (ods5_unescape(p->filename, strlen(p->filename), literal, sizeof(literal)) == (size_t) -1) {
+        if (ods5_unescape_filename(p->filename, strlen(p->filename), literal, sizeof(literal)) == (size_t) -1) {
             report_error("%%ODS2-E-BADNAME, %s: malformed ^ escape in the file name\n", spec);
             return;
         }
@@ -3179,7 +3179,7 @@ static void cmd_delete(ods2_volume_t *vol, const ods2_parsed_path_t *p)
         /* Normal case: "[SOMEDIR]FILE.TXT" - delete FILE.TXT from
            SOMEDIR directly. */
         dir_path = effective_path;
-        if (ods5_unescape(p->filename, strlen(p->filename), name_buf, sizeof(name_buf)) ==
+        if (ods5_unescape_filename(p->filename, strlen(p->filename), name_buf, sizeof(name_buf)) ==
             (size_t) -1) {
             report_error("%%ODS2-E-BADNAME, malformed ^ escape in the file name\n");
             return;
