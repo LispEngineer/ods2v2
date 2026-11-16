@@ -593,6 +593,8 @@ def main():
         where = 'dir %d (%s)' % (n, d['name'] if d else '?')
         lst = []
         prevkey = None
+        prevnm = None
+        carried = None
         for bi in range(used_blocks):
             blk = data[bi * 512:(bi + 1) * 512]
             if len(blk) < 512:
@@ -653,8 +655,12 @@ def main():
                     elif key == prevkey:
                         # continuation record of the same name: versions must continue downward
                         pass
+                # the versions of a name run newest first across its records too (review 28 b): a continuation record
+                # starts below the last version of the record before it
+                # (the same name exactly: on ODS-5 'lp.COM' and 'LP.COM' are two names that sort together)
+                prevver = carried if (prevkey == key and prevnm == nm and carried is not None) else None
                 prevkey = key
-                prevver = None
+                prevnm = nm
                 while ent + 8 <= pos + size + 2:
                     ver = u16(blk, ent)
                     fid = (u16(blk, ent + 2), u16(blk, ent + 4), blk[ent + 6], blk[ent + 7])
@@ -663,6 +669,7 @@ def main():
                         fnd.err('%s: %r versions not descending (%d then %d)' % (where, nm, prevver, ver))
                     prevver = ver
                     ent += 8
+                carried = prevver
                 pos += size + 2
                 nrec += 1
             if nrec == 0 and used_blocks > 1 and False:

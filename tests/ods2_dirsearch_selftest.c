@@ -33,6 +33,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <stdbool.h>
 #include "ods2_volume.h"
 #include "ods2_init.h"
 
@@ -58,6 +59,47 @@ static unsigned dir_blocks(ods2_volume_t *vol, const uint8_t *h)
     assert(ods2_decode_all_extents(vol, h, ext, ODS2_MAX_EXTENTS, &n).ok);
     for (i = 0; i < n; i++) total += ext[i].block_count;
     return total;
+}
+
+static void copy_file(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb"), *out = fopen(to, "wb");
+    uint8_t buf[65536];
+    size_t n;
+    assert(in != NULL && out != NULL);
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) assert(fwrite(buf, 1, n, out) == n);
+    fclose(in);
+    fclose(out);
+}
+
+/* Swaps two neighbouring records of one name in some block, so that two versions of it lie oldest first (what the insert
+   did before review 28 b). Returns true when a block was changed. */
+static bool swap_two_versions(ods2_volume_t *vol, const uint8_t *hdr, unsigned blocks)
+{
+    unsigned b;
+    for (b = 1; b <= blocks; b++) {
+        uint8_t blk[512], tmp[512];
+        size_t pos = 0, prev_pos = (size_t) -1;
+        assert(ods2_read_file_block(vol, hdr, b, blk).ok);
+        while (pos + 6 <= 512) {
+            unsigned size = blk[pos] | (blk[pos + 1] << 8);
+            if (size == 0xFFFF || size == 0) break;
+            if (prev_pos != (size_t) -1) {
+                unsigned psize = blk[prev_pos] | (blk[prev_pos + 1] << 8);
+                if (blk[prev_pos + 5] == blk[pos + 5] && memcmp(blk + prev_pos + 6, blk + pos + 6, blk[pos + 5]) == 0) {
+                    size_t plen = (size_t) psize + 2, clen = (size_t) size + 2;
+                    memcpy(tmp, blk + prev_pos, plen + clen);
+                    memcpy(blk + prev_pos, tmp + plen, clen);
+                    memcpy(blk + prev_pos + clen, tmp, plen);
+                    assert(ods2_write_file_block(vol, hdr, b, blk).ok);
+                    return true;
+                }
+            }
+            prev_pos = pos;
+            pos += (size_t) size + 2;
+        }
+    }
+    return false;
 }
 
 static void run(unsigned level)
@@ -116,6 +158,33 @@ static void run(unsigned level)
     assert(ods2_list_directory_alloc(&vol, root, &list, &count).ok);
     assert(count >= NAMES * VERSIONS);                      /* plus the reserved files' entries */
     free(list);
+
+    /* a version that would not be stored newest first is refused (review 28 b): the record goes after the records of its name */
+    {
+        ods2_fid_t f;
+        uint16_t ver;
+        assert(ods2_insert_into_directory(&vol, 4, "ORDER.TXT", 5, fid_of(0, 5)).ok);
+        assert(!ods2_insert_into_directory(&vol, 4, "ORDER.TXT", 7, fid_of(0, 7)).ok);       /* higher than ;5 */
+        assert(!ods2_insert_into_directory(&vol, 4, "ORDER.TXT", 5, fid_of(0, 5)).ok);       /* the same */
+        assert(ods2_insert_into_directory(&vol, 4, "ORDER.TXT", 3, fid_of(0, 3)).ok);        /* lower: stored after ;5 */
+        assert(ods2_read_header(&vol, 4, root).ok);
+        assert(ods2_lookup_name_version(&vol, root, "ORDER.TXT", 0, &f, &ver).ok && ver == 5);
+        assert(ods2_lookup_name_version(&vol, root, "ORDER.TXT", -1, &f, &ver).ok && ver == 3);
+        blocks = dir_blocks(&vol, root);
+    }
+    if (level == 2) {
+        /* kept for tests/cli_verorder_check.sh: the directory as built (versions newest first), and the same with two
+           versions of a name swapped */
+        ods2_dismount(&vol);
+        copy_file(DISK_PATH, "samples/dirsearch_order_ok.img");
+        assert(ods2_mount_write(DISK_PATH, &vol).ok);
+        assert(ods2_read_header(&vol, 4, root).ok);
+        assert(swap_two_versions(&vol, root, blocks));
+        ods2_dismount(&vol);
+        copy_file(DISK_PATH, "samples/dirsearch_order_bad.img");
+        assert(ods2_mount_write(DISK_PATH, &vol).ok);
+        assert(ods2_read_header(&vol, 4, root).ok);
+    }
 
     /* a directory out of order: two blocks swapped; an existing name and version is not added a second time */
     {

@@ -89,7 +89,7 @@ int main(void)
     }
     printf("PASS: control characters, '/' and ambiguous '%%' escape to %%XX and back\n");
 
-    /* --- the folding VMS V8.4 applies to names (ods5-vms, CORPUS.md 8 "Question (b)") --- */
+    /* --- the folding VMS V8.4 applies to names (measured on VMS, CORPUS.md 8 "Question (b)") --- */
     {
         /* names that fold together are one name (versions of it on VMS) */
         assert(ods5_fold('d') == ods5_fold('D') && ods5_fold(0x1C4) == ods5_fold(0x1C5) && ods5_fold(0x1C5) == ods5_fold(0x1C6));

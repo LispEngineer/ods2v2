@@ -3906,24 +3906,27 @@ ods2_result_t ods2_insert_into_directory(ods2_volume_t *vol, unsigned dir_file_n
     return txn_end(vol, r);
 }
 
-/* True when the directory held in `blocks` already has an entry for `name` and `version`. A directory of ODS2_DIR_BSEARCH_MIN
-   blocks or more is searched by halving, which finds nothing in one that is not in the order the search expects (damage, another
-   tool): a lookup that missed would let a create add a second entry of the name (review 27 N5). The insert holds the whole
-   directory already, so this costs one more pass over it. */
-static bool loaded_directory_has_entry(const ods2_volume_t *vol, const uint8_t *blocks, unsigned used, const char *name,
-                                       uint16_t version)
+/* What the directory held in `blocks` has of `name`: *dup says it has `version` already, *lowest is the lowest version of the name
+   there (0 when it has none). A directory of ODS2_DIR_BSEARCH_MIN blocks or more is searched by halving, which finds nothing in
+   one that is not in the order the search expects (damage, another tool): a lookup that missed would let a create add a second
+   entry of the name (review 27 N5). The insert holds the whole directory already, so this costs one more pass over it. */
+static void loaded_directory_name_state(const ods2_volume_t *vol, const uint8_t *blocks, unsigned used, const char *name,
+                                        uint16_t version, bool *dup, unsigned *lowest)
 {
     unsigned b;
+    *dup = false;
+    *lowest = 0;
     for (b = 0; b < used; b++) {
         ods2_dir_entry_t e[ODS2_DIR_MAX_ENTRIES_PER_BLOCK];
         unsigned bad = 0;
         int n = ods2_parse_directory_records(blocks + (size_t) b * 512, 512, vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, e,
                                              ODS2_DIR_MAX_ENTRIES_PER_BLOCK, &bad), i;
         for (i = 0; i < n && i < ODS2_DIR_MAX_ENTRIES_PER_BLOCK; i++) {
-            if (e[i].version == version && ods2_dir_name_compare(e[i].name, strlen(e[i].name), name, strlen(name)) == 0) return true;
+            if (ods2_dir_name_compare(e[i].name, strlen(e[i].name), name, strlen(name)) != 0) continue;
+            if (e[i].version == version) *dup = true;
+            if (*lowest == 0 || e[i].version < *lowest) *lowest = e[i].version;
         }
     }
-    return false;
 }
 
 static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
@@ -3946,10 +3949,23 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
     r = load_directory(vol, dir_header, 1, &blocks, &used);
     if (!r.ok) return r;
 
-    if (used >= ODS2_DIR_BSEARCH_MIN && loaded_directory_has_entry(vol, blocks, used, name, version)) {
-        free(blocks);
-        return fail("a directory entry with this name and version exists already: not added (a lookup did not find it: is the "
-                    "directory out of order?)");
+    {
+        bool dup;
+        unsigned lowest;
+        loaded_directory_name_state(vol, blocks, used, name, version, &dup, &lowest);
+        if (dup && used >= ODS2_DIR_BSEARCH_MIN) {
+            free(blocks);
+            return fail("a directory entry with this name and version exists already: not added (a lookup did not find it: is "
+                        "the directory out of order?)");
+        }
+        /* The record goes after the records of its name, so it is stored last: that is newest first only when its version
+           is lower than every version there (review 28 b). A directory with the versions the other way round makes VMS and
+           this program's own lookup of the highest version read the wrong file. */
+        if (lowest != 0 && version >= lowest) {
+            free(blocks);
+            return fail("a version of this name that is not lower than every version there would be stored out of order "
+                        "(versions are kept newest first): not added");
+        }
     }
     t = ods2_dir_choose_block(blocks, used, name);
     verlimit = ((const ods2_head_core_t *) dir_header)->recattr.versions;   /* the directory's default version limit */

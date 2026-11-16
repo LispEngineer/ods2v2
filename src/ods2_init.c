@@ -283,7 +283,7 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
 
     /* ---- SECURITY.SYS block 1: the volume security profile ---- */
     if (opt->security == ODS2_INIT_SECURITY_PROFILE) {
-        /* The record VMS INITIALIZE writes (V8.4 measured by ods5-vms on 13 volumes it initialized,
+        /* The record VMS INITIALIZE writes (V8.4 measured on VMS on 13 volumes it initialized,
            and the never-mounted VMS 7.x volume ods2-empty.dsk): longword 0 is a checksum, the XOR
            of the whole longwords from offset 8 up to the record's length (a trailing partial longword is
            left out); longword 1 is 0x220 on the [1,4] volumes measured (its meaning is not known; it
