@@ -633,6 +633,8 @@ means no VMS version has been tried at that size):
 (disk use against apparent size). A volume needs host space for what is written into it and for its structures (the bitmap
 is 1 bit per cluster, the index file 1 block per file), not for its size. An image file shorter than the volume it holds
 (a truncated copy) is mounted read-only with `%ODS2-W-IMAGESHORT`: extend it (`truncate -s`) to the volume's size to write it.
+The check applies only to a storage control block that is one (level 0x0201 or 0x0501): a block that is no SCB, such as the
+all-ones placeholder of the starter volume, claims no size, is not compared with the image, and the volume stays writable.
 A write the host cannot hold (disk full, a file size limit) fails the command and says why (`No space left on device`,
 `File too large`); the change is undone and the volume stays sound. The storage bitmap of a write mount is kept in memory
 (up to 64 MiB of it) and COPY from a pipe needs room in `$TMPDIR` or the image's directory for the piped data.
