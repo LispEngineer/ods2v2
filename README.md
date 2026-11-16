@@ -668,7 +668,9 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
   order in which an interruption leaves a sound volume or one that heals at the next new file (the new extension header
   first, then its bit, then the last header with the pointer and the link, then the primary): `make test` interrupts
   every write of three kinds of growth (tests/fault_inject.py, index_*). Between the last two writes the primary's HIBLK
-  and EFBLK are behind the map for a moment (the checker says so); the next new file repairs them from the map. The
+  and EFBLK are behind the map for a moment (the checker says so, and mount prints `%ODS2-W-INDEXGROWTH`); the first change of any kind made through a write mount (a
+  relabel as well as a new file) repairs them from the map, once per mount. That repair is written outside the change that
+  triggered it, so a command that then fails may still have written it. The
   writing of those extension headers has not been checked on VMS (no VMS-made index file with one was available); on
   an ODS-5 volume they are written at level 5 behind a primary of level 2.1, and what VMS does there is not measured
   either. tests/ods5check.py and the tests here read them back. Volumes made by an older ods2v2 whose last header

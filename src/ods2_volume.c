@@ -4282,8 +4282,6 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
                     "ods2_allocate_blocks() returned)");
     }
 
-    txn_forget_blocks(vol, lbn, block_count);      /* a write kept for these blocks is not made at commit */
-
     r = ods2_read_header(vol, 2, bitmap_header); /* BITMAP.SYS is always file 2 */
     if (!r.ok) return r;
 
@@ -4336,6 +4334,8 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
             if (!r.ok) return r;
         }
     }
+    /* the blocks are free now: a write kept for them is not made at commit (review 29 N1: after the checks and the bits) */
+    txn_forget_blocks(vol, lbn, block_count);
     /* the cache of the bitmap follows (the hint moves down to the first cluster freed) */
     if (vol->bm_valid) {
         if ((size_t) (last_block + 1) * 512 <= vol->bm_bytes) {
