@@ -39,6 +39,13 @@
 static ods2_result_t ok(void) { ods2_result_t r; r.ok = true; r.problem = NULL; return r; }
 static ods2_result_t fail(const char *why) { ods2_result_t r; r.ok = false; r.problem = why; return r; }
 
+unsigned ods2_init_min_cluster(uint64_t blocks)
+{
+    const uint64_t per = 65535ULL * 4096ULL;
+    uint64_t m = (blocks + per - 1) / per;
+    return m < 1 ? 1 : (unsigned) m;
+}
+
 /* The file being made: blocks are written at their LBN. */
 typedef struct { FILE *f; uint64_t blocks; } image_t;
 
@@ -98,7 +105,10 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
         return fail("ACCESS_DATES, HARDLINKS and NO_SPECIAL_FILES are ODS-5 characteristics");
     }
     c = opt->cluster;
-    if (c == 0) c = (N >= (1u << 20)) ? 16 : (N >= (1u << 18)) ? 8 : (N >= (1u << 16)) ? 4 : 1;
+    if (c == 0) {
+        c = (N >= (1u << 20)) ? 16 : (N >= (1u << 18)) ? 8 : (N >= (1u << 16)) ? 4 : 1;
+        if (c < ods2_init_min_cluster(N)) c = ods2_init_min_cluster(N);        /* above 4,294,901,760 blocks: 17 */
+    }
     /* VMS: HM2$W_CLUSTER and SCB$W_CLUSTER are words, and HM2$W_IBMAPVBN = 4c + 1 must fit a word too, so a volume can have a
        cluster factor of at most 16,383, and V8.4 and V7.3-2 mount and write one (CORPUS 36.1, 39). But INITIALIZE/CLUSTER_SIZE
        takes 1 to 16,380 and refuses 16,381 and above with %INIT-F-BADCLUSTER on both (CORPUS 36.2, 39), so that is the limit
@@ -107,6 +117,16 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
     if (c > 16380 && !opt->cluster_over_limit) {
         return fail("the cluster factor is at most 16380: VMS INITIALIZE refuses more (%INIT-F-BADCLUSTER on V8.4 and V7.3-2), "
                     "although they mount a volume with 16381 to 16383; ods2_init --cluster-over-limit makes one");
+    }
+    if (c < ods2_init_min_cluster(N) && !opt->cluster_over_limit) {
+        /* HP: the storage bitmap, BITMAP.SYS, must fit in 65,535 blocks; VAX V7.3 INITIALIZE measured to take 9 to 16 only on
+           2^31-16 blocks (ods5-vms3, 16-NOV). static: the message lives on in the result */
+        static char min_msg[512];
+        snprintf(min_msg, sizeof(min_msg), "the cluster factor is at least %u for %llu blocks: VMS INITIALIZE refuses less (BITMAP.SYS, "
+                 "one bit per cluster, would be over 65,535 blocks; VAX V7.3 measured: only 9-16 accepted on 2^31-16 blocks, ods5-vms3, "
+                 "16-NOV); whether VMS mounts such a volume has not been measured; ods2_init --cluster-over-limit makes one",
+                 ods2_init_min_cluster(N), (unsigned long long) N);
+        return fail(min_msg);
     }
     maxfiles = opt->maxfiles != 0 ? opt->maxfiles : (uint32_t) (N / (2 * (uint64_t) c + 2));
     if (maxfiles < 64) maxfiles = 64;

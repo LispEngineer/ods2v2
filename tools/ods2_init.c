@@ -34,7 +34,9 @@
  *     --no-special-files      HM2$M_NO_SPECIAL_FILES (ODS-5)
  *     --nohighwater           HM2$M_NOHIGHWATER
  *     --cluster=N             cluster factor (default by size), 1 to 16380 as VMS INITIALIZE; --cluster-over-limit
- *                             also allows 16381 to 16383 (V8.4 and V7.3-2 mount such a volume, INITIALIZE does not make one)
+ *                             also allows 16381 to 16383 (V8.4 and V7.3-2 mount such a volume, INITIALIZE does not make one),
+ *                             and a cluster factor below ceil(blocks / (65535 x 4096)), which INITIALIZE refuses (BITMAP.SYS
+ *                             would be over 65,535 blocks; whether VMS mounts such a volume has not been measured)
  *     --maxfiles=N            maximum number of files
  *     --geometry=SECTORS,TRACKS       the disk geometry the storage control block records (default 32,16; 63,255 above 16 GiB)
  *     --security=profile|empty|zero   what SECURITY.SYS holds (default: the profile record VMS writes)
@@ -67,7 +69,7 @@ int main(int argc, char **argv)
     if (argc < 3) {
         fprintf(stderr, "usage: %s <new-image> <size> [--label=NAME] [--structure=2|5] [--hardlinks] "
                         "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N] [--geometry=SECTORS,TRACKS | --target=ld|ra|scsi|axpbox|rz]\n"
-                        "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 16380\n", argv[0]);
+                        "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 16380 and at least blocks / 268,431,360 (rounded up)\n", argv[0]);
         return 2;
     }
     const char *geo_source = NULL;
@@ -141,6 +143,12 @@ int main(int argc, char **argv)
     if (opt.cluster > 16380 && opt.cluster <= 16383 && opt.cluster_over_limit) {
         fprintf(stderr, "ods2_init: cluster factor %u: VMS INITIALIZE accepts 16,380 at most (V8.4 and V7.3-2: %%INIT-F-BADCLUSTER); "
                 "both mount and write a volume that has it (CORPUS 36, 39), no VMS-made volume does\n", opt.cluster);
+    }
+    if (opt.cluster != 0 && opt.cluster < ods2_init_min_cluster(opt.blocks) && opt.cluster_over_limit) {
+        fprintf(stderr, "ods2_init: cluster factor %u on %llu blocks: VMS INITIALIZE refuses less than %u (BITMAP.SYS, one bit per cluster, "
+                "would be over 65,535 blocks; VAX V7.3 measured: only 9-16 accepted on 2^31-16 blocks, ods5-vms3, 16-NOV); whether VMS "
+                "mounts such a volume has not been measured, and an unmeasured layout may crash it (CORPUS 37, 38)\n",
+                opt.cluster, (unsigned long long) opt.blocks, ods2_init_min_cluster(opt.blocks));
     }
     if (opt.blocks > 2147475456ULL) {
         /* measured: V7.3-2 mounts 2,147,475,456 blocks (2^31 - 8192) and refuses one block more, ODS-2 and ODS-5, whoever made
