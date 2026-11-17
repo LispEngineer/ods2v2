@@ -126,15 +126,15 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
     if (c < ods2_init_min_cluster(N) && !opt->cluster_over_limit) {
         /* HP's formula, applied as written: the storage bitmap (one bit per cluster, without the SCB block in front of it) is
            limited to 65,535 blocks. VAX V7.3 INITIALIZE of 2^31-16 blocks, of the values tried: 1, 2, 4 and 8 refused, 9-16 accepted (11 not
-           tried), 17 and up refused (CORPUS 40.1); the lower bound rests on one disk size. V8.4 and V7.3-2 refuse to mount a volume
-           below the minimum, %MOUNT-F-FILESTRUCT (CORPUS 41; the same size with the minimum cluster mounts, 41.1), the VAX not yet measured. Only the lower bound is enforced here: the upper bound has no explanation, and it is the VAX's alone (V7.3-2
+           tried), 17 and up refused (CORPUS 40.1); the lower bound rests on one disk size. V8.4, V7.3-2 and VAX V7.3 refuse to mount a volume
+           below the minimum, %MOUNT-F-FILESTRUCT (CORPUS 41, 43; the same size with the minimum cluster mounts, 41.1, 43). Only the lower bound is enforced here: the upper bound has no explanation, and it is the VAX's alone (V7.3-2
            accepted 16 to 8,192 on that size, CORPUS 35.3). VMS-initialized volumes with clusters 9-16 and ods2v2's cluster-16
            volume of that size mounted on the VAX; a larger cluster of an ods2v2-made volume there is not measured. static: the
            message lives on in the result */
         static char min_msg[800];
         snprintf(min_msg, sizeof(min_msg), "the cluster factor is at least %u for %llu blocks: VMS INITIALIZE refuses less (HP's formula: the "
                  "storage bitmap, one bit per cluster, is limited to 65,535 blocks; VAX V7.3 INITIALIZE of 2^31-16 blocks, "
-                 "of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried) and 17 and up refused, CORPUS 40.1); V8.4 and V7.3-2 refuse to mount such a volume (%%MOUNT-F-FILESTRUCT, CORPUS 41); the same size with the minimum cluster mounts (41.1); VAX V7.3 not yet measured; "
+                 "of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried) and 17 and up refused, CORPUS 40.1); V8.4, V7.3-2 and VAX V7.3 refuse to mount such a volume (%%MOUNT-F-FILESTRUCT, CORPUS 41, 43); the same size with the minimum cluster mounts (41.1, 43); "
                  "ods2_init --cluster-over-limit makes one", ods2_init_min_cluster(N), (unsigned long long) N);
         return fail(min_msg);
     }
