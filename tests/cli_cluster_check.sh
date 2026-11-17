@@ -64,14 +64,14 @@ for spec in 2:16381 2:16383 5:16383; do
     img="$TMP/c.img"
     rm -f "$img"
     $INIT "$img" 1G --structure=$level --cluster=$c --cluster-over-limit --label=OVER >/dev/null 2>"$TMP/err"
-    check "ODS-$level cluster $c with --cluster-over-limit: made, with a warning that Alpha INITIALIZE refuses it, that the VAX takes 16,381 and 16,382 (and none of a minimum)" "1 0 1" "$(grep -c 'INITIALIZE take 16,380' "$TMP/err") $(grep -c 'refuses less' "$TMP/err") $(grep -c 'VAX V7.3.*16,381 and 16,382.*CORPUS 40.2' "$TMP/err")"
+    check "ODS-$level cluster $c with --cluster-over-limit: made, with a warning that Alpha INITIALIZE refuses it, that the VAX takes 16,381 and 16,382 (and none of a minimum)" "1 0 1 1 1" "$(grep -c 'INITIALIZE take 16,380' "$TMP/err") $(grep -c 'refuses less' "$TMP/err") $(grep -c 'VAX V7.3.*16,381 and 16,382.*CORPUS 40.2' "$TMP/err") $(grep -c 'cluster 16,383 was mounted and written by V8.4 and V7.3-2 (ODS-2 and ODS-5) and by VAX V7.3 (ODS-2; its ODS-5 one was mounted, not written)' "$TMP/err") $(grep -c 'with 16,381 and 16,382 were not tried' "$TMP/err")"
     out2=$($ODS2 "$img" "COPY $TMP/f.txt [000000]X.TXT" 2>&1)
     check "... a file is copied in and read back" "1 cluster test" "$(echo "$out2" | grep -c COPIED) $($ODS2 "$img" 'TYPE [000000]X.TXT' 2>&1 | tail -1)"
     check "... ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
 done
 # P1 2 / review 31 N2: HP's INITIALIZE text (DCL Dictionary, /CLUSTER_SIZE) gives a minimum cluster factor, ceil(blocks / (65535 x 4096)),
-# so that the storage bitmap fits in 65,535 blocks; VAX V7.3 INITIALIZE of 2,147,483,632 blocks refused 1-8 and 17 and up and accepted
-# 9 to 16 (CORPUS 40.1; ods2_init enforces the lower bound only).
+# so that the storage bitmap fits in 65,535 blocks; VAX V7.3 INITIALIZE of 2,147,483,632 blocks, of the values tried: 1, 2, 4 and 8
+# refused, 9-16 accepted (11 not tried), 17 and up refused (CORPUS 40.1; ods2_init enforces the lower bound only).
 # ods2_init refuses less (cluster 8 there: 65,536 bitmap blocks); --cluster-over-limit makes the volume with a warning that says
 # whether VMS mounts it is not measured; the default cluster is raised to the minimum where 16 is too small (above 4,294,901,760
 # blocks). Sparse images; the small-cluster volume is read and written by ods2v2 and checked.
@@ -84,8 +84,8 @@ fi
 rm -f "$TMP/c.img"
 if [ $skipbig = 0 ]; then
 $INIT "$TMP/c.img" $big --structure=2 --cluster=8 >/dev/null 2>"$TMP/err"
-check "$big blocks, cluster 8: refused (the minimum is 9), no image, and the text says it is not measured, cites CORPUS 40 and no session name" "1 no file 1 1 1 0 0" \
-    "$(grep -c 'at least 9' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'storage bitmap' "$TMP/err") $(grep -c 'not been measured' "$TMP/err") $(grep -c 'CORPUS 40' "$TMP/err") $(grep -c 'ods5-vms3' "$TMP/err") $(grep -c 'SCB block would exceed' "$TMP/err")"
+check "$big blocks, cluster 8: refused (the minimum is 9), no image, and the text says it is not measured, cites CORPUS 40 and no session name" "1 no file 1 1 1 0 0 1" \
+    "$(grep -c 'at least 9' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'storage bitmap' "$TMP/err") $(grep -c 'not been measured' "$TMP/err") $(grep -c 'CORPUS 40' "$TMP/err") $(grep -c 'ods5-vms3' "$TMP/err") $(grep -c 'SCB block would exceed' "$TMP/err") $(grep -c 'of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried)' "$TMP/err")"
 rm -f "$TMP/c.img"
 $INIT "$TMP/c.img" $big --structure=2 --cluster=9 >/dev/null 2>"$TMP/err"
 check "$big blocks, cluster 9: made, with no warning about the cluster" "0 file" \
@@ -96,8 +96,8 @@ check "$big blocks, cluster 9 with --cluster-over-limit: made, and no below-mini
     "$(grep -c 'INITIALIZE refuses' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file')"
 rm -f "$TMP/c.img"
 $INIT "$TMP/c.img" $big --structure=2 --cluster=8 --cluster-over-limit --label=MINCL >/dev/null 2>"$TMP/err"
-check "$big blocks, cluster 8 with --cluster-over-limit: made, warned that VMS INITIALIZE refuses it and mounting is not measured (CORPUS 40, no session name)" "1 1 file 1 0 0" \
-    "$(grep -c 'INITIALIZE refuses' "$TMP/err") $(grep -c 'not been measured' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'INITIALIZE refuses.*CORPUS 40.1' "$TMP/err") $(grep -c 'ods5-vms3' "$TMP/err") $(grep -c 'SCB block would exceed' "$TMP/err")"
+check "$big blocks, cluster 8 with --cluster-over-limit: made, warned that VMS INITIALIZE refuses it and mounting is not measured (CORPUS 40, no session name)" "1 1 file 1 0 0 1" \
+    "$(grep -c 'INITIALIZE refuses' "$TMP/err") $(grep -c 'not been measured' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'INITIALIZE refuses.*CORPUS 40.1' "$TMP/err") $(grep -c 'ods5-vms3' "$TMP/err") $(grep -c 'SCB block would exceed' "$TMP/err") $(grep -c 'of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried)' "$TMP/err")"
 out2=$($ODS2 "$TMP/c.img" "COPY $TMP/f.txt [000000]X.TXT" 2>&1)
 check "... a file is copied in and read back, SHOW VOLUME gives cluster 8" "1 cluster test 8" \
     "$(echo "$out2" | grep -c COPIED) $($ODS2 "$TMP/c.img" 'TYPE [000000]X.TXT' 2>&1 | tail -1) $($ODS2 "$TMP/c.img" 'SHOW VOLUME' 2>&1 | awk '/Cluster size:/ {print $3}')"

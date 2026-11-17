@@ -36,8 +36,9 @@
  *     --cluster=N             cluster factor (default by size), 1 to 16380 as VMS INITIALIZE; --cluster-over-limit
  *                             also allows 16381 to 16383 (V8.4 and V7.3-2 INITIALIZE refuse them, and mount such a volume; the VAX
  *                             V7.3 INITIALIZE takes 16381 and 16382, CORPUS 40.2),
- *                             and a cluster factor below ceil(blocks / (65535 x 4096)), which INITIALIZE refuses (BITMAP.SYS
- *                             would be over 65,535 blocks; whether VMS mounts such a volume has not been measured)
+ *                             and a cluster factor below ceil(blocks / (65535 x 4096)), which INITIALIZE refuses (HP's formula: the
+ *                             storage bitmap, one bit per cluster, is limited to 65,535 blocks; whether VMS mounts such a volume
+ *                             has not been measured)
  *     --maxfiles=N            maximum number of files
  *     --geometry=SECTORS,TRACKS       the disk geometry the storage control block records (default 32,16; 63,255 above 16 GiB)
  *     --security=profile|empty|zero   what SECURITY.SYS holds (default: the profile record VMS writes)
@@ -143,13 +144,14 @@ int main(int argc, char **argv)
     /* warnings: only for a volume that was made (a refused command prints none) */
     if (opt.cluster > 16380 && opt.cluster <= 16383 && opt.cluster_over_limit) {
         fprintf(stderr, "ods2_init: cluster factor %u: Alpha V8.4 and V7.3-2 INITIALIZE take 16,380 at most (%%INIT-F-BADCLUSTER above; "
-                "VAX V7.3 INITIALIZE took 16,381 and 16,382 and refused 16,383, CORPUS 40.2); V8.4, V7.3-2 and the VAX mount and write a "
-                "volume that has it (CORPUS 36, 39, 40), no Alpha INITIALIZE makes one\n", opt.cluster);
+                "VAX V7.3 INITIALIZE took 16,381 and 16,382 and refused 16,383, CORPUS 40.2); a volume with cluster 16,383 was mounted "
+                "and written by V8.4 and V7.3-2 (ODS-2 and ODS-5) and by VAX V7.3 (ODS-2; its ODS-5 one was mounted, not written) (CORPUS 36.1, "
+                "39.1, 40.2), ods2v2-made volumes with 16,381 and 16,382 were not tried, no Alpha INITIALIZE makes one\n", opt.cluster);
     }
     if (opt.cluster != 0 && opt.cluster < ods2_init_min_cluster(opt.blocks) && opt.cluster_over_limit) {
         fprintf(stderr, "ods2_init: cluster factor %u on %llu blocks: VMS INITIALIZE refuses less than %u (HP's formula: the "
                 "storage bitmap, one bit per cluster, is limited to 65,535 blocks; VAX "
-                "V7.3 INITIALIZE of 2^31-16 blocks refused 1-8 and 17 and up and accepted 9-16, CORPUS 40.1); whether VMS mounts "
+                "V7.3 INITIALIZE of 2^31-16 blocks, of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried) and 17 and up refused, CORPUS 40.1); whether VMS mounts "
                 "such a volume has not been measured, and an unmeasured layout may crash it (CORPUS 37, 38)\n",
                 opt.cluster, (unsigned long long) opt.blocks, ods2_init_min_cluster(opt.blocks));
     }

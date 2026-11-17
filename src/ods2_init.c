@@ -112,8 +112,8 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
     /* VMS: HM2$W_CLUSTER and SCB$W_CLUSTER are words, and HM2$W_IBMAPVBN = 4c + 1 must fit a word too, so a volume can have a
        cluster factor of at most 16,383, and V8.4 and V7.3-2 mount and write one (CORPUS 36.1, 39). But INITIALIZE/CLUSTER_SIZE
        takes 1 to 16,380 and refuses 16,381 and above with %INIT-F-BADCLUSTER on both (CORPUS 36.2, 39). VAX V7.3 INITIALIZE took 16,381
-       and 16,382 and refused 16,383 (CORPUS 40.2): it has no 16,380 cap, and 16,380 stays the limit here as the strictest of them,
-       here, unless cluster_over_limit asks for the three values above it. */
+       and 16,382 and refused 16,383 (CORPUS 40.2): it has no 16,380 cap, and 16,380 stays the limit as the strictest of them,
+       unless cluster_over_limit asks for the three values above it. */
     if (c > 16383) {
         return fail("the cluster factor is at most 16383 here (the index bitmap's VBN, 4 x cluster + 1, must fit a word), and ods2_init takes at most 16380 "
                     "(Alpha V8.4 and V7.3-2 INITIALIZE: CORPUS 36.2, 39; VAX V7.3 INITIALIZE took 16381 and 16382 and refused 16383, CORPUS 40.2)");
@@ -125,15 +125,15 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
     }
     if (c < ods2_init_min_cluster(N) && !opt->cluster_over_limit) {
         /* HP's formula, applied as written: the storage bitmap (one bit per cluster, without the SCB block in front of it) is
-           limited to 65,535 blocks. VAX V7.3 INITIALIZE of 2^31-16 blocks refused 1-8 and 17 and up and accepted 9-16 (CORPUS
-           40.1). Only the lower bound is enforced here: the upper bound has no explanation, and it is the VAX's alone (V7.3-2
+           limited to 65,535 blocks. VAX V7.3 INITIALIZE of 2^31-16 blocks, of the values tried: 1, 2, 4 and 8 refused, 9-16 accepted (11 not
+           tried), 17 and up refused (CORPUS 40.1); the lower bound rests on one disk size. Only the lower bound is enforced here: the upper bound has no explanation, and it is the VAX's alone (V7.3-2
            accepted 16 to 8,192 on that size, CORPUS 35.3). VMS-initialized volumes with clusters 9-16 and ods2v2's cluster-16
            volume of that size mounted on the VAX; a larger cluster of an ods2v2-made volume there is not measured. static: the
            message lives on in the result */
         static char min_msg[640];
         snprintf(min_msg, sizeof(min_msg), "the cluster factor is at least %u for %llu blocks: VMS INITIALIZE refuses less (HP's formula: the "
-                 "storage bitmap, one bit per cluster, is limited to 65,535 blocks; VAX V7.3 INITIALIZE of 2^31-16 blocks refused 1-8 and "
-                 "17 and up and accepted 9-16, CORPUS 40.1); whether VMS mounts such a volume has not been measured; "
+                 "storage bitmap, one bit per cluster, is limited to 65,535 blocks; VAX V7.3 INITIALIZE of 2^31-16 blocks, "
+                 "of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried) and 17 and up refused, CORPUS 40.1); whether VMS mounts such a volume has not been measured; "
                  "ods2_init --cluster-over-limit makes one", ods2_init_min_cluster(N), (unsigned long long) N);
         return fail(min_msg);
     }
