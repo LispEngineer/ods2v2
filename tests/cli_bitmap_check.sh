@@ -2,7 +2,7 @@
 # MIT License - Copyright (c) 2026 Douglas P. Fields, Jr. (symbolics@lisp.engineer) (see LICENSE)
 #
 # cli_bitmap_check.sh - the storage bitmap of a write mount is read once and kept (LARGE_VOLUMES.md 3). Every allocation used
-# to read all of it: on a 2 TiB volume with 16-block clusters (a 32 MiB bitmap) each file created read 32 MiB, and 300 files
+# to read all of it: on a 2 TiB volume (4,294,901,760 blocks: the largest with 16-block clusters, ods2_init's minimum for more is 17) with 16-block clusters (a 32 MiB bitmap) each file created read 32 MiB, and 300 files
 # took 18 seconds (0.2 s now). The speed is judged against the same import into a small volume made in the same run (a
 # busy host slows both: review 27 T3), not by the clock alone. The placement of the blocks is checked too: a script of
 # 90 COPY and DELETE commands in one mount, and the same commands one process each, must leave every header with the same
@@ -33,7 +33,7 @@ for i in range(300):
     open('%s/F%d.TXT' % (sys.argv[1], i), 'w').write('file %d\n' % i * 20)
 PY
 img="$TMP/h.img"
-if ! $INIT "$img" 4294967280 --structure=2 --label=HUGE >/dev/null 2>&1; then
+if ! $INIT "$img" 4294901760 --structure=2 --cluster=16 --label=HUGE >/dev/null 2>&1; then
     echo "SKIP: the file system cannot hold a sparse 2 TiB image"
     rm -rf "$TMP"
     exit 0
