@@ -37,8 +37,8 @@ for edge in "2147475455 0 0" "2147475456 0 0" "2147475457 1 0" "4261348350 1 0" 
         rm -f "$img"
         continue
     fi
-    check "$1 blocks: warnings V7.3-2 / V8.4 (the VAX is said to be not measured)" "$2 $3 $2" \
-        "$(grep -c 'V7.3-2.*2,147,475,456' "$TMP/err") $(grep -c 'V8.4 mounts at most 4,261,348,350' "$TMP/err") $(grep -c 'VAX V7.3 is not measured' "$TMP/err")"
+    check "$1 blocks: warnings V7.3-2 / V8.4 (and the VAX's measured limits, CORPUS 40)" "$2 $3 $2" \
+        "$(grep -c 'V7.3-2.*2,147,475,456' "$TMP/err") $(grep -c 'V8.4 mounts at most 4,261,348,350' "$TMP/err") $(grep -c 'VAX V7.3 mounts 2,147,483,632 blocks and refuses 2,147,483,664.*CORPUS 40' "$TMP/err")"
     rm -f "$img"
 done
 for blocks in 2147475456 2147483632 2147483664 4294967280; do

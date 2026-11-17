@@ -47,8 +47,8 @@ typedef struct {
     unsigned    level;       /* 2 (ODS-2) or 5 (ODS-5) */
     uint16_t    volchar;     /* HM2$W_VOLCHAR: ODS5_VC_* bits (0x20 ACCESSTIMES, 0x40 HARDLINKS,
                                 0x80 NO_SPECIAL_FILES are valid at level 5 only), NOHIGHWATER ... */
-    unsigned    cluster;     /* cluster factor; 0 = the default for the size; at most 16,380 (what VMS INITIALIZE accepts) */
-    bool        cluster_over_limit; /* allow 16,381 to 16,383 too (VMS reads and writes such a volume, INITIALIZE does not make it) */
+    unsigned    cluster;     /* cluster factor; 0 = the default for the size; at most 16,380 (what Alpha V8.4 and V7.3-2 INITIALIZE accept; the VAX takes 16,382) */
+    bool        cluster_over_limit; /* allow 16,381 to 16,383 too (VMS reads and writes such a volume, Alpha INITIALIZE does not make it) */
     uint32_t    maxfiles;    /* 0 = the default, blocks / (2 * cluster + 2) */
     bool        security_lw1_given;  /* longword 1 of the security record: security_lw1 instead of 0x220 */
     uint32_t    security_lw1;
@@ -69,8 +69,8 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt);
 /* The smallest cluster factor VMS INITIALIZE takes for a volume of this many blocks: ceil(blocks / (65535 x 4096)), so that the
    storage bitmap (one bit per cluster, 4096 per block, not counting the SCB block in front of it in BITMAP.SYS) is at most
    65,535 blocks: HP's formula as written (DCL Dictionary, INITIALIZE /CLUSTER_SIZE). VAX V7.3 INITIALIZE of 2^31-16 blocks refused
-   1-8 and 17 and up and accepted 9-16 (ods5-vms3, 16-NOV); only this lower bound is enforced, the upper one has no explanation and
-   is the VAX's alone (V7.3-2 accepted 16 to 8,192 on that size, CORPUS 35.3; the VAX mounted only a cluster-16 volume of that size).
+   1-8 and 17 and up and accepted 9-16 (CORPUS 40.1); only this lower bound is enforced, the upper one has no explanation and
+   is the VAX's alone (V7.3-2 accepted 16 to 8,192 on that size, CORPUS 35.3; VMS-initialized volumes with clusters 9-16 and ods2v2's cluster-16 volume of that size mounted on the VAX).
    1 for a small volume. Whether VMS mounts a volume with less has not been measured. */
 unsigned ods2_init_min_cluster(uint64_t blocks);
 

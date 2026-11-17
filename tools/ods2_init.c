@@ -34,7 +34,8 @@
  *     --no-special-files      HM2$M_NO_SPECIAL_FILES (ODS-5)
  *     --nohighwater           HM2$M_NOHIGHWATER
  *     --cluster=N             cluster factor (default by size), 1 to 16380 as VMS INITIALIZE; --cluster-over-limit
- *                             also allows 16381 to 16383 (V8.4 and V7.3-2 mount such a volume, INITIALIZE does not make one),
+ *                             also allows 16381 to 16383 (V8.4 and V7.3-2 INITIALIZE refuse them, and mount such a volume; the VAX
+ *                             V7.3 INITIALIZE takes 16381 and 16382, CORPUS 40.2),
  *                             and a cluster factor below ceil(blocks / (65535 x 4096)), which INITIALIZE refuses (BITMAP.SYS
  *                             would be over 65,535 blocks; whether VMS mounts such a volume has not been measured)
  *     --maxfiles=N            maximum number of files
@@ -141,13 +142,14 @@ int main(int argc, char **argv)
     printf("%%ODS2-I-INITIALIZED, %s: %llu blocks, ODS-%u, label %s\n", argv[1], size, opt.level, opt.label);
     /* warnings: only for a volume that was made (a refused command prints none) */
     if (opt.cluster > 16380 && opt.cluster <= 16383 && opt.cluster_over_limit) {
-        fprintf(stderr, "ods2_init: cluster factor %u: VMS INITIALIZE accepts 16,380 at most (V8.4 and V7.3-2: %%INIT-F-BADCLUSTER); "
-                "both mount and write a volume that has it (CORPUS 36, 39), no VMS-made volume does\n", opt.cluster);
+        fprintf(stderr, "ods2_init: cluster factor %u: Alpha V8.4 and V7.3-2 INITIALIZE take 16,380 at most (%%INIT-F-BADCLUSTER above; "
+                "VAX V7.3 INITIALIZE took 16,381 and 16,382 and refused 16,383, CORPUS 40.2); V8.4, V7.3-2 and the VAX mount and write a "
+                "volume that has it (CORPUS 36, 39, 40), no Alpha INITIALIZE makes one\n", opt.cluster);
     }
     if (opt.cluster != 0 && opt.cluster < ods2_init_min_cluster(opt.blocks) && opt.cluster_over_limit) {
         fprintf(stderr, "ods2_init: cluster factor %u on %llu blocks: VMS INITIALIZE refuses less than %u (HP's formula: the "
-                "storage bitmap, one bit per cluster, is limited to 65,535 blocks; the bitmap without the SCB block would exceed it; VAX "
-                "V7.3 INITIALIZE of 2^31-16 blocks refused 1-8 and 17 and up and accepted 9-16, ods5-vms3, 16-NOV); whether VMS mounts "
+                "storage bitmap, one bit per cluster, is limited to 65,535 blocks; VAX "
+                "V7.3 INITIALIZE of 2^31-16 blocks refused 1-8 and 17 and up and accepted 9-16, CORPUS 40.1); whether VMS mounts "
                 "such a volume has not been measured, and an unmeasured layout may crash it (CORPUS 37, 38)\n",
                 opt.cluster, (unsigned long long) opt.blocks, ods2_init_min_cluster(opt.blocks));
     }
@@ -155,9 +157,11 @@ int main(int argc, char **argv)
         /* measured: V7.3-2 mounts 2,147,475,456 blocks (2^31 - 8192) and refuses one block more, ODS-2 and ODS-5, whoever made
            the volume (CORPUS 35.3). V8.4 mounts up to 4,261,348,350 blocks = 65534 x 255 x 255 and refuses more (CORPUS 35.1;
            HP, "OpenVMS V8.4 New Features and Documentation Overview", 2.4: "The precise new maximum volume size is given by:
-           (65534 * 255 * 255) blocks"). VAX V7.3 is not measured. */
+           (65534 * 255 * 255) blocks"). VAX V7.3 mounts 2,147,483,632 blocks (2^31 - 16) and refuses 2,147,483,664 with
+           %MOUNT-F-UNSUPPORTED; its limit between them was not searched (CORPUS 40.1). */
         fprintf(stderr, "ods2_init: %llu blocks: OpenVMS Alpha V7.3-2 mounts a volume of at most 2,147,475,456 blocks and refuses a "
-                "bigger one (%%MOUNT-F-FILESTRUCT)%s; VAX V7.3 is not measured yet\n", (unsigned long long) opt.blocks,
+                "bigger one (%%MOUNT-F-FILESTRUCT)%s; VAX V7.3 mounts 2,147,483,632 blocks and refuses 2,147,483,664 "
+                "(%%MOUNT-F-UNSUPPORTED; its limit between them is not searched, CORPUS 40.1)\n", (unsigned long long) opt.blocks,
                 opt.blocks > 4261348350ULL ? "" : "; V8.4 mounts it (up to 4,261,348,350 blocks)");
         if (opt.blocks > 4261348350ULL) {
             fprintf(stderr, "ods2_init: V8.4 mounts at most 4,261,348,350 blocks (65534 x 255 x 255) and refuses a bigger volume "
