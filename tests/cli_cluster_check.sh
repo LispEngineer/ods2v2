@@ -73,7 +73,7 @@ done
 # so that the storage bitmap fits in 65,535 blocks; VAX V7.3 INITIALIZE of 2,147,483,632 blocks, of the values tried: 1, 2, 4 and 8
 # refused, 9-16 accepted (11 not tried), 17 and up refused (CORPUS 40.1; ods2_init enforces the lower bound only).
 # ods2_init refuses less (cluster 8 there: 65,536 bitmap blocks); --cluster-over-limit makes the volume with a warning that says
-# whether VMS mounts it is not measured; the default cluster is raised to the minimum where 16 is too small (above 4,294,901,760
+# what VMS does with it (CORPUS 41: V8.4 and V7.3-2 refuse to mount it, %MOUNT-F-FILESTRUCT; the same size with the minimum cluster mounts; the VAX not yet measured); the default cluster is raised to the minimum where 16 is too small (above 4,294,901,760
 # blocks). Sparse images; the small-cluster volume is read and written by ods2v2 and checked.
 big=2147483632
 rm -f "$TMP/c.img"
@@ -84,8 +84,8 @@ fi
 rm -f "$TMP/c.img"
 if [ $skipbig = 0 ]; then
 $INIT "$TMP/c.img" $big --structure=2 --cluster=8 >/dev/null 2>"$TMP/err"
-check "$big blocks, cluster 8: refused (the minimum is 9), no image, and the text says it is not measured, cites CORPUS 40 and no session name" "1 no file 1 1 1 0 0 1" \
-    "$(grep -c 'at least 9' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'storage bitmap' "$TMP/err") $(grep -c 'not been measured' "$TMP/err") $(grep -c 'CORPUS 40' "$TMP/err") $(grep -c 'ods5-vms3' "$TMP/err") $(grep -c 'SCB block would exceed' "$TMP/err") $(grep -c 'of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried)' "$TMP/err")"
+check "$big blocks, cluster 8: refused (the minimum is 9), no image, and the text gives the CORPUS 41 result (V8.4 and V7.3-2 refuse to mount it, the minimum cluster mounts, the VAX not yet measured), cites CORPUS 40, no session name, no 'not been measured' and no crash caution" "1 no file 1 1 0 1 0 0 1 0" \
+    "$(grep -c 'at least 9' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'storage bitmap' "$TMP/err") $(grep -c 'refuse to mount such a volume (%MOUNT-F-FILESTRUCT, CORPUS 41); the same size with the minimum cluster mounts (41.1); VAX V7.3 not yet measured' "$TMP/err") $(grep -c 'not been measured' "$TMP/err") $(grep -c 'CORPUS 40' "$TMP/err") $(grep -c 'ods5-vms3' "$TMP/err") $(grep -c 'SCB block would exceed' "$TMP/err") $(grep -c 'of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried)' "$TMP/err") $(grep -c -i 'crash' "$TMP/err")"
 rm -f "$TMP/c.img"
 $INIT "$TMP/c.img" $big --structure=2 --cluster=9 >/dev/null 2>"$TMP/err"
 check "$big blocks, cluster 9: made, with no warning about the cluster" "0 file" \
@@ -96,8 +96,8 @@ check "$big blocks, cluster 9 with --cluster-over-limit: made, and no below-mini
     "$(grep -c 'INITIALIZE refuses' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file')"
 rm -f "$TMP/c.img"
 $INIT "$TMP/c.img" $big --structure=2 --cluster=8 --cluster-over-limit --label=MINCL >/dev/null 2>"$TMP/err"
-check "$big blocks, cluster 8 with --cluster-over-limit: made, warned that VMS INITIALIZE refuses it and mounting is not measured (CORPUS 40, no session name)" "1 1 file 1 0 0 1" \
-    "$(grep -c 'INITIALIZE refuses' "$TMP/err") $(grep -c 'not been measured' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'INITIALIZE refuses.*CORPUS 40.1' "$TMP/err") $(grep -c 'ods5-vms3' "$TMP/err") $(grep -c 'SCB block would exceed' "$TMP/err") $(grep -c 'of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried)' "$TMP/err")"
+check "$big blocks, cluster 8 with --cluster-over-limit: made, warned that VMS INITIALIZE refuses it and gives the CORPUS 41 mount result (CORPUS 40, no session name, no 'not been measured', no crash caution)" "1 1 file 1 0 0 1 0 0" \
+    "$(grep -c 'INITIALIZE refuses' "$TMP/err") $(grep -c 'refuse to mount such a volume (%MOUNT-F-FILESTRUCT, CORPUS 41); the same size with the minimum cluster mounts (41.1); VAX V7.3 not yet measured' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'INITIALIZE refuses.*CORPUS 40.1' "$TMP/err") $(grep -c 'ods5-vms3' "$TMP/err") $(grep -c 'SCB block would exceed' "$TMP/err") $(grep -c 'of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried)' "$TMP/err") $(grep -c 'not been measured' "$TMP/err") $(grep -c -i 'crash' "$TMP/err")"
 out2=$($ODS2 "$TMP/c.img" "COPY $TMP/f.txt [000000]X.TXT" 2>&1)
 check "... a file is copied in and read back, SHOW VOLUME gives cluster 8" "1 cluster test 8" \
     "$(echo "$out2" | grep -c COPIED) $($ODS2 "$TMP/c.img" 'TYPE [000000]X.TXT' 2>&1 | tail -1) $($ODS2 "$TMP/c.img" 'SHOW VOLUME' 2>&1 | awk '/Cluster size:/ {print $3}')"

@@ -73,7 +73,8 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt);
    disk size); only the lower bound is enforced, the upper one has no explanation and is the VAX's alone (V7.3-2 accepted 16 to
    8,192 on that size, CORPUS 35.3; VMS-initialized volumes with clusters 9-16 and ods2v2's cluster-16 volume of that size mounted
    on the VAX).
-   1 for a small volume. Whether VMS mounts a volume with less has not been measured. */
+   1 for a small volume. V8.4 and V7.3-2 refuse to mount a volume with less (%MOUNT-F-FILESTRUCT, CORPUS 41); the same size with the
+   minimum cluster mounts (41.1); VAX V7.3 not yet measured. */
 unsigned ods2_init_min_cluster(uint64_t blocks);
 
 #endif /* ODS2_INIT_H */

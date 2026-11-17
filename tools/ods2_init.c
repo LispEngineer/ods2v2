@@ -37,8 +37,9 @@
  *                             also allows 16381 to 16383 (V8.4 and V7.3-2 INITIALIZE refuse them, and mount such a volume; the VAX
  *                             V7.3 INITIALIZE takes 16381 and 16382, CORPUS 40.2),
  *                             and a cluster factor below ceil(blocks / (65535 x 4096)), which INITIALIZE refuses (HP's formula: the
- *                             storage bitmap, one bit per cluster, is limited to 65,535 blocks; whether VMS mounts such a volume
- *                             has not been measured)
+ *                             storage bitmap, one bit per cluster, is limited to 65,535 blocks; V8.4 and V7.3-2 refuse to mount
+ *                             such a volume, %MOUNT-F-FILESTRUCT, CORPUS 41; the same size with the minimum cluster mounts, 41.1;
+ *                             VAX V7.3 not yet measured)
  *     --maxfiles=N            maximum number of files
  *     --geometry=SECTORS,TRACKS       the disk geometry the storage control block records (default 32,16; 63,255 above 16 GiB)
  *     --security=profile|empty|zero   what SECURITY.SYS holds (default: the profile record VMS writes)
@@ -151,8 +152,8 @@ int main(int argc, char **argv)
     if (opt.cluster != 0 && opt.cluster < ods2_init_min_cluster(opt.blocks) && opt.cluster_over_limit) {
         fprintf(stderr, "ods2_init: cluster factor %u on %llu blocks: VMS INITIALIZE refuses less than %u (HP's formula: the "
                 "storage bitmap, one bit per cluster, is limited to 65,535 blocks; VAX "
-                "V7.3 INITIALIZE of 2^31-16 blocks, of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried) and 17 and up refused, CORPUS 40.1); whether VMS mounts "
-                "such a volume has not been measured, and an unmeasured layout may crash it (CORPUS 37, 38)\n",
+                "V7.3 INITIALIZE of 2^31-16 blocks, of the values tried, 1, 2, 4 and 8 refused and 9-16 accepted (11 not tried) and 17 and up refused, CORPUS 40.1); "
+                "V8.4 and V7.3-2 refuse to mount such a volume (%%MOUNT-F-FILESTRUCT, CORPUS 41); the same size with the minimum cluster mounts (41.1); VAX V7.3 not yet measured\n",
                 opt.cluster, (unsigned long long) opt.blocks, ods2_init_min_cluster(opt.blocks));
     }
     if (opt.blocks > 2147475456ULL) {
