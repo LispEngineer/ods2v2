@@ -67,9 +67,11 @@ void ods2_init_geometry(uint64_t blocks, uint32_t *sectors, uint32_t *tracks);
 ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt);
 
 /* The smallest cluster factor VMS INITIALIZE takes for a volume of this many blocks: ceil(blocks / (65535 x 4096)), so that the
-   storage bitmap, BITMAP.SYS (one bit per cluster, 4096 per block), fits in 65,535 blocks (HP, DCL Dictionary, INITIALIZE
-   /CLUSTER_SIZE; VAX V7.3 measured: only 9 to 16 accepted on 2^31-16 blocks, ods5-vms3, 16-NOV). 1 for a small volume. Whether VMS
-   mounts a volume with less has not been measured. */
+   storage bitmap (one bit per cluster, 4096 per block, not counting the SCB block in front of it in BITMAP.SYS) is at most
+   65,535 blocks: HP's formula as written (DCL Dictionary, INITIALIZE /CLUSTER_SIZE). VAX V7.3 INITIALIZE of 2^31-16 blocks refused
+   1-8 and 17 and up and accepted 9-16 (ods5-vms3, 16-NOV); only this lower bound is enforced, the upper one has no explanation and
+   is the VAX's alone (V7.3-2 accepted 16 to 8,192 on that size, CORPUS 35.3; the VAX mounted only a cluster-16 volume of that size).
+   1 for a small volume. Whether VMS mounts a volume with less has not been measured. */
 unsigned ods2_init_min_cluster(uint64_t blocks);
 
 #endif /* ODS2_INIT_H */

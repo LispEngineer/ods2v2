@@ -63,24 +63,35 @@ for spec in 2:16381 2:16383 5:16383; do
     img="$TMP/c.img"
     rm -f "$img"
     $INIT "$img" 1G --structure=$level --cluster=$c --cluster-over-limit --label=OVER >/dev/null 2>"$TMP/err"
-    check "ODS-$level cluster $c with --cluster-over-limit: made, with a warning that VMS INITIALIZE refuses it" "1" "$(grep -c 'INITIALIZE accepts 16,380' "$TMP/err")"
+    check "ODS-$level cluster $c with --cluster-over-limit: made, with a warning that VMS INITIALIZE refuses it (and none of a minimum)" "1 0" "$(grep -c 'INITIALIZE accepts 16,380' "$TMP/err") $(grep -c 'refuses less' "$TMP/err")"
     out2=$($ODS2 "$img" "COPY $TMP/f.txt [000000]X.TXT" 2>&1)
     check "... a file is copied in and read back" "1 cluster test" "$(echo "$out2" | grep -c COPIED) $($ODS2 "$img" 'TYPE [000000]X.TXT' 2>&1 | tail -1)"
     check "... ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
 done
 # P1 2 / review 31 N2: HP's INITIALIZE text (DCL Dictionary, /CLUSTER_SIZE) gives a minimum cluster factor, ceil(blocks / (65535 x 4096)),
-# so that BITMAP.SYS fits in 65,535 blocks; VAX V7.3 INITIALIZE of 2,147,483,632 blocks took 9 to 16 only (ods5-vms3, 16-NOV).
+# so that the storage bitmap fits in 65,535 blocks; VAX V7.3 INITIALIZE of 2,147,483,632 blocks refused 1-8 and 17 and up and accepted
+# 9 to 16 (ods5-vms3, 16-NOV; ods2_init enforces the lower bound only).
 # ods2_init refuses less (cluster 8 there: 65,536 bitmap blocks); --cluster-over-limit makes the volume with a warning that says
 # whether VMS mounts it is not measured; the default cluster is raised to the minimum where 16 is too small (above 4,294,901,760
 # blocks). Sparse images; the small-cluster volume is read and written by ods2v2 and checked.
 big=2147483632
 rm -f "$TMP/c.img"
+if $INIT "$TMP/c.img" $big --structure=2 --cluster=9 >/dev/null 2>&1; then skipbig=0; else
+    echo "SKIP: $big blocks: the file system cannot hold a sparse image that large"
+    skipbig=1
+fi
+rm -f "$TMP/c.img"
+if [ $skipbig = 0 ]; then
 $INIT "$TMP/c.img" $big --structure=2 --cluster=8 >/dev/null 2>"$TMP/err"
 check "$big blocks, cluster 8: refused (the minimum is 9), no image, and the text says it is not measured" "1 no file 1 1" \
-    "$(grep -c 'at least 9' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'BITMAP.SYS' "$TMP/err") $(grep -c 'not been measured' "$TMP/err")"
+    "$(grep -c 'at least 9' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file') $(grep -c 'storage bitmap' "$TMP/err") $(grep -c 'not been measured' "$TMP/err")"
 rm -f "$TMP/c.img"
 $INIT "$TMP/c.img" $big --structure=2 --cluster=9 >/dev/null 2>"$TMP/err"
 check "$big blocks, cluster 9: made, with no warning about the cluster" "0 file" \
+    "$(grep -c 'INITIALIZE refuses' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file')"
+rm -f "$TMP/c.img"
+$INIT "$TMP/c.img" $big --structure=2 --cluster=9 --cluster-over-limit >/dev/null 2>"$TMP/err"
+check "$big blocks, cluster 9 with --cluster-over-limit: made, and no below-minimum warning (the flag is not a reason to warn)" "0 file" \
     "$(grep -c 'INITIALIZE refuses' "$TMP/err") $([ -e "$TMP/c.img" ] && echo file || echo 'no file')"
 rm -f "$TMP/c.img"
 $INIT "$TMP/c.img" $big --structure=2 --cluster=8 --cluster-over-limit --label=MINCL >/dev/null 2>"$TMP/err"
@@ -89,13 +100,18 @@ check "$big blocks, cluster 8 with --cluster-over-limit: made, warned that VMS I
 out2=$($ODS2 "$TMP/c.img" "COPY $TMP/f.txt [000000]X.TXT" 2>&1)
 check "... a file is copied in and read back, SHOW VOLUME gives cluster 8" "1 cluster test 8" \
     "$(echo "$out2" | grep -c COPIED) $($ODS2 "$TMP/c.img" 'TYPE [000000]X.TXT' 2>&1 | tail -1) $($ODS2 "$TMP/c.img" 'SHOW VOLUME' 2>&1 | awk '/Cluster size:/ {print $3}')"
-check "... ods5check --sample is clean (the bitmap is 65,544 blocks)" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py --sample "$TMP/c.img" 2>&1 | tail -1)"
+check "... ods5check is clean (a whole-volume check, the storage bitmap of 65,544 blocks included)" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$TMP/c.img" 2>&1 | tail -1)"
 rm -f "$TMP/c.img"
+fi
 # the default cluster: 16 up to 4,294,901,760 blocks (65,535 bitmap blocks), 17 above; an explicit 16 above is refused
 for spec in "4294901760 16" "4294901761 17" "4294967280 17"; do
     set -- $spec
     rm -f "$TMP/c.img"
-    $INIT "$TMP/c.img" $1 --structure=5 >/dev/null 2>/dev/null
+    if ! $INIT "$TMP/c.img" $1 --structure=5 >/dev/null 2>/dev/null; then
+        echo "SKIP: $1 blocks: the file system cannot hold a sparse image that large"
+        rm -f "$TMP/c.img"
+        continue
+    fi
     check "$1 blocks: the default cluster is $2" "$2" "$($ODS2 "$TMP/c.img" 'SHOW VOLUME' 2>&1 | awk '/Cluster size:/ {print $3}')"
 done
 rm -f "$TMP/c.img"

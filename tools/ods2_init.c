@@ -145,9 +145,10 @@ int main(int argc, char **argv)
                 "both mount and write a volume that has it (CORPUS 36, 39), no VMS-made volume does\n", opt.cluster);
     }
     if (opt.cluster != 0 && opt.cluster < ods2_init_min_cluster(opt.blocks) && opt.cluster_over_limit) {
-        fprintf(stderr, "ods2_init: cluster factor %u on %llu blocks: VMS INITIALIZE refuses less than %u (BITMAP.SYS, one bit per cluster, "
-                "would be over 65,535 blocks; VAX V7.3 measured: only 9-16 accepted on 2^31-16 blocks, ods5-vms3, 16-NOV); whether VMS "
-                "mounts such a volume has not been measured, and an unmeasured layout may crash it (CORPUS 37, 38)\n",
+        fprintf(stderr, "ods2_init: cluster factor %u on %llu blocks: VMS INITIALIZE refuses less than %u (HP's formula: the "
+                "storage bitmap, one bit per cluster, is limited to 65,535 blocks; the bitmap without the SCB block would exceed it; VAX "
+                "V7.3 INITIALIZE of 2^31-16 blocks refused 1-8 and 17 and up and accepted 9-16, ods5-vms3, 16-NOV); whether VMS mounts "
+                "such a volume has not been measured, and an unmeasured layout may crash it (CORPUS 37, 38)\n",
                 opt.cluster, (unsigned long long) opt.blocks, ods2_init_min_cluster(opt.blocks));
     }
     if (opt.blocks > 2147475456ULL) {

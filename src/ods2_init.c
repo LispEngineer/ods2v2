@@ -119,12 +119,15 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
                     "although they mount a volume with 16381 to 16383; ods2_init --cluster-over-limit makes one");
     }
     if (c < ods2_init_min_cluster(N) && !opt->cluster_over_limit) {
-        /* HP: the storage bitmap, BITMAP.SYS, must fit in 65,535 blocks; VAX V7.3 INITIALIZE measured to take 9 to 16 only on
-           2^31-16 blocks (ods5-vms3, 16-NOV). static: the message lives on in the result */
+        /* HP's formula, applied as written: the storage bitmap (one bit per cluster, without the SCB block in front of it) is
+           limited to 65,535 blocks. VAX V7.3 INITIALIZE of 2^31-16 blocks refused 1-8 and 17 and up and accepted 9-16 (ods5-vms3,
+           16-NOV). Only the lower bound is enforced here: the upper bound has no explanation, and it is the VAX's alone (V7.3-2
+           accepted 16 to 8,192 on that size, CORPUS 35.3); the VAX mounted only a cluster-16 volume of that size, so whether it
+           mounts a larger cluster there is not measured. static: the message lives on in the result */
         static char min_msg[512];
-        snprintf(min_msg, sizeof(min_msg), "the cluster factor is at least %u for %llu blocks: VMS INITIALIZE refuses less (BITMAP.SYS, "
-                 "one bit per cluster, would be over 65,535 blocks; VAX V7.3 measured: only 9-16 accepted on 2^31-16 blocks, ods5-vms3, "
-                 "16-NOV); whether VMS mounts such a volume has not been measured; ods2_init --cluster-over-limit makes one",
+        snprintf(min_msg, sizeof(min_msg), "the cluster factor is at least %u for %llu blocks: VMS INITIALIZE refuses less (HP's formula: the "
+                 "storage bitmap, one bit per cluster, is limited to 65,535 blocks; the bitmap without the SCB block would exceed it; VAX "
+                 "V7.3 INITIALIZE of 2^31-16 blocks refused 1-8 and 17 and up and accepted 9-16, ods5-vms3, 16-NOV); whether VMS mounts such a volume has not been measured; ods2_init --cluster-over-limit makes one",
                  ods2_init_min_cluster(N), (unsigned long long) N);
         return fail(min_msg);
     }
