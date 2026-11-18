@@ -59,6 +59,47 @@ Development was on Rocky Linux 10.2 (same system as the simh vax8600 is
 running on). There is external code included for the interactive shell
 command history (see Dependencies below).
 
+## What ods2v2 (ods5 branch) can and cannot do
+
+A short summary for users of this branch; the sections above and "Known limitations" below have the detail. "Verified" means
+that OpenVMS itself mounted, listed, read and analysed (`ANALYZE/DISK_STRUCTURE`) volumes this tool wrote, not that every
+case was tried; the project's record of what was tried is `VMS_MEASURED_BEHAVIOUR.md` and `CORPUS.md` in
+[ods5-cli](https://github.com/LispEngineer/ods5-cli).
+
+**Works today (ODS-2 and ODS-5, read and write):** `DIR` (wildcards, `[...]`, `/FULL`), `TYPE` (records as text, `/RAW`,
+`/LINES`), `COPY`, `IMPORT` and `EXPORT` (record format chosen per file, `/FORMAT=`, `/ATTRIBUTES=`, `/CONVERT`),
+`CREATE/DIRECTORY`, `DELETE` (wildcards in one directory), `SYMLINK` and `LINK` (ODS-5), `SET VOLUME/LABEL`,
+`SET FILE/VERSION_LIMIT` and the `SET FILE/ATTRIBUTES=(MRS:0)` repair, ACLs shown as `DIRECTORY/SECURITY` shows them,
+long ISO Latin-1 and UCS-2 names with `^` escapes, version numbers and limits, deep directories, hard links and aliases;
+`ods2_init` makes new ODS-2 and ODS-5 volumes from 8,192 blocks to 2^32 - 16 blocks; `tests/ods5check.py` checks a volume.
+OpenVMS accepted volumes written by this branch on VAX V7.3, Alpha V7.3-2, V8.4 and V8.4-2L2 (simulators), on a physical
+VAX and a physical Alpha V8.4. Structure-level-0 volumes (the OpenVMS Alpha V8.4 CD) are read-only.
+
+**Operations not provided** (the plans are drafts awaiting decisions: [PLAN_WRITE_OPS.md](https://github.com/LispEngineer/ods5-cli/blob/main/PLAN_WRITE_OPS.md) in ods5-cli): a new version of an existing file with `COPY`
+(`COPY` refuses a name that exists); `RENAME`; appending to or overwriting a file in place; `SET FILE/PROTECTION`,
+`/OWNER` and ACL editing; `PURGE`; wildcards in `TYPE`; wildcards in `DELETE`'s directory part.
+
+**Files and volumes not handled:** indexed and relative files as records (they are given as stored); volume sets (refused);
+ODS-1 and structure levels 3, 4 and 6 (refused); disk quotas and journaling; UCS-2 beyond the Basic Multilingual Plane (a
+name above U+FFFF is refused); the rights database (identifiers print as numbers, `[200,1]`, not `[USERS,USER1]`).
+
+**Size limits** (details in "Large volumes and image files"):
+- `INDEXF.SYS` grows in pieces of at most 16,384 blocks, inside the retrieval pointers of its primary header, and this
+  branch writes no `INDEXF.SYS` extension headers (the OpenVMS versions tried crash or refuse them: see Known limitations).
+  About 51 pointers fit, so roughly **510,000 files** is the ceiling of a volume that grows by this tool's steps; past it
+  new files are refused and nothing is written. That figure is arithmetic from the code, **not tested at that size** (the
+  largest volumes tried hold 70,000 files made by VMS and 75,000 made by the tests).
+- A directory is at most 65,536 blocks, in one extent and under one file header; directories and `BITMAP.SYS` are read
+  with at most 1,024 pieces.
+
+**Not yet verified on VMS** (so nothing here should be relied on): the byte layout of SUBSYSTEM and resource ACEs;
+`TYPE` of stream files with print carriage control on V8.4-2L2; what VMS itself does for a wildcard `DELETE` (the rules
+here are modelled on `DIRECTORY` matching); how VMS grows `INDEXF.SYS` past its primary header's map, and how big a
+directory VMS allows (`SS$_DIRFULL`): **open questions, not measured on any version**; a 2 TiB volume written and read
+on VMS (the manual test); OpenVMS x86-64 V9.2-3 beyond the `INDEXF.SYS` crash runs (there, two control volumes this tool wrote without extension
+headers mounted, took 60 files made by VMS on one of them and analysed clean, but the full set of test volumes was not tried); OpenVMS Itanium (never tried). The checking plan is
+[PLAN_VMS_VERIFY.md](https://github.com/LispEngineer/ods5-cli/blob/main/PLAN_VMS_VERIFY.md) in ods5-cli (a draft).
+
 ## Using `ods2`
 
 `ods2` is the actual, intended interface - one binary, DCL-style
@@ -84,6 +125,11 @@ implements basic command recall to ease repetitive command sequences.
 | `COPY/CONVERT <local-file> <path>` | `COPY/CONVERT notes.txt [DOC]NOTES.TXT` — text as VAR records |
 | `TYPE[/RAW\|/LINES] path` | `TYPE [DECUS]README.TXT;2` — sequential files as text the way VMS `TYPE` shows them (carriage control applied: a file with none shows its records run together); `/LINES` one line per record always; `/RAW` the stored bytes |
 | `DELETE path` | `DELETE [DECUS]OLDFILE.TXT;1`; with `*`, `%` or `?` in the name every match in that one directory: `DELETE [DECUS]*.LIS` (the highest version of each), `DELETE [DECUS]OLD*.*;*` (every version). The name and the type are matched apart (`FOO.*` does not take `FOO^.TAR.GZ`), and no type given is the null type, as for one file (`DELETE [DECUS]READ*;*` is `READ*.;*`). A `%` or `?` in an ODS-5 name is a wildcard here, as in DCL; write it `^%` to delete such a name |
+| `DIR/FULL`, `DIR/UTF8`, `SET NAMES UTF8\|ESCAPED` | per-file detail; how names are shown (see "ODS-5 volumes") |
+| `EXPORT[/VERSIONS][/OVERWRITE][/LINKS][/RECORDS\|/LINES] <path> <linux-path>`, `IMPORT <linux-dir> <path>` | copy files or trees off the volume and onto it (see "ODS-5 volumes") |
+| `SYMLINK <link-path> <target>`, `LINK <new-path> <existing-path>` | a symbolic link; another directory entry for a file (see "ODS-5 volumes") |
+| `SET FILE/VERSION_LIMIT=n spec` | the version limit of the entries a spec names (32767 or 0: no limit, what VMS writes) |
+| `SET VOLUME/PARTIAL_CLUSTER`, `SET VOLUME/GEOMETRY=sectors,tracks` | `ods2 HELP` explains them; see `ods2_init` below |
 | `SET DEFAULT path` | `SET DEFAULT [DECUS.NETLIB020]` |
 | `SHOW DEFAULT` | |
 | `SET VOLUME/LABEL=name` | `SET VOLUME/LABEL=ITANKITS` — relabel the volume |
@@ -486,11 +532,14 @@ format is refused, as VMS does). A directory whose end-of-file is
 wrong (as old ods2v2 versions left them on ODS-2) is put right by the next write to it; other directory damage is not repaired.
 
 **Tested on.** Volumes written by ods2v2 (ODS-2 and ODS-5, also volumes it made with `ods2_init`) mount and pass
-`ANALYZE/DISK_STRUCTURE/READ_CHECK` on OpenVMS Alpha V8.4-2L2 and OpenVMS Alpha V7.3-2, and VMS wrote into them there
+`ANALYZE/DISK_STRUCTURE/READ_CHECK` on OpenVMS Alpha V8.4, V8.4-2L2 and V7.3-2, and VMS wrote into them there
 (files, directories, aliases, deletes) with a clean ANALYZE afterwards; on OpenVMS VAX V7.3 the ODS-2 volumes mount, read
 and take VMS writes and the ODS-5 ones mount and read (names with characters outside ASCII appear there, and on V7.3-2,
 as `\pISO_LATIN\.???` placeholders). Reading VMS-made volumes matches `DIRECTORY/FULL` and the file checksums of the test
-volumes of those three systems. Physical VAX and Alpha machines (through the LD driver) are still to be tested.
+volumes of those systems. Physical machines were tested through the LD driver: a VAX (V7.3) and an Alpha (V8.4); on a
+real Alpha V7.3-2 (PWS 500au) only cluster-size images were mounted and analysed (CORPUS 45). OpenVMS VAX V7.3's
+`ANALYZE/DISK_STRUCTURE` compares the volume's recorded geometry with the device's (`CHKSCB`): make the volume with the
+right `--target`. (The simulators and machines are named in `CORPUS.md`; the record is in ods5-cli.)
 
 ### File dates and time zones
 
@@ -580,8 +629,8 @@ third_party/linenoise/  BSD licensed - interactive-mode command history
 
 ## Testing
 
-`make test` builds and runs 20 test suites and five scripts that check
-the `ods2` command line, with `-fsanitize=address,undefined` on by default for development
+`make test` builds and runs 35 C self-test programs and 40 further sections (scripts that check
+the `ods2` command line, and the Python checker and fuzz runs; counts of 18-NOV-2026 at f7a13f9), with `-fsanitize=address,undefined` on by default for development
 builds (`make release` builds without them once things are stable).
 Most tests run entirely offline against a synthetic disk
 image assembled from real, VMS-written byte fragments captured during
@@ -651,13 +700,15 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
   file. Input with no length to go by (a pipe, `/dev/stdin`) is first
   copied to a temporary file (in `$TMPDIR`, else in the image's directory, never
   in `/tmp`; it is unlinked at once), so that needs room for it. Directories still grow only within one header.
-- No INITIALIZE command (formatting a *new* volume from scratch) - see
-  `samples/README.md` for why that's a deliberate choice (it's complicated)
-  and how to get a real, ready-to-use volume instead.
+- Formatting a *new* volume is not an `ods2` command: it is the separate tool `ods2_init` (this branch only; upstream
+  has none, and `samples/README.md` explains upstream's reasons for not having one). See "ODS-5 volumes". An `ods2_init`
+  volume is not bit-identical to one VMS INITIALIZE makes (dates, owner UIC, backup index header position, INDEXF.SYS
+  preallocation); VMS mounts and analyses it cleanly on the versions listed under "Tested on".
 - `COPY` can't add a new version of an existing file - it creates
   version 1 of a new name only.
-- `TYPE` and `DELETE` don't take wildcards yet, in file names or
-  directories (VMS's do); only `DIR` does.
+- `TYPE` takes no wildcards (VMS's does): a wildcard in the directory is refused (`%ODS2-E-WILDDIR`), and `*` in the file name is taken as an ordinary character and finds nothing (`%ODS2-E-FNF`; measured 18-NOV-2026 on f7a13f9). `DELETE` takes
+  wildcards in the file name, in one directory (since this branch's port of upstream's #24; see the command table);
+  wildcards in the directory part are refused. `DIR` takes both.
 - INDEXF.SYS is extended as new files need it, anywhere on a volume of any size (Format 1 retrieval pointers
   below LBN 4,194,304, Format 2 above it): by 256 blocks at a time while it is under 4,096 blocks, then by half
   its size, at most 16,384 blocks (one Format 2 pointer). New blocks that follow the last piece lengthen its
