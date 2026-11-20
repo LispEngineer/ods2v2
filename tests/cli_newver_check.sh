@@ -135,17 +135,42 @@ for level in 2 5; do
     check "ODS-$level: limit 3 still: ;7 ;6 ;5" "7 6 5" "$(vers "$img" '[Q]K.TXT;*')"
     check "ODS-$level: ods5check is clean after the limit" "0 error(s), 0 warning(s)" "$(clean "$img")"
 
-    # --- more versions than the limit: the COPY is refused, nothing is deleted (VMS's rule is not measured: review 40 F2) ------------------------------------------------
+    # --- more versions than the limit (CORPUS 49.9, VAX V7.3 and V8.4): SET FILE/VERSION_LIMIT deletes nothing; each COPY makes a new version and
+    # deletes exactly ONE, the lowest, so the count stays and the excess is never trimmed ---------------------------------------------------------------
     $ODS2 "$img" "CREATE/DIRECTORY [R]" >/dev/null 2>&1
     for n in 1 2 3 4 5; do $ODS2 "$img" "COPY $TMP/src.txt [R]M.TXT" >/dev/null 2>&1; done
-    $ODS2 "$img" "SET FILE/VERSION_LIMIT=2 [R]M.TXT" >/dev/null 2>&1
     fb=$(free_blocks "$img")
+    $ODS2 "$img" "SET FILE/VERSION_LIMIT=2 [R]M.TXT" >/dev/null 2>&1
+    check "ODS-$level 49.9: five versions, SET FILE/VERSION_LIMIT=2 deletes nothing" "5 4 3 2 1 $fb" "$(vers "$img" '[R]M.TXT;*') $(free_blocks "$img")"
     o=$($ODS2 "$img" "COPY $TMP/src.txt [R]M.TXT" 2>&1)
-    check "ODS-$level: five versions, limit lowered to 2: a COPY is refused (it would have to delete three), nothing changes" "1 5 4 3 2 1 $fb" \
-        "$(echo "$o" | grep -c 'more than one version') $(vers "$img" '[R]M.TXT;*') $(free_blocks "$img")"
+    check "ODS-$level 49.9: the first COPY makes ;6 and deletes one version, the lowest (;1): five versions ;2 to ;6" "1 6 5 4 3 2"         "$(echo "$o" | grep -c 'COPIED.*M.TXT;6') $(vers "$img" '[R]M.TXT;*')"
+    $ODS2 "$img" "COPY $TMP/src.txt [R]M.TXT" >/dev/null 2>&1
+    check "ODS-$level 49.9: the second COPY makes ;7 and deletes ;2: five versions ;3 to ;7" "7 6 5 4 3" "$(vers "$img" '[R]M.TXT;*')"
+    check "ODS-$level 49.9: free blocks are the same after each (one version in, one out)" "$fb" "$(free_blocks "$img")"
+    check "ODS-$level 49.9: ods5check is clean" "0 error(s), 0 warning(s)" "$(clean "$img")"
     $ODS2 "$img" "SET FILE/VERSION_LIMIT=0 [R]M.TXT" >/dev/null 2>&1
     $ODS2 "$img" "COPY $TMP/src.txt [R]M.TXT" >/dev/null 2>&1
-    check "ODS-$level: ... with the limit raised the COPY works (;6)" "6 5 4 3 2 1" "$(vers "$img" '[R]M.TXT;*')"
+    check "ODS-$level ... with no limit the COPY deletes nothing (;8)" "8 7 6 5 4 3" "$(vers "$img" '[R]M.TXT;*')"
+
+    # --- 49.9: the owner and protection of a new version are the highest version's (the header of ;1 is given an owner and a protection that
+    # no default of ods2v2 has; ods2 itself has no SET FILE/PROTECTION) -----------------------------------------------------------------------------------
+    $ODS2 "$img" "CREATE/DIRECTORY [P]" >/dev/null 2>&1
+    $ODS2 "$img" "COPY $TMP/src.txt [P]A.TXT" >/dev/null 2>&1
+    numA=$(fid_of "$img" '[P]A.TXT;1'); numA=${numA%%,*}
+    python3 -I tests/newver_setprot.py "$img" "$numA" 1 1 0x0000 >/dev/null 2>&1           # [1,1]? member 1 group 1; protection word 0 = RWED for all
+    $ODS2 "$img" "COPY $TMP/src2.txt [P]A.TXT" >/dev/null 2>&1
+    $ODS2 "$img" "COPY $TMP/src.txt [P]A.TXT;5" >/dev/null 2>&1
+    $ODS2 "$img" "COPY $TMP/src.txt [P]B.TXT" >/dev/null 2>&1
+    pa=$($ODS2 "$img" 'DIR/FULL [P]A.TXT;*' 2>&1 | awk '/Owner:/ {o=$2} /Protection:/ {p=$2 $3 $4 $5; print o "|" p}' | tr '\n' ' ')
+    pb=$($ODS2 "$img" 'DIR/FULL [P]B.TXT;1' 2>&1 | awk '/Owner:/ {o=$2} /Protection:/ {p=$2 $3 $4 $5; print o "|" p}')
+    check "ODS-$level 49.9: ;2 and ;5 of a name take ;1's owner and protection (a new NAME gets the defaults)" "[1,1]|(S:RWED,O:RWED,G:RWED,W:RWED) [1,1]|(S:RWED,O:RWED,G:RWED,W:RWED) [1,1]|(S:RWED,O:RWED,G:RWED,W:RWED)  [1,4]|(S:RWED,O:RWED,G:RE,W:)" \
+        "$(echo "$pa" | sed 's/ *$//')  $pb"
+    numA2=$(fid_of "$img" '[P]A.TXT;5'); numA2=${numA2%%,*}
+    python3 -I tests/newver_setprot.py "$img" "$numA2" 1 7 0xffff >/dev/null 2>&1          # the highest version: no access for anybody
+    $ODS2 "$img" "COPY $TMP/src.txt [P]A.TXT" >/dev/null 2>&1
+    pa6=$($ODS2 "$img" 'DIR/FULL [P]A.TXT;6' 2>&1 | awk '/Owner:/ {o=$2} /Protection:/ {p=$2 $3 $4 $5; print o "|" p}')
+    check "ODS-$level 49.9: a COPY onto a highest version that nothing can write is NOT refused (privileged), and takes its owner and protection" "[1,7]|(S:,O:,G:,W:)" "$pa6"
+    check "ODS-$level 49.9: ods5check is clean after the owner and protection tests" "0 error(s), 0 warning(s)" "$(clean "$img")"
 
     # --- C6: ;32767 is the last version ------------------------------------------------------------------------------------------------------------
     $ODS2 "$img" "CREATE/DIRECTORY [N]" >/dev/null 2>&1

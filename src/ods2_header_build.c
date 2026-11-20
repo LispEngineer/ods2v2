@@ -169,6 +169,12 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
         header_out[ODS5_FH2_LINKCOUNT] = (uint8_t) (spec->link_count & 0xff);
         header_out[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (spec->link_count >> 8);
     }
+    if (spec->use_owner_prot) {
+        /* a new version takes the owner and protection of the highest version before it (CORPUS 49.9) */
+        core->fileowner_uic[0] = spec->owner_uic[0];
+        core->fileowner_uic[1] = spec->owner_uic[1];
+        core->fileprot = spec->fileprot;
+    }
     core->highwater = spec->highwater;
     core->backlink = spec->backlink;
 

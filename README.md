@@ -193,13 +193,17 @@ it is free (a gap is fine) and fails with `%RMS-E-FEX` if it exists; ;32767 is t
 order (CORPUS 49.1 C4): the new version is made first, from blocks and a file header that were free before the change began and written, and the oldest
 version is removed after it, in the same all-or-nothing change (the freed header slot goes to the next create; free blocks are the same
 before and after; a full volume refuses the COPY, honestly). An interrupted COPY leaves the old version intact or gone, never changed
-(review 40 F1: removing it first let the new file's content be written onto its blocks before the commit). Refused, changing nothing, because VMS's
-behaviour there is not measured: an explicit version below all the kept ones when the limit is reached (it would be deleted at once), and a
-name that has **more versions than its limit** (the limit was lowered after the versions were made: one COPY would have to delete several):
-raise the limit with `SET FILE/VERSION_LIMIT` or `DELETE` versions first. **The new version's owner and protection are not taken from the
-version before it**: today it gets the volume's usual owner and the default protection of a new file, whatever the existing versions have
-(VMS's rule for a new version is not measured yet: the step-0 measurement of owner and protection of a new version is to come, and this will
-then follow it). `IMPORT/NEW_VERSION` does the same for every file of a tree that exists (without the qualifier an existing name is skipped).
+(review 40 F1: removing it first let the new file's content be written onto its blocks before the commit). When the limit is reached exactly **one** version goes, the lowest, however far over its limit the name is: VMS makes the new version
+and deletes one, so a name whose limit was lowered below its count keeps its count (`SET FILE/VERSION_LIMIT` itself deletes nothing; CORPUS 49.9, VAX
+V7.3 and V8.4 ODS-2 and ODS-5). Refused, changing nothing, because VMS's behaviour there is not measured: an explicit version below all the kept ones
+when the limit is reached (it would be deleted at once).
+
+**Owner and protection of a new version (CORPUS 49.9).** The new version takes the **protection of the highest version before it**, whatever the
+default of ods2v2 or a default-protection ACE of the directory (VMS applies that ACE to a new *name* only). It also takes that version's **owner**:
+ods2v2 acts like a privileged VMS process (or the volume owner), and for those VMS leaves the previous version's owner. An *unprivileged* VMS user who
+is not the volume owner would instead get their own UIC as the owner; ods2v2 has no such user. A new **name** gets the owner [1,4] and the default protection
+of ods2v2. VMS refuses a new version with `%RMS-E-PRV` when the highest version cannot be written by an unprivileged process; ods2v2 is privileged, so it does
+**not** refuse (a version whose protection allows nobody is still given a new version). `IMPORT/NEW_VERSION` does the same for every file of a tree that exists (without the qualifier an existing name is skipped).
 
 ### Record formats
 

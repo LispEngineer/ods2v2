@@ -3575,10 +3575,12 @@ static ods2_result_t insert_new_version(ods2_volume_t *vol, unsigned dir_file_nu
    it, and only then removes that version, in the same change, as VMS does (the new version gets a new header, the freed slot goes to
    the next create: CORPUS 49.1 C4). Removing it first let the allocator give the new file its clusters, which were written before the
    commit: an interrupted change left a listed version holding the new file's bytes (review 40 F1).
-   Refused, changing nothing: a version the limit would delete at once (an explicit one below all the kept ones), and a name that has more
-   versions than its limit allows (more than one would have to go: VMS's rule for that is not measured: review 40 F2). */
+   With the limit reached (the count is the limit or more) exactly ONE version goes, the lowest, however far over the limit the name is: VMS
+   makes the new version and deletes one, so the count stays and the excess is never trimmed; SET FILE/VERSION_LIMIT deletes nothing
+   (CORPUS 49.9, VAX V7.3 and V8.4). Refused, changing nothing: a version the limit would delete at once (an explicit one below all the
+   kept ones: not measured). *prev_out is the file of the highest existing version: the new version takes its owner and protection. */
 static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_header, char *name, size_t name_cap, int version_req,
-                                    unsigned special, unsigned *version_out, bool *existing_out, unsigned *drop_out)
+                                    unsigned special, unsigned *version_out, bool *existing_out, unsigned *drop_out, ods2_fid_t *prev_out)
 {
     dir_name_info_t info;
     unsigned dir_number = ods2_fid_number(((const ods2_head_core_t *) parent_header)->fid), v, i;
@@ -3600,6 +3602,7 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
     if (strlen(info.stored) >= name_cap) { free(info.versions); return fail("file name too long"); }
     memcpy(name, info.stored, strlen(info.stored) + 1);
     *existing_out = true;
+    *prev_out = info.first_fid;
     /* a directory, or one of the volume's own files, is not given a new version (COPY used to refuse the name altogether) */
     {
         uint8_t h[512];
@@ -3632,13 +3635,7 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
     }
     /* the version limit of the entry: 0 and 32767 are no limit */
     if (info.verlimit >= 1 && info.verlimit < ODS2_MAX_VERSION && info.count + 1 > info.verlimit) {
-        unsigned drop = info.count + 1 - info.verlimit;       /* versions that have to go: the lowest `drop` of the old ones and the new one */
-        unsigned lowest = 0, k;
-        if (drop > 1) {
-            free(info.versions);
-            return fail("the name has more versions than its version limit allows: one COPY would have to delete more than one version, "
-                        "and what VMS does then is not measured: not made (raise the limit with SET FILE/VERSION_LIMIT, or DELETE versions)");
-        }
+        unsigned lowest = 0, k;            /* exactly one version goes, the lowest, even when the name is over its limit (CORPUS 49.9) */
         for (k = 0; k < info.count; k++) if (lowest == 0 || info.versions[k] < lowest) lowest = info.versions[k];
         if (v < lowest) {
             free(info.versions);
@@ -3679,6 +3676,8 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
     unsigned new_version = 1;
     bool version_of_existing = false;
     unsigned drop_version = 0;
+    ods2_fid_t prev_fid;
+    bool have_prev = false;
     uint64_t content_len = src->length;
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
     uint64_t blocks_needed;
@@ -3737,7 +3736,8 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
                            "a file or directory with this name already exists in the parent");
         if (!r.ok) return r;
     } else {
-        r = choose_version(vol, parent_header, upper_name, sizeof(upper_name), version_req, special, &new_version, &version_of_existing, &drop_version);
+        r = choose_version(vol, parent_header, upper_name, sizeof(upper_name), version_req, special, &new_version, &version_of_existing, &drop_version, &prev_fid);
+        have_prev = version_of_existing;
         if (!r.ok) return r;
         name = upper_name;       /* the stored case of an existing name, as the directory spells it */
     }
@@ -3838,6 +3838,20 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
     spec.rsize = attrs->rsize;
     spec.maxrec = attrs->maxrec;
     spec.no_access_date = (special != 0); /* VMS leaves a symbolic link's access date unset */
+    if (have_prev) {
+        /* CORPUS 49.9 (VAX V7.3, V8.4 ODS-2 and ODS-5): the protection of a new version is that of the highest version before it, whatever
+           the process default or the directory's default-protection ACE (which applies to a new name only); this process acts as a privileged
+           one, whose new version keeps the previous version's owner too (an unprivileged VMS user who is not the volume owner would get
+           their own UIC). No %RMS-E-PRV refusal: a privileged process is not refused. */
+        uint8_t ph[512];
+        if (ods2_check_fid(prev_fid).ok && ods2_read_header_fid(vol, prev_fid, ph).ok && ods2_header_is_file(ph, prev_fid)) {
+            const ods2_head_core_t *pc = (const ods2_head_core_t *) ph;
+            spec.use_owner_prot = true;
+            spec.owner_uic[0] = pc->fileowner_uic[0];
+            spec.owner_uic[1] = pc->fileowner_uic[1];
+            spec.fileprot = pc->fileprot;
+        }
+    }
     /* Records the whole file's size in every header, as the record
        attributes are copied into extension headers too. */
     spec.hiblk = (uint32_t) total_allocated;
