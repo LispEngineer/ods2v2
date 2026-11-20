@@ -414,11 +414,76 @@ struct ods2_txn {
     size_t        table_cap;   /* a power of two */
     ods2_extent_t *saved_extents;   /* INDEXF.SYS's extent cache as it was when the change began */
     int           saved_extent_count;
-    ods2_extent_t *freed;        /* blocks given back inside this change: file content must never be written onto them before the
+    ods2_extent_t *allocd;       /* blocks allocated inside this change (they are on disk as free until the commit): giving such blocks
+                                    back is no danger to anything that was on the disk before */
+    size_t        nallocd, allocd_cap;
+    ods2_extent_t *freed;        /* blocks given back inside this change that were allocated BEFORE it: file content must never be written onto them before the
                                     commit (content goes straight to the image; the bitmap that frees them is only written at the
                                     commit, so an interrupted change would leave the new bytes under a file that still owns the blocks) */
     size_t        nfreed, freed_cap;
 };
+
+/* Remembers blocks allocated inside the open change. */
+static void txn_note_alloc(struct ods2_txn *t, uint32_t lbn, unsigned count)
+{
+    if (t->nallocd == t->allocd_cap) {
+        size_t ncap = t->allocd_cap ? t->allocd_cap * 2 : 16;
+        ods2_extent_t *na = realloc(t->allocd, ncap * sizeof(*na));
+        if (na == NULL) return;                 /* not remembered: a later free of these blocks is then noted as a free of old blocks: a guard
+                                                   that refuses too much, never too little */
+        t->allocd = na;
+        t->allocd_cap = ncap;
+    }
+    t->allocd[t->nallocd].lbn = lbn;
+    t->allocd[t->nallocd].block_count = count;
+    t->nallocd++;
+}
+
+/* Blocks given back inside the open change: the part that was allocated inside this change itself is taken off the allocated list (it was never
+   owned on the disk); the rest (blocks that a file owned on the disk before the change) is remembered, so that file content is never written onto
+   it before the commit (see struct ods2_txn). */
+static void txn_note_free(struct ods2_txn *t, uint32_t lbn, unsigned count)
+{
+    uint64_t lo = lbn, hi = (uint64_t) lbn + count;       /* the part still to place, [lo, hi) */
+    size_t i;
+    for (i = 0; i < t->nallocd && lo < hi; i++) {
+        uint64_t alo = t->allocd[i].lbn, ahi = alo + t->allocd[i].block_count;
+        if (ahi <= lo || alo >= hi) continue;
+        {
+            uint64_t olo = alo > lo ? alo : lo, ohi = ahi < hi ? ahi : hi;      /* the overlap: allocated in this change */
+            /* the allocated record loses [olo, ohi) */
+            if (olo > alo && ohi < ahi) {                                         /* in the middle: split */
+                txn_note_alloc(t, (uint32_t) ohi, (unsigned) (ahi - ohi));
+                t->allocd[i].block_count = (unsigned) (olo - alo);
+            } else if (olo > alo) {
+                t->allocd[i].block_count = (unsigned) (olo - alo);
+            } else if (ohi < ahi) {
+                t->allocd[i].lbn = (uint32_t) ohi;
+                t->allocd[i].block_count = (unsigned) (ahi - ohi);
+            } else {
+                t->allocd[i].block_count = 0;
+            }
+            /* what is left of the freed range: below and above the overlap */
+            if (olo > lo) {
+                /* the lower part is old (or overlaps other records: handled by a recursive note) */
+                txn_note_free(t, (uint32_t) lo, (unsigned) (olo - lo));
+            }
+            lo = ohi;
+        }
+    }
+    if (lo < hi) {
+        if (t->nfreed == t->freed_cap) {
+            size_t ncap = t->freed_cap ? t->freed_cap * 2 : 16;
+            ods2_extent_t *nf = realloc(t->freed, ncap * sizeof(*nf));
+            if (nf == NULL) return;
+            t->freed = nf;
+            t->freed_cap = ncap;
+        }
+        t->freed[t->nfreed].lbn = (uint32_t) lo;
+        t->freed[t->nfreed].block_count = (unsigned) (hi - lo);
+        t->nfreed++;
+    }
+}
 
 static size_t txn_slot(const struct ods2_txn *t, uint32_t lbn)
 {
@@ -726,6 +791,7 @@ static ods2_result_t txn_end(ods2_volume_t *vol, ods2_result_t r)
         bitmap_cache_drop(vol);
     }
     free(t->saved_extents);
+    free(t->allocd);
     free(t->freed);
     free(t->w);
     free(t->table);
@@ -939,7 +1005,7 @@ static void bitmap_cache_drop(ods2_volume_t *vol)
     vol->bm_valid = false;
 }
 
-static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_needed,
+static ods2_result_t allocate_clusters_inner(ods2_volume_t *vol, unsigned blocks_needed,
                                        bool partial_ok, uint32_t *lbn_out,
                                        unsigned *blocks_allocated_out)
 {
@@ -1077,6 +1143,15 @@ static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_neede
     *blocks_allocated_out = clusters_needed * vol->home.cluster;
     return ok();
 }
+
+static ods2_result_t allocate_clusters(ods2_volume_t *vol, unsigned blocks_needed, bool partial_ok, uint32_t *lbn_out,
+                                       unsigned *blocks_allocated_out)
+{
+    ods2_result_t r = allocate_clusters_inner(vol, blocks_needed, partial_ok, lbn_out, blocks_allocated_out);
+    if (r.ok && vol->txn != NULL) txn_note_alloc(vol->txn, *lbn_out, *blocks_allocated_out);
+    return r;
+}
+
 
 ods2_result_t ods2_allocate_blocks(ods2_volume_t *vol, unsigned blocks_needed,
                                     uint32_t *lbn_out, unsigned *blocks_allocated_out)
@@ -4668,20 +4743,7 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
         return fail("lbn/block_count must be cluster-aligned (exactly what "
                     "ods2_allocate_blocks() returned)");
     }
-    if (vol->txn != NULL) {
-        /* remembered for write_extents(): see struct ods2_txn */
-        struct ods2_txn *t = vol->txn;
-        if (t->nfreed == t->freed_cap) {
-            size_t ncap = t->freed_cap ? t->freed_cap * 2 : 16;
-            ods2_extent_t *nf = realloc(t->freed, ncap * sizeof(*nf));
-            if (nf == NULL) return fail("out of memory");
-            t->freed = nf;
-            t->freed_cap = ncap;
-        }
-        t->freed[t->nfreed].lbn = lbn;
-        t->freed[t->nfreed].block_count = block_count;
-        t->nfreed++;
-    }
+    if (vol->txn != NULL) txn_note_free(vol->txn, lbn, block_count);   /* remembered for write_extents(): see struct ods2_txn */
 
     r = ods2_read_header(vol, 2, bitmap_header); /* BITMAP.SYS is always file 2 */
     if (!r.ok) return r;
