@@ -97,6 +97,7 @@ check "60 iterations of writing to a damaged ODS-5 volume: no crash, hang or san
 
 # LINK without HARDLINKS makes a plain alias (as VMS SET FILE/ENTER); deleting the alias keeps the file
 for st in 2 5; do
+    rm -f "$TMP/al.img"       # a fresh volume each time: COPY onto the old A.TXT would now make a second version
     $INIT "$TMP/al.img" 8M --structure=$st --label=ALIAS >/dev/null 2>&1
     printf 'alias test\n' > "$TMP/al.txt"
     $ODS2 "$TMP/al.img" "COPY $TMP/al.txt [000000]A.TXT" >/dev/null 2>&1
