@@ -3485,7 +3485,8 @@ static int purge_group_cmp(const void *a, const void *b)
     return *(const size_t *) a < *(const size_t *) b ? -1 : 1;      /* the same name: in the order the groups were found */
 }
 
-/* Fills `groups` (capacity x->count) and returns how many; marks a group `dup` when another group has the same directory and name, `first` for the first of them. */
+/* Fills `groups` (capacity x->count) and returns how many, or (size_t) -1 when memory for the duplicate check is not to be had (the caller then refuses the whole PURGE: a
+   check that did not run must not be taken as a check that passed; review 51); marks a group `dup` when another group has the same directory and name, `first` for the first of them. */
 static size_t purge_find_groups(const purge_ctx_t *x, purge_group_t *groups)
 {
     size_t i = 0, n = 0, a;
@@ -3500,7 +3501,7 @@ static size_t purge_find_groups(const purge_ctx_t *x, purge_group_t *groups)
         i = j;
     }
     order = malloc((n > 0 ? n : 1) * sizeof(*order));
-    if (order == NULL) return n;
+    if (order == NULL) return (size_t) -1;
     for (a = 0; a < n; a++) order[a] = a;
     g_purge_items = x->items;
     g_purge_groups = groups;
@@ -3548,6 +3549,7 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
     groups = malloc((x.count > 0 ? x.count : 1) * sizeof(*groups));
     if (groups == NULL) { report_error("%%ODS2-E-NOMEM, out of memory\n"); free(x.items); return; }
     ngroups = purge_find_groups(&x, groups);
+    if (ngroups == (size_t) -1) { report_error("%%ODS2-E-NOMEM, out of memory\n"); free(groups); free(x.items); return; }
     for (gi = 0; gi < ngroups; gi++) {
         size_t j = groups[gi].end, k;
         i = groups[gi].start;
