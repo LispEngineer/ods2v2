@@ -40,12 +40,14 @@ check "...and leaves no destination entry" "%ODS2-W-NOFILES, no files found" \
     "$($ODS2 $DISK 'DIR [000000]FOO.COM' 2>&1)"
 check "COPY into a missing directory exits 1" 1 \
     "$(status $ODS2 $DISK COPY $TMP/ok.com '[NOSUCH]OK.COM')"
-check "COPY to a bad version exits 1" 1 \
-    "$(status $ODS2 $DISK COPY $TMP/ok.com '[000000]OK.COM;5')"
+check "COPY to a bad version (;*) exits 1" 1 \
+    "$(status $ODS2 $DISK COPY $TMP/ok.com '[000000]OK.COM;*')"
 check "COPY with a missing argument exits 1" 1 "$(status $ODS2 $DISK COPY $TMP/ok.com)"
 check "successful COPY exits 0" 0 "$(status $ODS2 $DISK COPY $TMP/ok.com '[000000]OK.COM')"
-check "COPY over an existing name exits 1" 1 \
+check "COPY over an existing name makes a new version and exits 0" 0 \
     "$(status $ODS2 $DISK COPY $TMP/ok.com '[000000]OK.COM')"
+check "COPY to an explicit version that exists exits 1 (FEX)" 1 \
+    "$(status $ODS2 $DISK COPY $TMP/ok.com '[000000]OK.COM;1')"
 
 check "TYPE of an existing file exits 0" 0 "$(status $ODS2 $DISK 'TYPE [000000]OK.COM')"
 check "TYPE of a missing file exits 1" 1 "$(status $ODS2 $DISK 'TYPE [000000]NOPE.TXT')"
