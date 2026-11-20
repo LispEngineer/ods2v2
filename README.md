@@ -719,6 +719,20 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
   has none, and `samples/README.md` explains upstream's reasons for not having one). See "ODS-5 volumes". An `ods2_init`
   volume is not bit-identical to one VMS INITIALIZE makes (dates, owner UIC, backup index header position, INDEXF.SYS
   preallocation); VMS mounts and analyses it cleanly on the versions listed under "Tested on".
+- **File header fields that differ from what VMS writes** (measured on VAX V7.3, V8.4 ODS-2 and ODS-5: CORPUS 52 point 4 and 5, review 44). Neither
+  stops VMS from reading, checking (ANALYZE) or copying the files, and ods5check accepts both:
+  * **Highest block written** (`FH2$L_HIGHWATER`, "Highest block written" in `DUMP/HEADER`): ods2v2 writes **0 on ODS-2** (no mark kept) and
+    **allocated blocks + 1 on ODS-5**, where it says the whole allocation was written, which is true: ods2v2 writes or zero-fills every block it
+    allocates, so no block of its files holds another file's old data. VMS writes the **end-of-file block** on both. A field of 0 does not make VMS return
+    zeros (its checksums of such files equal the contents); what it could matter for is old data showing through in blocks that a *later* VMS extend leaves
+    unwritten, which is not measured. This applies to every file ods2v2 makes, not only new versions. Writing VMS's value is a separate item, after its own VMS check
+    (a mark set too low could hide data).
+  * **Protection of a new directory**: the two levels of ods2v2 differ from each other. On **ODS-2** ods2v2 gives a new directory (S:RWED,O:RWED,G:RE,W:),
+    as for a file; on **ODS-5** (S:RWE,O:RWE,G:RE,W:E). On ODS-5 this is what VMS V8.4-2L2 was measured to write for a directory (header word 0xBA88,
+    ods5-cli's `VMS_MEASURED_BEHAVIOUR.md` R-8, read from VMS-initialized volumes). **VMS's own value on an ODS-2 volume is not measured yet** (CORPUS 52 point 5
+    measured only ods2v2's two values), so it is not known that ODS-2's value is the wrong one. What it means for the ODS-2 value as it stands: an
+    unprivileged user who is not the owner cannot search a directory ods2v2 made, and the owner may delete it. A separate item, to be compared with a
+    directory VMS itself makes on an ODS-2 volume.
 - A version of a name whose record is full (58 versions of a 34-character name) starts a new record, as VMS does; an explicit version that belongs inside a full record
   is refused. The version limit of an explicit version below all the kept ones is refused (VMS's behaviour there is not measured).
 - `TYPE` takes no wildcards (VMS's does): a wildcard in the directory is refused (`%ODS2-E-WILDDIR`), and `*` in the file name is taken as an ordinary character and finds nothing (`%ODS2-E-FNF`; measured 18-NOV-2026 on f7a13f9). `DELETE` takes
