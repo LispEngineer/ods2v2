@@ -318,6 +318,10 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_dirhdr_check.sh
 	@echo "--- cli_dirhdr_vms_check (against the directories VMS made) ---"
 	@sh tests/cli_dirhdr_vms_check.sh
+	@echo "--- cli_filehdr_vms_check (the file header rule in the VMS-made images) ---"
+	@sh tests/cli_filehdr_vms_check.sh
+	@echo "--- cli_filehdr_check (a user file's header as VMS writes it: RECPROT 0, no CONTIG, HIGHWATER = HIBLK + 1) ---"
+	@sh tests/cli_filehdr_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
 	@echo "--- CLI directory loop checks ---"
