@@ -155,6 +155,17 @@ for level in 2 5; do
     check "ODS-$level P8: versions stored as ;1 ;2 ;3: PURGE deletes ;2 and ;1 (highest of the deleted first) and keeps ;3" "%PURGE-I-FILPURG, [P]X.TXT;2 deleted (2 blocks)|%PURGE-I-FILPURG, [P]X.TXT;1 deleted (2 blocks)|%PURGE-I-TOTAL, 2 files deleted (4 blocks)|X.TXT;3" "$(echo "$o" | tr '\n' '|')$(vers "$img" '[P]X.TXT;*')"
 done
 
+# --- P10: two specs, or a comma list, are refused with a message and purge nothing (review 49, N7: the second used to be ignored in silence) ---------------------
+img="$TMP/pg2s.img"
+$INIT "$img" 20000 --structure=5 --label=PG2S --cluster=1 >/dev/null 2>&1
+$ODS2 "$img" "CREATE/DIRECTORY [P]" >/dev/null 2>&1; mk "$img" P X.TXT 3; mk "$img" P Y.TXT 3
+o=$($ODS2 "$img" "PURGE/LOG [P]X.TXT [P]Y.TXT" 2>&1)
+check "P10: PURGE [P]X.TXT [P]Y.TXT is refused and says so; neither name is purged" "%PURGE-F-TOOMANY, PURGE takes one file specification, and \"[P]Y.TXT\" follows \"[P]X.TXT\": nothing is purged (run PURGE once for each)|X.TXT;3 X.TXT;2 X.TXT;1 Y.TXT;3 Y.TXT;2 Y.TXT;1" "$(echo "$o" | tr '\n' '|')$(vers "$img" '[P]*.*;*')"
+o=$($ODS2 "$img" "PURGE/LOG [P]X.TXT,Y.TXT" 2>&1)
+check "P10: a comma list is refused the same way, nothing is purged" "%PURGE-F-TOOMANY, PURGE takes one file specification, not a list (\"[P]X.TXT,Y.TXT\"): nothing is purged (run PURGE once for each)|X.TXT;3 X.TXT;2 X.TXT;1 Y.TXT;3 Y.TXT;2 Y.TXT;1" "$(echo "$o" | tr '\n' '|')$(vers "$img" '[P]*.*;*')"
+o=$($ODS2 "$img" "PURGE/LOG [P]X.TXT" 2>&1 | grep -c FILPURG)
+check "P10: one spec still purges (2 versions of X.TXT)" "2" "$o"
+
 # --- P9: a HARDLINKS volume (ODS-5): purging a version that has another link takes the entry and one off the link count; the file stays and nothing is freed, and
 # the line says what DELETE says (review 48 N3) ------------------------------------------------------------------------------------------------------------
 img="$TMP/pghl.img"

@@ -4317,6 +4317,24 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
             }
             qs += 1 + strcspn(qs + 1, "/");
         }
+        if (n > 2) {
+            /* review 49 / N7: a second spec was silently ignored; a user who types two could think both were purged */
+            report_error("%%PURGE-F-TOOMANY, PURGE takes one file specification, and \"%s\" follows \"%s\": nothing is purged (run PURGE once for each)\n", tokens[2], tokens[1]);
+            return true;
+        }
+        if (n > 1) {
+            int depth = 0;
+            const char *c;
+            for (c = tokens[1]; *c != '\0'; c++) {
+                if (*c == '^' && c[1] != '\0') { c++; continue; }
+                if (*c == '[' || *c == '<') depth++;
+                else if ((*c == ']' || *c == '>') && depth > 0) depth--;
+                else if (*c == ',' && depth == 0) {
+                    report_error("%%PURGE-F-TOOMANY, PURGE takes one file specification, not a list (\"%s\"): nothing is purged (run PURGE once for each)\n", tokens[1]);
+                    return true;
+                }
+            }
+        }
         if (!ods2_parse_path(n > 1 ? tokens[1] : "*.*", &p)) {
             report_error("%%ODS2-E-BADPATH, could not parse %s\n", n > 1 ? tokens[1] : "*.*");
             return true;
