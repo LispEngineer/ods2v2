@@ -150,6 +150,11 @@ CMD
     check "ODS-$level S6: no NOPRIV: a file nobody but the system may touch still takes an owner and a protection change (ods2v2 is privileged)" "[200,5] (S:RWED, O:, G:, W:)" "$(owner "$img" $f2) $(prot "$img" $f2)"
     o=$(setf "$img" "SET FILE/PROTECTION=(W:R)/OWNER_UIC=[1,4] $f2")
     check "ODS-$level S6: both qualifiers in one command are refused, nothing changes" "1 [200,5]" "$(echo "$o" | grep -c 'usage') $(owner "$img" $f2)"
+    before=$(prot "$img" '[S]G.DAT')
+    o=$(setf "$img" "SET FILE/PROTECTION=(W:R) [S]F1.TXT [S]G.DAT")
+    check "ODS-$level S6: a second spec is refused (%SET-F-TOOMANY) and nothing is changed (review 49 N2: it was ignored in silence)" "%SET-F-TOOMANY, SET FILE takes one file specification, and \"[S]G.DAT\" follows \"[S]F1.TXT\": nothing is changed (run SET FILE once for each)|$before" "$o|$(prot "$img" '[S]G.DAT')"
+    o=$(setf "$img" "SET FILE/PROTECTION=(W:R) [S]G.DAT /LOG")
+    check "ODS-$level S6: a qualifier after the spec is refused with a hint where qualifiers go" "1" "$(echo "$o" | grep -c 'qualifiers go before the spec')"
     check "ODS-$level S6: ods5check is clean at the end" "0 error(s), 0 warning(s)" "$(clean "$img")"
 done
 
