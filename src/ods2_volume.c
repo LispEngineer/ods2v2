@@ -3468,8 +3468,10 @@ typedef struct {
     unsigned count;
     uint16_t *versions;
     uint16_t highest, verlimit;
+    ods2_fid_t first_fid;               /* the file of the first (highest) entry */
     char stored[ODS5_MAX_LITERAL_NAME + 8];
 } dir_name_info_t;
+static bool is_reserved_file(const ods2_volume_t *vol, unsigned dir_file_number, const char *name, unsigned file_number);
 static ods2_result_t dir_name_info(ods2_volume_t *vol, const uint8_t *dir_header, const char *name, dir_name_info_t *info);
 static ods2_result_t insert_new_version(ods2_volume_t *vol, unsigned dir_file_number, const char *name, uint16_t version,
                                         ods2_fid_t fid, uint8_t extra_flags);
@@ -3504,6 +3506,19 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
     if (strlen(info.stored) >= name_cap) { free(info.versions); return fail("file name too long"); }
     memcpy(name, info.stored, strlen(info.stored) + 1);
     *existing_out = true;
+    /* a directory, or one of the volume's own files, is not given a new version (COPY used to refuse the name altogether) */
+    {
+        uint8_t h[512];
+        if (ods2_check_fid(info.first_fid).ok && ods2_read_header_fid(vol, info.first_fid, h).ok &&
+            ods2_header_is_file(h, info.first_fid) && (((const ods2_head_core_t *) h)->filechar & 0x2000u)) {
+            free(info.versions);
+            return fail("a directory of this name exists: a file cannot be made a version of it");
+        }
+        if (is_reserved_file(vol, dir_number, name, ods2_fid_number(info.first_fid))) {
+            free(info.versions);
+            return fail("this name is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... SECURITY.SYS): it gets no new version");
+        }
+    }
     if (version_req == 0) {
         if (info.highest >= ODS2_MAX_VERSION) {
             free(info.versions);
@@ -4239,6 +4254,7 @@ static ods2_result_t dir_name_info(ods2_volume_t *vol, const uint8_t *dir_header
             if (!info->exists) {
                 info->exists = true;
                 info->verlimit = e[i].verlimit;
+                info->first_fid = e[i].fid;
                 snprintf(info->stored, sizeof(info->stored), "%s", e[i].name);
             }
             info->versions[info->count++] = e[i].version;

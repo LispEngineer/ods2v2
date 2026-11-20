@@ -220,6 +220,18 @@ for level in 2 5; do
     rm -f "$TMP/huge.bin"
 done
 
+# --- a directory and a reserved file of that name get no new version (COPY used to refuse the name) -------------------------------------------------------------------
+for level in 2 5; do
+    img="$TMP/res$level.img"
+    $INIT "$img" 8192 --structure=$level --label=RS$level >/dev/null 2>&1
+    $ODS2 "$img" "CREATE/DIRECTORY [D]" >/dev/null 2>&1
+    o1=$($ODS2 "$img" "COPY $TMP/src.txt [000000]D.DIR" 2>&1)
+    o2=$($ODS2 "$img" "COPY $TMP/src.txt [000000]INDEXF.SYS" 2>&1)
+    check "ODS-$level: COPY to the name of a directory, and of INDEXF.SYS, is refused" "1 1 D.DIR;1 INDEXF.SYS;1" \
+        "$(echo "$o1" | grep -c 'ODS2-E-COPYERR') $(echo "$o2" | grep -c 'ODS2-E-COPYERR') $($ODS2 "$img" 'DIR [000000]D.DIR;*' 2>&1 | grep -o 'D.DIR *;[0-9]*' | tr -d ' ') $($ODS2 "$img" 'DIR [000000]INDEXF.SYS;*' 2>&1 | grep -o 'INDEXF.SYS *;[0-9]*' | tr -d ' ')"
+    check "ODS-$level: ... and ods5check is clean" "0 error(s), 0 warning(s)" "$(clean "$img")"
+done
+
 if [ $fails -ne 0 ]; then
     echo "cli_newver_check: $fails FAILED"
     exit 1
