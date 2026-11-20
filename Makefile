@@ -233,7 +233,7 @@ sancheck: $(TESTS) ods2 ods2_init ods2_fault ods2_put ods2_dump_header ods2_deep
 	@nm ods2 | grep -q '__asan_init\|__ubsan' || { echo "ods2 is not built with -fsanitize=address,undefined"; exit 1; }
 	@echo "sancheck: ods2 is built with -fsanitize=address,undefined"
 	@export UBSAN_OPTIONS=print_stacktrace=1; failed=0; \
-	for u in $(TESTS); do $$u > $(BUILD)/sancheck.log 2>&1 || { echo "sancheck: FAIL $$u (it makes the images the cli tests use)"; failed=1; }; done; \
+	for u in $(TESTS); do ODS2_NOLOCK=1 $$u > $(BUILD)/sancheck.log 2>&1 || { echo "sancheck: FAIL $$u (it makes the images the cli tests use)"; failed=1; }; done; \
 	for t in tests/cli_longargs_check.sh tests/cli_*_check.sh; do \
 	    if sh $$t > $(BUILD)/sancheck.log 2>&1; then echo "sancheck: PASS $$t"; else echo "sancheck: FAIL $$t"; tail -5 $(BUILD)/sancheck.log; failed=1; fi; \
 	    if grep -q 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; then echo "sancheck: SANITIZER REPORT in $$t"; grep -m3 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; failed=1; fi; \
