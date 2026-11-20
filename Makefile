@@ -225,6 +225,20 @@ ods2_rm: tools/ods2_rm.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c incl
 ods2: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c include/ods2_volume.h include/ods2_text_var.h include/ods2_records.h include/ods2_acl.h include/ods2_path.h include/ods2_wildcard.h third_party/linenoise/linenoise.h
 	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Ithird_party/linenoise $(SANFLAGS) tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c -o $@
 
+# The sanitizer gate (review 48): ods2 is built with -fsanitize=address,undefined (SANFLAGS), so `make test` already runs every cli_*_check.sh under
+# the sanitizers; `make sancheck` says so, refuses a binary that is not sanitized, and runs the long-argument test and every cli_*_check.sh again
+# (alone, with the sanitizer options that make an error stop the run) without the unit tests.
+.PHONY: sancheck
+sancheck: ods2 ods2_init ods2_fault ods2_put ods2_dump_header ods2_deep_make $(BUILD)/ods2_make_loop tools
+	@nm ods2 | grep -q '__asan_init\|__ubsan' || { echo "ods2 is not built with -fsanitize=address,undefined"; exit 1; }
+	@echo "sancheck: ods2 is built with -fsanitize=address,undefined"
+	@export ASAN_OPTIONS=detect_stack_use_after_return=1:abort_on_error=0 UBSAN_OPTIONS=print_stacktrace=1; failed=0; \
+	for t in tests/cli_longargs_check.sh tests/cli_*_check.sh; do \
+	    if sh $$t > $(BUILD)/sancheck.log 2>&1; then echo "sancheck: PASS $$t"; else echo "sancheck: FAIL $$t"; tail -5 $(BUILD)/sancheck.log; failed=1; fi; \
+	    if grep -q 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; then echo "sancheck: SANITIZER REPORT in $$t"; grep -m3 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; failed=1; fi; \
+	done; \
+	if [ $$failed = 0 ]; then echo "sancheck: all cli tests clean under the sanitizers"; else exit 1; fi
+
 # The same CLI with the fault-injection hook (ODS2_FAULT_AFTER_WRITES, see src/ods2_volume.c), for
 # tests/fault_inject.py only: the ods2 people run has no hook.
 ods2_fault: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c include/ods2_volume.h include/ods2_text_var.h include/ods2_records.h include/ods2_acl.h include/ods2_path.h include/ods2_wildcard.h third_party/linenoise/linenoise.h
@@ -322,6 +336,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_setfile_check.sh
 	@echo "--- cli_wo_vms_check (TYPE, PURGE, SET FILE against what VMS did) ---"
 	@sh tests/cli_wo_vms_check.sh
+	@echo "--- cli_longargs_check (the sanitizer gate for command parsing: long arguments) ---"
+	@sh tests/cli_longargs_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
 	@echo "--- CLI directory loop checks ---"

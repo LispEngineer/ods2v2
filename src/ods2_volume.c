@@ -5332,6 +5332,7 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
             }
             r = ods2_write_header(vol, ods2_fid_number(target_fid), target_header);
             if (!r.ok) return r;
+            if (info != NULL) info->link_removed = true;     /* the file stays for its other links (PURGE does not say it freed blocks) */
             if (version_out != NULL) *version_out = target_version;
             return ok();
         }

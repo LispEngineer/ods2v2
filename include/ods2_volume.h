@@ -634,6 +634,7 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
  * (backlink_dir, a file number). */
 typedef struct {
     int      kept;
+    bool     link_removed;    /* a HARDLINKS volume: one link of a file with others was removed, the file stays */
     bool     name_differs;
     char     primary_name[ODS5_MAX_LITERAL_NAME + 8];
     uint16_t primary_version;

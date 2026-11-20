@@ -146,7 +146,27 @@ for level in 2 5; do
     o=$($ODS2 "$img" "PURGE/LOG [P]W.TXT" 2>&1)
     check "ODS-$level P7: PURGE of W.TXT, whose ;1 is also listed as WALIAS.TXT, leaves ;3 and the alias entry" "W.TXT;3 WALIAS.TXT;1" "$(vers "$img" '[P]*.*;*')"
     check "ODS-$level P7: ods5check says only that the alias is dangling" "0 error(s), 1 warning(s)" "$(clean "$img")"
+
+    # --- P8: a name whose versions are stored out of order (review 48 F3): PURGE keeps the highest version numbers, never the first entries as stored ---------
+    $ODS2 "$img" "DELETE [P]*.*;*" >/dev/null 2>&1; mk "$img" P X.TXT 3
+    dn=$($ODS2 "$img" 'DIR/FULL [000000]P.DIR' 2>&1 | sed -n 's/.*File ID: *(\([0-9]*\),.*/\1/p' | head -1)
+    python3 -I tests/swap_versions.py "$img" "$dn" X.TXT >/dev/null 2>&1
+    o=$($ODS2 "$img" "PURGE/LOG [P]X.TXT" 2>&1)
+    check "ODS-$level P8: versions stored as ;1 ;2 ;3: PURGE deletes ;2 and ;1 (highest of the deleted first) and keeps ;3" "%PURGE-I-FILPURG, [P]X.TXT;2 deleted (2 blocks)|%PURGE-I-FILPURG, [P]X.TXT;1 deleted (2 blocks)|%PURGE-I-TOTAL, 2 files deleted (4 blocks)|X.TXT;3" "$(echo "$o" | tr '\n' '|')$(vers "$img" '[P]X.TXT;*')"
 done
+
+# --- P9: a HARDLINKS volume (ODS-5): purging a version that has another link takes the entry and one off the link count; the file stays and nothing is freed, and
+# the line says what DELETE says (review 48 N3) ------------------------------------------------------------------------------------------------------------
+img="$TMP/pghl.img"
+$INIT "$img" 20000 --structure=5 --hardlinks --label=PGHL --cluster=1 >/dev/null 2>&1
+$ODS2 "$img" "CREATE/DIRECTORY [P]" >/dev/null 2>&1; $ODS2 "$img" "CREATE/DIRECTORY [Q]" >/dev/null 2>&1
+mk "$img" P X.TXT 3
+$ODS2 "$img" "LINK [Q]XL.TXT [P]X.TXT;1" >/dev/null 2>&1
+fb=$(free_blocks "$img")
+o=$($ODS2 "$img" "PURGE/LOG [P]X.TXT" 2>&1)
+check "ODS-5 P9: a hard-linked ;1 is said as DELETE says it (not 'deleted (n blocks)'), the total counts only what was freed" "%PURGE-I-FILPURG, [P]X.TXT;2 deleted (2 blocks)|%ODS2-I-DELETED, deleted X.TXT;1|%PURGE-I-TOTAL, 2 files deleted (2 blocks)" "$(echo "$o" | tr '\n' '|' | sed 's/|$//')"
+check "ODS-5 P9: the file stays for [Q]XL.TXT and its content reads, free blocks +2 only" "$((fb + 2)) 1" "$(free_blocks "$img") $($ODS2 "$img" 'TYPE [Q]XL.TXT' 2>&1 | grep -c 'line 00 of')"
+check "ODS-5 P9: ods5check is clean" "0 error(s), 0 warning(s)" "$(clean "$img")"
 
 if [ "$fails" -eq 0 ]; then echo "cli_purge_check: all checks passed"; else echo "cli_purge_check: $fails FAILED"; fi
 exit $fails

@@ -3464,6 +3464,12 @@ static void purge_collect(void *ctx_, ods2_volume_t *vol, const char *dir_spelli
     if (ods2_read_header_fid(vol, e->fid, h).ok && ods2_header_is_file(h, e->fid)) it->blocks = (ods2_file_allocated_bytes(h) + 511) / 512;
 }
 
+static int purge_item_cmp(const void *a, const void *b)
+{
+    unsigned va = ((const purge_item_t *) a)->version, vb = ((const purge_item_t *) b)->version;
+    return va < vb ? 1 : va > vb ? -1 : 0;           /* highest version first */
+}
+
 static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep, bool log)
 {
     purge_ctx_t x;
@@ -3495,7 +3501,11 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
     while (i < x.count) {
         size_t j = i, k;
         while (j < x.count && strcmp(x.items[j].dir, x.items[i].dir) == 0 && same_name(x.items[j].name, x.items[i].name)) j++;
-        /* [i, j) are the versions of one name, highest first: the first `keep` stay */
+        /* [i, j) are the versions of one name. They are kept by version number, never by the order the directory stores them in (review 48 F3: a
+           directory damaged or written by another tool can hold them out of order, and "the first `keep` stay" would then delete the newest data):
+           sorted here, highest first, the first `keep` stay. Sorting and not refusing the name: the deletes name each version, so they are right
+           whatever the stored order, and a refusal would leave the volume's owner no way to purge it. */
+        qsort(x.items + i, j - i, sizeof(*x.items), purge_item_cmp);
         for (k = i + (size_t) keep; k < j; k++) {
             const purge_item_t *it = &x.items[k];
             char what[ODS2_PATH_MAX * 2 + 16];
@@ -3516,9 +3526,12 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
                     continue;
                 }
                 deleted++;
+                if (info.kept != 0 || info.link_removed) {
+                    report_deletion(it->name, done, &info);         /* as DELETE says it: an alias or a link was removed, the file stays, no blocks came back */
+                    continue;
+                }
                 blocks += it->blocks;
-                if (info.kept != 0) report_deletion(it->name, done, &info);
-                else if (log) printf("%%PURGE-I-FILPURG, %s deleted (%llu block%s)\n", what, (unsigned long long) it->blocks, it->blocks == 1 ? "" : "s");
+                if (log) printf("%%PURGE-I-FILPURG, %s deleted (%llu block%s)\n", what, (unsigned long long) it->blocks, it->blocks == 1 ? "" : "s");
             }
         }
         i = j;
@@ -3585,7 +3598,7 @@ static int split_list(const char *arg, char elems[][ODS2_PATH_MAX + 16], int max
                 snprintf(elems[n], ODS2_PATH_MAX + 16, "%s", one);
                 {
                     const char *close = strchr(one, ']');
-                    if (close != NULL) { size_t dl = (size_t) (close - one) + 1; memcpy(prev_dir, one, dl); prev_dir[dl] = '\0'; }
+                    if (close != NULL) { size_t dl = (size_t) (close - one) + 1; if (dl >= sizeof(prev_dir)) return 0; memcpy(prev_dir, one, dl); prev_dir[dl] = '\0'; }
                 }
             }
             n++;
@@ -3651,9 +3664,13 @@ static bool parse_protection_spec(const char *text, uint16_t *mask, uint16_t *va
     size_t n = strlen(text);
     *mask = 0;
     *value = 0;
-    if (n >= 2 && text[0] == '(' && text[n - 1] == ')') { memcpy(buf, text + 1, n - 2); buf[n - 2] = '\0'; }
+    if (n >= 2 && text[0] == '(' && text[n - 1] == ')') {
+        if (n - 2 >= sizeof(buf)) { snprintf(bad, badcap, "TOOLONG"); return false; }      /* review 48 F1: a list that does not fit is refused */
+        memcpy(buf, text + 1, n - 2);
+        buf[n - 2] = '\0';
+    }
     else if (n < sizeof(buf)) snprintf(buf, sizeof(buf), "%s", text);
-    else { snprintf(bad, badcap, "%s", text); return false; }
+    else { snprintf(bad, badcap, "TOOLONG"); return false; }
     if (buf[0] == '\0') { snprintf(bad, badcap, "%s", text); return false; }
     for (tok = strtok_r(buf, ",", &save); tok != NULL; tok = strtok_r(NULL, ",", &save)) {
         char *colon = strchr(tok, ':'), *letters;
@@ -3777,6 +3794,16 @@ static void setsec_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spellin
     }
 }
 
+/* Appends `add` to buf (capacity cap, `*used` characters in it); false, nothing appended, when it does not fit. */
+static bool qual_append(char *buf, size_t cap, size_t *used, const char *add)
+{
+    size_t n = strlen(add);
+    if (*used + n + 1 > cap) return false;
+    memcpy(buf + *used, add, n + 1);
+    *used += n;
+    return true;
+}
+
 /* tokens[1] is "FILE/PROTECTION=(...)" or "FILE/OWNER_UIC=[g,m]", with /LOG anywhere among the qualifiers; a parenthesis list may have been split at its spaces. */
 static void cmd_set_file_security(ods2_volume_t *vol, const char *quals, const char *spec)
 {
@@ -3827,6 +3854,7 @@ static void cmd_set_file_security(ods2_volume_t *vol, const char *quals, const c
         x.what = ODS2_SETSEC_PROT;
         if (!parse_protection_spec(protv, &x.mask, &x.value, bad, sizeof(bad))) {
             if (strcmp(bad, "VALREQ") == 0) report_error("%%DCL-W-VALREQ, missing qualifier or keyword value\n");
+            else if (strcmp(bad, "TOOLONG") == 0) report_error("%%SET-F-SYNTAX, the protection list is too long (more than 120 characters): not run\n");
             else report_error("%%SET-F-SYNTAX, error parsing '%s'\n", bad);
             return;
         }
@@ -4239,14 +4267,19 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
         /* SET FILE/PROTECTION=(S:RWED,O:RWED,G:RE,W) <spec>, SET FILE/OWNER_UIC=[g,m] <spec>; the parenthesis list may have been split at its spaces */
         char quals_buf[256];
         int k = 2;
-        size_t used = (size_t) snprintf(quals_buf, sizeof(quals_buf), "%s", tokens[1] + 4);
-        while (k < n - 1 && strchr(quals_buf, '(') != NULL && strrchr(quals_buf, ')') == NULL) {
-            used += (size_t) snprintf(quals_buf + used, sizeof(quals_buf) - used, "%s", tokens[k]);
+        size_t used = 0;
+        bool fits = qual_append(quals_buf, sizeof(quals_buf), &used, tokens[1] + 4);
+        while (fits && k < n - 1 && strchr(quals_buf, '(') != NULL && strrchr(quals_buf, ')') == NULL) {
+            fits = qual_append(quals_buf, sizeof(quals_buf), &used, tokens[k]);
             k++;
         }
-        while (k < n - 1 && tokens[k][0] == '/') {          /* "SET FILE/PROTECTION=(...) /LOG spec" */
-            used += (size_t) snprintf(quals_buf + used, sizeof(quals_buf) - used, "%s", tokens[k]);
+        while (fits && k < n - 1 && tokens[k][0] == '/') {          /* "SET FILE/PROTECTION=(...) /LOG spec" */
+            fits = qual_append(quals_buf, sizeof(quals_buf), &used, tokens[k]);
             k++;
+        }
+        if (!fits) {
+            report_error("%%ODS2-E-IVQUAL, the qualifiers are longer than %d characters: not run\n", (int) sizeof(quals_buf) - 1);     /* review 48 F2 */
+            return true;
         }
         if (k >= n) {
             report_error("%%ODS2-E-NOPARM, usage: SET FILE/PROTECTION=(S:RWED,O:RWED,G:RE,W) <spec>  or  SET FILE/OWNER_UIC=[group,member] <spec>\n");
