@@ -43,6 +43,7 @@ typedef struct {
     ods2_fid_t fid;
     uint8_t    flags;      /* DIR$B_FLAGS of the record (0 on ODS-2) */
     uint8_t    name_type;  /* ODS5_NAME_ODS2/ISL1/UCS2 as stored (ODS-5 only; else 0) */
+    uint16_t   verlimit;   /* DIR$W_VERLIMIT of the record the entry is in (32767: no limit) */
 } ods2_dir_entry_t;
 
 /* Upper bound on how many ENTRIES one 512-byte directory block can

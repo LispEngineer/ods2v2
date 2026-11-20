@@ -524,6 +524,19 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
                                        const ods2_record_attrs_t *attrs,
                                        ods2_fid_t *new_fid_out);
 
+/* ods2_create_file_source() with a version. version_req: ODS2_NEWVER_REFUSE (-1) is ods2_create_file_source(): the name must not exist, the
+ * file is version 1. 0 makes the next version of a name that exists (highest + 1; version 1 if the name is new); n (1 to 32767) makes that
+ * version if it is free and fails with %RMS-E-FEX if it exists. The name is matched as VMS does (on ODS-5 ignoring case) and an existing
+ * name keeps the case first stored. A version above 32767 (a plain create after ;32767 too) fails with %RMS-E-CRE and %SYSTEM-W-BADFILEVER.
+ * The entry's version limit is enforced as part of the create: the oldest versions are deleted first, in the same all-or-nothing change.
+ * *version_out (if not NULL) gets the version made, name_out (if not NULL; at least ODS5_MAX_LITERAL_NAME + 8 bytes) the name as stored
+ * (UTF-8; on an existing name the case first stored). Everything else is as ods2_create_file_source(). */
+#define ODS2_NEWVER_REFUSE (-1)
+ods2_result_t ods2_create_file_source_version(ods2_volume_t *vol, const uint8_t *parent_header,
+                                               const char *name, int version_req, ods2_content_source_t *src,
+                                               const ods2_record_attrs_t *attrs,
+                                               ods2_fid_t *new_fid_out, uint16_t *version_out, char *name_out);
+
 /* Reads a file's logical content (as ods2_read_file()) and hands it to
  * `sink` in order, a chunk of at most ODS2_STREAM_CHUNK bytes at a
  * time, so memory use stays the same whatever the file's size. If

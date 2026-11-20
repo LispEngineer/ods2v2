@@ -75,9 +75,9 @@ def tree(img, tag):
 # every write, a name being listed twice for a moment (F2): the checker reports that as duplicate entries and
 # a block out of order. Allowed for those operations only; a name missing is never allowed (the tree compare).
 SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"versions not descending"]
-SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big']
+SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big', 'newver_split']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
-                 'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT}
+                 'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT, 'newver_split': SPLIT_TRANSIENT}
 
 
 # Growing INDEXF.SYS when its last header is an extension header changes two blocks that cannot be written as one: the
@@ -249,6 +249,12 @@ def setup(level, hardlinks, fill_for=None, cluster=None):
                 f.write('DELETE [FILL]F%03d.DAT\n' % i)
         run([ODS2, img, '@' + script])
         assert ods2(img, 'COPY %s [000000]FRAG.DAT' % put_host('frag.dat', blob(1600 * 512, 9)))[0] == 0
+    # names with versions, for the new-version operations: V.TXT;1 and ;2 with a version limit of 2, W.TXT;1 and ;9
+    for _ in (1, 2):
+        assert ods2(img, 'COPY %s [000000]V.TXT' % small)[0] == 0
+    assert ods2(img, 'SET FILE/VERSION_LIMIT=2 [000000]V.TXT')[0] == 0
+    for v in (1, 9):
+        assert ods2(img, 'COPY %s [000000]W.TXT;%d' % (small, v))[0] == 0
     # one file with another directory entry
     assert ods2(img, 'LINK [SUB]LNKA.TXT [000000]L.TXT')[0] == 0
     if level == 5:
@@ -258,6 +264,28 @@ def setup(level, hardlinks, fill_for=None, cluster=None):
         # new name sorts last), 'splitmid' (names in random order, three or more blocks: the block that
         # splits has blocks after it, which move up one), 'move' (three blocks in use, as many as are
         # allocated: the directory moves to a new, larger area). The next name to add is returned in NEXT.
+        if fill_for == 'versplit':
+            # versions of one 34-character name between two neighbours: the next version grows the directory by a block (the
+            # record holding the versions no longer fits beside its neighbour: it is moved to a block of its own)
+            nm = 'VERSIONS_OF_ONE_NAME_FOR_SPLIT.TXT'
+            for first in ('AAFIRST.TXT', 'ZZLAST.TXT'):
+                assert ods2(img, 'COPY %s [FULL]%s' % (small, first))[0] == 0
+            fid = fid_of(img, '[000000]FULL.DIR')
+            v = 0
+            while True:
+                v += 1
+                e = efblk(img, fid)
+                probe = img + '.probe'
+                shutil.copyfile(img, probe)
+                ods2(probe, 'COPY %s [FULL]%s;%d' % (small, nm, v))
+                grows = efblk(probe, fid) > e
+                os.remove(probe)
+                if grows and v > 3:
+                    NEXT[img] = '%s;%d' % (nm, v)
+                    break
+                assert ods2(img, 'COPY %s [FULL]%s;%d' % (small, nm, v))[0] == 0
+                assert v < 200, 'the directory never grew'
+            return img
         rnd = random.Random(7)
         order = list(range(2000))
         if fill_for in ('splitmid', 'splitbig'):
@@ -307,9 +335,14 @@ OPS = {
     'insert_split_big': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'splitbig'),
     'insert_move_big': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'movebig'),
     'insert_move': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'move'),
+    # COPY makes a new version of a name that exists (PLAN_WRITE_OPS item 1)
+    'newver_front': ('COPY %(small)s [000000]A1.TXT', ['A1.TXT;2'], False, False, None),
+    'newver_limit': ('COPY %(small)s [000000]V.TXT', ['V.TXT;1', 'V.TXT;3'], False, False, None),
+    'newver_mid': ('COPY %(small)s [000000]W.TXT;5', ['W.TXT;5'], False, False, None),
+    'newver_split': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s'], False, False, 'versplit'),
 }
 QUICK = ['index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
-         'insert_split', 'insert_split_mid', 'insert_move']
+         'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split']
 
 
 def main():

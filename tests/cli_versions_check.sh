@@ -65,14 +65,18 @@ check "DELETE NOTE.TXT;* deletes the remaining versions" \
 check "SAVAGE.LIS and YOW.ELC untouched by those deletes" \
     "Total of 65 files." "$($ODS2 $DISK 'DIR [VERS]' | tail -1)"
 
-# COPY never stores ";version" in a name.
+# COPY never stores ";version" in a name: NAME;n makes version n (a free one), a wildcard or relative version is refused
 echo "hello" > samples/cli_versions_tmp.txt
-check "COPY to NAME;3 is refused" \
-    "1" "$($ODS2 $DISK 'COPY samples/cli_versions_tmp.txt [VERS]NEW.TXT;3' 2>&1 | grep -c BADVER)"
-check "COPY to NAME;1 creates NEW.TXT;1" \
-    "NEW.TXT;1" \
-    "$($ODS2 $DISK 'COPY samples/cli_versions_tmp.txt [VERS]NEW.TXT;1' >/dev/null 2>&1; \
+check "COPY to NAME;* is refused" \
+    "1" "$($ODS2 $DISK 'COPY samples/cli_versions_tmp.txt [VERS]NEW.TXT;*' 2>&1 | grep -c BADVER)"
+check "COPY to NAME;3 makes NEW.TXT;3 (an explicit free version)" \
+    "NEW.TXT;3" \
+    "$($ODS2 $DISK 'COPY samples/cli_versions_tmp.txt [VERS]NEW.TXT;3' >/dev/null 2>&1; \
        $ODS2 $DISK 'DIR [VERS]NEW.TXT' | grep ';' | tr -d ' ')"
+check "COPY to NAME;1 adds NEW.TXT;1 below it" \
+    "NEW.TXT;3 NEW.TXT;1" \
+    "$($ODS2 $DISK 'COPY samples/cli_versions_tmp.txt [VERS]NEW.TXT;1' >/dev/null 2>&1; \
+       $ODS2 $DISK 'DIR [VERS]NEW.TXT' | grep ';' | tr -d ' ' | tr '\n' ' ' | sed 's/ $//')"
 rm -f samples/cli_versions_tmp.txt
 
 rm -f "$DISK"

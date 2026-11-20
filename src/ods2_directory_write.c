@@ -236,9 +236,29 @@ bool ods2_insert_dir_entry_flags(uint8_t *block, size_t block_size,
     return ods2_insert_dir_entry_vl(block, block_size, name, version, fid, level, extra_flags, 0);
 }
 
+static bool insert_record_core(uint8_t *block, size_t block_size,
+                               const char *name, uint16_t version, ods2_fid_t fid,
+                               unsigned level, uint8_t extra_flags, uint16_t verlimit_in, size_t forced_pos);
+
 bool ods2_insert_dir_entry_vl(uint8_t *block, size_t block_size,
                               const char *name, uint16_t version, ods2_fid_t fid,
                               unsigned level, uint8_t extra_flags, uint16_t verlimit_in)
+{
+    return insert_record_core(block, block_size, name, version, fid, level, extra_flags, verlimit_in, (size_t) -1);
+}
+
+/* A new record of one version at the record boundary `pos` of the block (or at its end): used for a version of a name that
+   already has records, which must go in front of them or between them, not after all of them. */
+bool ods2_dir_insert_record_at(uint8_t *block, size_t block_size, size_t pos,
+                               const char *name, uint16_t version, ods2_fid_t fid,
+                               unsigned level, uint8_t extra_flags, uint16_t verlimit)
+{
+    return insert_record_core(block, block_size, name, version, fid, level, extra_flags, verlimit, pos);
+}
+
+static bool insert_record_core(uint8_t *block, size_t block_size,
+                               const char *name, uint16_t version, ods2_fid_t fid,
+                               unsigned level, uint8_t extra_flags, uint16_t verlimit_in, size_t forced_pos)
 {
     size_t pos = 0;
     size_t insert_pos = (size_t) -1; /* not yet found */
@@ -294,12 +314,17 @@ bool ods2_insert_dir_entry_vl(uint8_t *block, size_t block_size,
             break; /* empty/uninitialized rest of block, no real sentinel yet */
         }
         if (!record_ok(block, pos, block_size)) return false; /* a damaged block is not written to */
-        if (insert_pos == (size_t) -1 && compare_record(block + pos, name) > 0) {
+        if (forced_pos != (size_t) -1) {
+            if (pos == forced_pos) insert_pos = pos;
+        } else if (insert_pos == (size_t) -1 && compare_record(block + pos, name) > 0) {
             insert_pos = pos;
         }
         pos += (size_t) size + 2;
     }
     end_pos = pos; /* sentinel (or end-of-content) position */
+    if (forced_pos != (size_t) -1 && forced_pos != end_pos && insert_pos == (size_t) -1) {
+        return false; /* not a record boundary of this block */
+    }
     if (insert_pos == (size_t) -1) {
         insert_pos = end_pos; /* new entry sorts after everything existing */
     }
@@ -462,6 +487,77 @@ bool ods2_remove_dir_version_fid(uint8_t *block, size_t block_size, const char *
         write_word(block + end_pos - 8, 0xffff);
     }
     return true;
+}
+
+/* --- versions of a name that already has records --- */
+
+int ods2_dir_name_records(const uint8_t *block, size_t block_size, const char *name,
+                          ods2_dir_namerec_t *out, int max)
+{
+    size_t pos = 0;
+    int n = 0;
+
+    while (pos + 6 <= block_size) {
+        uint16_t size = read_word(block + pos);
+        size_t total, name_end, first_pair;
+        if (size == 0xffff || size == 0) break;
+        if (!record_ok(block, pos, block_size)) return -1;
+        total = (size_t) size + 2;
+        if (compare_record(block + pos, name) == 0) {
+            name_end = pos + 6 + block[pos + 5];
+            first_pair = name_end + (name_end % 2);
+            if (out != NULL && n < max) {
+                out[n].pos = pos;
+                out[n].total = total;
+                out[n].nentries = (unsigned) ((pos + total - first_pair) / 8);
+                out[n].first_pair = first_pair;
+                out[n].first = read_word(block + first_pair);
+                out[n].last = read_word(block + pos + total - 8);
+                out[n].verlimit = read_word(block + pos + 2);
+                out[n].flags = block[pos + 4];
+            }
+            n++;
+        }
+        pos += total;
+    }
+    return n;
+}
+
+/* The largest a record can be: its size word, then the rest, and the block's end marker still fits (2 bytes) */
+#define DIR_RECORD_MAX_TOTAL 510
+
+int ods2_dir_record_add_version(uint8_t *block, size_t block_size, size_t rec_pos, unsigned index,
+                                uint16_t version, ods2_fid_t fid)
+{
+    size_t pos = 0, end_pos, total, pair;
+    unsigned nent;
+
+    if (!record_ok(block, rec_pos, block_size)) return -2;
+    while (pos + 2 <= block_size) {                       /* where the block's content ends */
+        uint16_t size = read_word(block + pos);
+        if (size == 0xffff || size == 0) break;
+        if (!record_ok(block, pos, block_size)) return -2;
+        pos += (size_t) size + 2;
+    }
+    end_pos = pos;
+    total = (size_t) read_word(block + rec_pos) + 2;
+    {
+        size_t name_end = rec_pos + 6 + block[rec_pos + 5];
+        pair = name_end + (name_end % 2);
+        nent = (unsigned) ((rec_pos + total - pair) / 8);
+    }
+    if (index > nent) return -2;
+    if (total + 8 > DIR_RECORD_MAX_TOTAL) return -1;       /* the record cannot grow: a new record is needed */
+    if (end_pos + 8 + 2 > block_size) return 0;            /* the block has no room: it must be split */
+    pair += (size_t) index * 8;
+    memmove(block + pair + 8, block + pair, (end_pos + 2) - pair);
+    write_word(block + pair, version);
+    write_word(block + pair + 2, fid.fid_num);
+    write_word(block + pair + 4, fid.fid_seq);
+    block[pair + 6] = fid.fid_rvn;
+    block[pair + 7] = fid.fid_nmx;
+    write_word(block + rec_pos, (uint16_t) (total + 8 - 2));
+    return 1;
 }
 
 /* --- Multi-block directories --- */

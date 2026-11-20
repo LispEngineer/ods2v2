@@ -75,8 +75,7 @@ long ISO Latin-1 and UCS-2 names with `^` escapes, version numbers and limits, d
 OpenVMS accepted volumes written by this branch on VAX V7.3, Alpha V7.3-2, V8.4 and V8.4-2L2 (simulators), on a physical
 VAX and a physical Alpha V8.4. Structure-level-0 volumes (the OpenVMS Alpha V8.4 CD) are read-only.
 
-**Operations not provided** (the plans are drafts awaiting decisions: [PLAN_WRITE_OPS.md](https://github.com/LispEngineer/ods5-cli/blob/main/PLAN_WRITE_OPS.md) in ods5-cli): a new version of an existing file with `COPY`
-(`COPY` refuses a name that exists); `RENAME`; appending to or overwriting a file in place; `SET FILE/PROTECTION`,
+**Operations not provided** (the plans are drafts awaiting decisions: [PLAN_WRITE_OPS.md](https://github.com/LispEngineer/ods5-cli/blob/main/PLAN_WRITE_OPS.md) in ods5-cli): `RENAME`; appending to or overwriting a file in place; `SET FILE/PROTECTION`,
 `/OWNER` and ACL editing; `PURGE`; wildcards in `TYPE`; wildcards in `DELETE`'s directory part.
 
 **Files and volumes not handled:** indexed and relative files as records (they are given as stored); volume sets (refused);
@@ -120,13 +119,13 @@ implements basic command recall to ease repetitive command sequences.
 | `DIR [path...] [wildcard]` | `DIR [...]*.*` — recursive, VMS's `...` notation |
 | `DIR [*...] [wildcard]` | `DIR [*...]*.COM` — wildcards in directory names (see below) |
 | `CREATE/DIRECTORY path` | `CREATE/DIRECTORY [DECUS.NETLIB020]` |
-| `COPY <local-file> <path>` | `COPY readme.txt [DECUS]README.TXT` |
+| `COPY <local-file> <path>[;n]` | `COPY readme.txt [DECUS]README.TXT` — a name that exists gets a new version (`;n`: that version) |
 | `COPY/ATTRIBUTES=(...) <local-file> <path>` | `COPY/ATTRIBUTES=(RFM:FIX,MRS:8192) kit.pcsi [KITS]KIT.PCSI` |
 | `COPY/CONVERT <local-file> <path>` | `COPY/CONVERT notes.txt [DOC]NOTES.TXT` — text as VAR records |
 | `TYPE[/RAW\|/LINES] path` | `TYPE [DECUS]README.TXT;2` — sequential files as text the way VMS `TYPE` shows them (carriage control applied: a file with none shows its records run together); `/LINES` one line per record always; `/RAW` the stored bytes |
 | `DELETE path` | `DELETE [DECUS]OLDFILE.TXT;1`; with `*`, `%` or `?` in the name every match in that one directory: `DELETE [DECUS]*.LIS` (the highest version of each), `DELETE [DECUS]OLD*.*;*` (every version). The name and the type are matched apart (`FOO.*` does not take `FOO^.TAR.GZ`), and no type given is the null type, as for one file (`DELETE [DECUS]READ*;*` is `READ*.;*`). A `%` or `?` in an ODS-5 name is a wildcard here, as in DCL; write it `^%` to delete such a name |
 | `DIR/FULL`, `DIR/UTF8`, `SET NAMES UTF8\|ESCAPED` | per-file detail; how names are shown (see "ODS-5 volumes") |
-| `EXPORT[/VERSIONS][/OVERWRITE][/LINKS][/RECORDS\|/LINES] <path> <linux-path>`, `IMPORT <linux-dir> <path>` | copy files or trees off the volume and onto it (see "ODS-5 volumes") |
+| `EXPORT[/VERSIONS][/OVERWRITE][/LINKS][/RECORDS\|/LINES] <path> <linux-path>`, `IMPORT[/NEW_VERSION] <linux-dir> <path>` | copy files or trees off the volume and onto it (see "ODS-5 volumes") |
 | `SYMLINK <link-path> <target>`, `LINK <new-path> <existing-path>` | a symbolic link; another directory entry for a file (see "ODS-5 volumes") |
 | `SET FILE/VERSION_LIMIT=n spec` | the version limit of the entries a spec names (32767 or 0: no limit, what VMS writes) |
 | `SET VOLUME/PARTIAL_CLUSTER`, `SET VOLUME/GEOMETRY=sectors,tracks` | `ods2 HELP` explains them; see `ods2_init` below |
@@ -187,8 +186,12 @@ lower existing version; `NAME;*` means every version (`DIR` and
 `DELETE`). `DIR` lists every version of every file unless you give a
 version (`DIR [DECUS]*.*;` shows just the newest of each). `DELETE`
 removes one version - the one given, or the highest if none is - and
-`DELETE NAME;*` removes them all. `COPY` onto the disk always creates
-version 1 and refuses a name that already exists.
+`DELETE NAME;*` removes them all. `COPY` makes a **new version** of a name that exists, as VMS's COPY does (measured on VAX V7.3 and
+V8.4: CORPUS 49 and 49.8): `COPY x [D]A.TXT` (or `A.TXT;` or `A.TXT;0`) makes the highest version + 1 (version 1 of a new name); `A.TXT;n` makes version n if
+it is free (a gap is fine) and fails with `%RMS-E-FEX` if it exists; ;32767 is the last (a plain COPY after it, or `;32768`, is `%RMS-E-CRE` with
+`%SYSTEM-W-BADFILEVER`); `;*` and `;-1` are refused. The entry's version limit (`SET FILE/VERSION_LIMIT`, stored in the directory entry) is enforced as part of the COPY:
+the oldest versions are deleted first, inside the same all-or-nothing change (a version that the limit would delete at once, an explicit one below all the kept ones, is
+refused). `IMPORT/NEW_VERSION` does the same for every file of a tree that exists (without the qualifier an existing name is skipped).
 
 ### Record formats
 
@@ -399,8 +402,8 @@ the Linux file name is used as it is (UTF-8: ISO Latin-1 when every
 character is up to U+00FF, else UCS-2). The new files carry level 5
 headers (FI5 ident area, link count, access and attribute dates) built as
 VMS V8.4 builds them, and are entered in the directory in VMS's order.
-A name equal to an existing one but for case is refused (it would be a new
-version, which ods2v2 does not make; it creates version 1 only). Also:
+A name equal to an existing one but for case is a new version of that name, and the case first stored stays (as VMS: `Abc.txt`, then `ABC.TXT`: `Abc.txt;2`,
+CORPUS 49.8 C9). Also:
 
 * `IMPORT <linux-dir> <path>` copies a Linux tree (directories made,
   `%2F` in a name is a `/`, Linux symbolic links become VMS ones).
@@ -484,7 +487,7 @@ copied. A `"quoted"` argument keeps white space: `EXPORT [A]*.* "/my files"`.
 **Versions.** An ODS-5 (and ODS-2) directory may hold many versions of a name: `DIR` lists them all (`;*` or no
 version), `TYPE NAME;2`, `EXPORT/VERSIONS` (every version, `NAME;N` on the Linux side) and `DELETE NAME;N` work on
 the one you name, and `;0` / no version / `;-1` mean the highest / the next lower one, as in VMS. ods2v2 itself makes
-version 1 of a new name only.
+version 1 of a new name, or a new version of one that exists (`COPY`, `IMPORT/NEW_VERSION`).
 
 **Linux names (IMPORT and EXPORT).** A Linux name becomes an ODS-5 name as it is (UTF-8; ISO Latin-1 when every
 character is up to U+00FF, else UCS-2); characters VMS refuses are rejected. Where the two worlds disagree a `%XX`
@@ -704,8 +707,8 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
   has none, and `samples/README.md` explains upstream's reasons for not having one). See "ODS-5 volumes". An `ods2_init`
   volume is not bit-identical to one VMS INITIALIZE makes (dates, owner UIC, backup index header position, INDEXF.SYS
   preallocation); VMS mounts and analyses it cleanly on the versions listed under "Tested on".
-- `COPY` can't add a new version of an existing file - it creates
-  version 1 of a new name only.
+- A version of a name whose record is full (58 versions of a 34-character name) starts a new record, as VMS does; an explicit version that belongs inside a full record
+  is refused. The version limit of an explicit version below all the kept ones is refused (VMS's behaviour there is not measured).
 - `TYPE` takes no wildcards (VMS's does): a wildcard in the directory is refused (`%ODS2-E-WILDDIR`), and `*` in the file name is taken as an ordinary character and finds nothing (`%ODS2-E-FNF`; measured 18-NOV-2026 on f7a13f9). `DELETE` takes
   wildcards in the file name, in one directory (since this branch's port of upstream's #24; see the command table);
   wildcards in the directory part are refused. `DIR` takes both.

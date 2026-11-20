@@ -1881,6 +1881,7 @@ typedef struct {
     bool lrl_given; /* LRL:n was given */
     bool attrs_given; /* /ATTRIBUTES was given: the record attributes are the user's, no choosing */
     host_format_t format; /* /FORMAT=: FMT_AUTO chooses per file (see choose_format) */
+    bool new_version; /* IMPORT/NEW_VERSION: a name that exists gets a new version instead of being skipped */
 } copy_options_t;
 
 /* Parses COPY's qualifiers - everything after "COPY" in the command
@@ -1933,6 +1934,14 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
             opts->convert = true;
             continue;
         }
+        if (keyword(name, name_len, "NEW_VERSION", 3)) {
+            if (*q == '=') {
+                report_error("%%ODS2-E-NOVALUE, /NEW_VERSION takes no value\n");
+                return false;
+            }
+            opts->new_version = true;
+            continue;
+        }
         if (keyword(name, name_len, "FORMAT", 4)) {
             const char *v;
             size_t vl;
@@ -1958,7 +1967,7 @@ static bool parse_copy_qualifiers(const char *quals, ods2_record_attrs_t *a,
         }
         if (!keyword(name, name_len, "ATTRIBUTES", 4)) {
             report_error("%%ODS2-E-IVQUAL, unrecognized qualifier /%.*s - COPY takes "
-                         "/ATTRIBUTES=(RFM:fmt,MRS:size,RAT:attr), /FORMAT=fmt and /CONVERT\n",
+                         "/ATTRIBUTES=(RFM:fmt,MRS:size,RAT:attr), /FORMAT=fmt and /CONVERT (IMPORT also /NEW_VERSION)\n",
                          (int) name_len, name);
             return false;
         }
@@ -2337,21 +2346,20 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
     ods2_result_t r;
     char literal_name[ODS2_PATH_MAX];
     const char *name;
+    uint16_t made_version = 1;
+    char made_name[ODS5_MAX_LITERAL_NAME + 8] = "";
 
     if (p->filename[0] == '\0' && !g_ods5) {
         report_error("%%ODS2-E-BADPATH, no destination filename given\n");
         return;
     }
-    /* A new file is always created as version 1 here. Accept the
-       spellings that mean that on a new file ("NAME", "NAME;",
-       "NAME;0", "NAME;1") and refuse the rest, rather than ever
-       storing ";version" as part of the name. */
-    if (p->has_version &&
-        (p->version_wildcard || p->version < 0 || p->version > 1)) {
+    /* The version is NAME (or NAME; or NAME;0): the next one, highest + 1, or 1 for a new name; NAME;n: that version if it is free
+       (CORPUS 49, 49.8). A wildcard and a relative version (;-1) name no one version: refused, rather than ever storing
+       ";version" as part of the name. */
+    if (p->has_version && (p->version_wildcard || p->version < 0)) {
         char spec[ODS2_PATH_MAX + 16];
         format_file_spec(p, spec, sizeof(spec));
-        report_error("%%ODS2-E-BADVER, %s: COPY creates version 1 only - "
-                        "give NAME, NAME; or NAME;1\n", spec);
+        report_error("%%ODS2-E-BADVER, %s: COPY makes one version: give NAME, NAME; or NAME;n (n from 1 to 32767)\n", spec);
         return;
     }
     {
@@ -2429,7 +2437,7 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
         src.ctx = &in;
         src.problem = in.problem;
     }
-    r = ods2_create_file_source(vol, dir_header, name, &src, &attrs, &new_fid);
+    r = ods2_create_file_source_version(vol, dir_header, name, p->has_version ? p->version : 0, &src, &attrs, &new_fid, &made_version, made_name);
     if (r.ok) {
         /* More content than was measured means the host file grew
            while it was copied: what's on the volume is its earlier
@@ -2454,9 +2462,10 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
         return;
     }
     {
-        /* Report the name as stored: uppercase, with its dot. */
+        /* Report the name as stored: uppercase, with its dot (an existing name: as the directory spells it). */
         char stored[ODS2_PATH_MAX];
         const char *why;
+        if (made_name[0] != '\0') name = made_name;
         if (g_ods5) {
             char completed[ODS2_PATH_MAX];
             if (ods5_complete_name(name, completed, sizeof(completed))) {
@@ -2468,11 +2477,11 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
             snprintf(stored, sizeof(stored), "%s", name);
         }
         if (opts->convert) {
-            printf("%%ODS2-I-COPIED, %llu bytes to %s;1 as %zu variable-length "
-                   "record%s (longest %zu)\n", (unsigned long long) in.length, stored, scan.records,
+            printf("%%ODS2-I-COPIED, %llu bytes to %s;%u as %zu variable-length "
+                   "record%s (longest %zu)\n", (unsigned long long) in.length, stored, made_version, scan.records,
                    scan.records == 1 ? "" : "s", scan.longest);
         } else {
-            printf("%%ODS2-I-COPIED, %llu bytes to %s;1\n", (unsigned long long) in.length, stored);
+            printf("%%ODS2-I-COPIED, %llu bytes to %s;%u\n", (unsigned long long) in.length, stored, made_version);
         }
     }
 }
@@ -2682,7 +2691,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             host_input_t in;
             ods2_content_source_t src;
             ods2_record_attrs_t attrs;
-            if (ods2_lookup_name(st->vol, dir_header, literal, &fid).ok) {
+            if (!st->opts->new_version && ods2_lookup_name(st->vol, dir_header, literal, &fid).ok) {
                 fprintf(stderr, "%%ODS2-W-EXISTS, %s already exists: skipped\n", shown);
                 st->skipped++;
                 continue;
@@ -2713,7 +2722,8 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
                 st->errors++;
                 continue;
             }
-            r = ods2_create_file_source(st->vol, dir_header, literal, &src, &attrs, &fid);
+            r = st->opts->new_version ? ods2_create_file_source_version(st->vol, dir_header, literal, 0, &src, &attrs, &fid, NULL, NULL)
+                                      : ods2_create_file_source(st->vol, dir_header, literal, &src, &attrs, &fid);
             fclose(in.f);
             if (!r.ok) {
                 report_error("%%ODS2-E-COPYERR, %s: %s\n", shown, r.problem);
@@ -3319,7 +3329,10 @@ static void print_help(void)
            "                             text as TYPE shows them (/LINES: one line per record)\n"
            "  CREATE/DIRECTORY path      create a directory\n"
            "  COPY <local-file> <path>   write a local file onto the disk: text as Stream_LF (CR LF: Stream,\n"
-           "                             CR only: Stream_CR), anything else as fixed 512-byte records\n"
+           "                             CR only: Stream_CR), anything else as fixed 512-byte records.\n"
+           "                             A name that exists gets a new version (highest + 1; NAME;n makes\n"
+           "                             version n if it is free: %%RMS-E-FEX if it exists); the entry's\n"
+           "                             version limit deletes the oldest versions as part of the COPY\n"
            "  COPY/FORMAT=fmt <local-file> <path>\n"
            "                             choose the record format: AUTO (the default), STMLF (TEXT), STM,\n"
            "                             STMCR, FIX512 (BINARY), UDF or VAR (= /CONVERT)\n"
@@ -3333,7 +3346,8 @@ static void print_help(void)
            "                             per line; with /ATTRIBUTES for other RAT/MRS\n"
            "  IMPORT <linux-dir> <path>  copy a Linux directory tree onto the disk (UTF-8 names,\n"
            "                             directories made, symbolic links kept, ODS-5; record format per\n"
-           "                             file as COPY; /FORMAT= and /ATTRIBUTES apply to every file)\n"
+           "                             file as COPY; /FORMAT= and /ATTRIBUTES apply to every file;\n"
+           "                             a name that exists is skipped, or with /NEW_VERSION gets a new version)\n"
            "  SYMLINK <link-path> <target>   make a symbolic link (ODS-5; as CREATE/SYMLINK=target)\n"
            "  LINK <new-path> <existing-path> another directory entry for a file (as SET\n"
            "                             FILE/ENTER=new existing): a hard link with a link count on\n"

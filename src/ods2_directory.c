@@ -144,6 +144,7 @@ int ods2_parse_directory_records(const uint8_t *data, size_t len, unsigned level
                     entries_out[count].name[copy_len] = '\0';
                     entries_out[count].flags = (level == ODS5_LEVEL_5) ? flags : 0;
                     entries_out[count].name_type = (uint8_t) name_type;
+                    entries_out[count].verlimit = read_word(data + pos + 2);
 
                     entries_out[count].version = read_word(data + e);
                     entries_out[count].fid.fid_num = read_word(data + e + 2);

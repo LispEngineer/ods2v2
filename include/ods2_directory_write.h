@@ -148,4 +148,31 @@ unsigned ods2_dir_choose_block(const uint8_t *blocks, unsigned count, const char
    two records, or too large). */
 bool ods2_dir_split_block(const uint8_t *src, size_t src_size, uint8_t *a, uint8_t *b);
 
+/* A new record holding the one version `version` at the record boundary `pos` of the block (or at its end). false: no room in
+   this block, or `pos` is not a boundary. */
+bool ods2_dir_insert_record_at(uint8_t *block, size_t block_size, size_t pos,
+                               const char *name, uint16_t version, ods2_fid_t fid,
+                               unsigned level, uint8_t extra_flags, uint16_t verlimit);
+
+/* One record of a name in a block (a name's versions may be spread over several records, newest first). */
+typedef struct {
+    size_t   pos, total;       /* where it starts, its bytes with the size word */
+    size_t   first_pair;       /* where its first (version, file id) pair starts */
+    unsigned nentries;         /* pairs in it */
+    uint16_t first, last;      /* its highest and lowest version */
+    uint16_t verlimit;         /* DIR$W_VERLIMIT of the record */
+    uint8_t  flags;            /* DIR$B_FLAGS (the name type at level 5) */
+} ods2_dir_namerec_t;
+
+/* The records of `name` (case-insensitive as VMS compares) in one block, in order: how many (more than `max` are counted, not
+   stored), or -1 if a record is malformed. */
+int ods2_dir_name_records(const uint8_t *block, size_t block_size, const char *name,
+                          ods2_dir_namerec_t *out, int max);
+
+/* Adds the pair (version, fid) to the record at `rec_pos` as its pair number `index` (0 = in front: the new highest version).
+   1: done. 0: the block has no room (split it). -1: the record cannot grow (a record is at most 510 bytes): add a record.
+   -2: the record or the block is malformed, or the index is beyond the record's pairs: nothing changed. */
+int ods2_dir_record_add_version(uint8_t *block, size_t block_size, size_t rec_pos, unsigned index,
+                                uint16_t version, ods2_fid_t fid);
+
 #endif /* ODS2_DIRECTORY_WRITE_H */

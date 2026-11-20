@@ -2975,7 +2975,7 @@ static bool memory_source_read(void *ctx_, uint8_t *buf, size_t n)
 static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_header,
                                  const char *name, ods2_content_source_t *src,
                                  const ods2_record_attrs_t *attrs, unsigned special,
-                                 ods2_fid_t *new_fid_out);
+                                 ods2_fid_t *new_fid_out, int version_req, uint16_t *version_out, char *name_out);
 
 const char *ods2_check_record_attrs(const ods2_record_attrs_t *attrs, size_t content_len)
 {
@@ -3175,6 +3175,14 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
                                        const ods2_record_attrs_t *attrs,
                                        ods2_fid_t *new_fid_out)
 {
+    return ods2_create_file_source_version(vol, parent_header, name, ODS2_NEWVER_REFUSE, src, attrs, new_fid_out, NULL, NULL);
+}
+
+ods2_result_t ods2_create_file_source_version(ods2_volume_t *vol, const uint8_t *parent_header,
+                                               const char *name, int version_req, ods2_content_source_t *src,
+                                               const ods2_record_attrs_t *attrs,
+                                               ods2_fid_t *new_fid_out, uint16_t *version_out, char *name_out)
+{
     size_t check_len = src->length;
     const char *why;
     if (src->partial_fix_ok && attrs->rtype == ODS2_RFM_FIX && attrs->rsize != 0) {
@@ -3185,7 +3193,7 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
     if (why != NULL) {
         return fail(why);
     }
-    return create_file(vol, parent_header, name, src, attrs, 0, new_fid_out);
+    return create_file(vol, parent_header, name, src, attrs, 0, new_fid_out, version_req, version_out, name_out);
 }
 
 /* Is the header of file number 10 the volume's SECURITY.SYS? Always on ODS-5; on an ODS-2 volume only if it names
@@ -3364,7 +3372,7 @@ ods2_result_t ods2_create_symlink(ods2_volume_t *vol, const uint8_t *parent_head
     src.ctx = &ctx;
     src.problem = NULL;
     src.var_records = false;
-    return create_file(vol, parent_header, name, &src, &attrs, ODS5_FAT_SYMBOLIC_LINK, new_fid_out);
+    return create_file(vol, parent_header, name, &src, &attrs, ODS5_FAT_SYMBOLIC_LINK, new_fid_out, ODS2_NEWVER_REFUSE, NULL, NULL);
 }
 
 ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
@@ -3397,7 +3405,7 @@ ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
         src.ctx = &ctx;
         src.problem = NULL;
         src.var_records = false;
-        return create_file(vol, parent_header, name, &src, &attrs, 0, new_fid_out);
+        return create_file(vol, parent_header, name, &src, &attrs, 0, new_fid_out, ODS2_NEWVER_REFUSE, NULL, NULL);
     }
 }
 
@@ -3452,20 +3460,114 @@ static bool scratch_seg_room(create_scratch_t *sc, size_t count)
     return true;
 }
 
+static ods2_result_t insert_into_directory_vl(ods2_volume_t *vol, unsigned dir_file_number,
+                                              const char *name, uint16_t version, ods2_fid_t fid,
+                                              uint8_t extra_flags, uint16_t verlimit_override);
+typedef struct {
+    bool exists;
+    unsigned count;
+    uint16_t *versions;
+    uint16_t highest, verlimit;
+    char stored[ODS5_MAX_LITERAL_NAME + 8];
+} dir_name_info_t;
+static ods2_result_t dir_name_info(ods2_volume_t *vol, const uint8_t *dir_header, const char *name, dir_name_info_t *info);
+static ods2_result_t insert_new_version(ods2_volume_t *vol, unsigned dir_file_number, const char *name, uint16_t version,
+                                        ods2_fid_t fid, uint8_t extra_flags);
+
+/* Which version a create makes, and what it takes out of the way (PLAN_WRITE_OPS item 1; CORPUS 49 on VAX V7.3, 49.8 on V8.4). `name` holds
+   the normalized name on entry and, if the directory has the name already, the name as the directory stores it (the first stored case wins
+   on ODS-5) on return. version_req 0: highest + 1 (1 for a new name); n: that version if it is free, %RMS-E-FEX if it is not. A version
+   above 32767 is refused (%RMS-E-CRE, %SYSTEM-W-BADFILEVER). When the name's version limit would be exceeded the oldest versions are
+   deleted first, here, inside the create's own change (VMS does it as part of the create: the blocks and the file header slot are free for
+   the new file; free blocks are the same before and after): a version that is itself the one that would go (an explicit version below all
+   the kept ones) is refused. Nothing is changed when this fails. */
+static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_header, char *name, size_t name_cap, int version_req,
+                                    unsigned special, unsigned *version_out, bool *existing_out, uint16_t *limit_out)
+{
+    dir_name_info_t info;
+    unsigned dir_number = ods2_fid_number(((const ods2_head_core_t *) parent_header)->fid), v, i;
+    ods2_result_t r;
+
+    (void) special;
+    *existing_out = false;
+    *limit_out = 0;
+    if (version_req < 0 || version_req > ODS2_MAX_VERSION) {
+        return fail("%RMS-E-CRE, ACP file create failed; -SYSTEM-W-BADFILEVER, bad file version number");
+    }
+    r = dir_name_info(vol, parent_header, name, &info);
+    if (!r.ok) return r;
+    if (!info.exists) {
+        *version_out = version_req == 0 ? 1u : (unsigned) version_req;
+        free(info.versions);
+        return ok();
+    }
+    if (strlen(info.stored) >= name_cap) { free(info.versions); return fail("file name too long"); }
+    memcpy(name, info.stored, strlen(info.stored) + 1);
+    *existing_out = true;
+    if (version_req == 0) {
+        if (info.highest >= ODS2_MAX_VERSION) {
+            free(info.versions);
+            return fail("%RMS-E-CRE, ACP file create failed; -SYSTEM-W-BADFILEVER, bad file version number (the highest version is 32767)");
+        }
+        v = (unsigned) info.highest + 1;
+    } else {
+        v = (unsigned) version_req;
+        for (i = 0; i < info.count; i++) {
+            if (info.versions[i] == v) {
+                static char msg[ODS5_MAX_LITERAL_NAME + 96];     /* static: the message outlives this call */
+                free(info.versions);
+                snprintf(msg, sizeof(msg), "%%RMS-E-FEX, file already exists, not superseded: %s;%u", name, v);
+                return fail(msg);
+            }
+        }
+    }
+    /* the version limit of the entry: 0 and 32767 are no limit */
+    if (info.verlimit >= 1 && info.verlimit < ODS2_MAX_VERSION && info.count + 1 > info.verlimit) {
+        unsigned drop = info.count + 1 - info.verlimit;       /* versions to remove: the lowest `drop` of the old ones and the new one */
+        uint16_t *all = malloc(((size_t) info.count + 1) * sizeof(*all));
+        unsigned n = 0, k, cut;
+        if (all == NULL) { free(info.versions); return fail("out of memory"); }
+        for (i = 0; i < info.count; i++) all[n++] = info.versions[i];
+        all[n++] = (uint16_t) v;
+        for (i = 0; i < n; i++) for (k = i + 1; k < n; k++) if (all[k] < all[i]) { uint16_t t = all[i]; all[i] = all[k]; all[k] = t; }
+        for (cut = 0; cut < drop; cut++) {
+            if (all[cut] == v) {
+                free(all);
+                free(info.versions);
+                return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not made");
+            }
+        }
+        for (cut = 0; cut < drop; cut++) {
+            r = ods2_delete_version(vol, dir_number, name, (int) all[cut], NULL);
+            if (!r.ok) { free(all); free(info.versions); return r; }
+        }
+        free(all);
+        if (info.count <= drop) {
+            /* every old version went (limit 1): the name has no record now, the new one makes it, with the same limit */
+            *existing_out = false;
+            *limit_out = info.verlimit;
+        }
+    }
+    free(info.versions);
+    *version_out = v;
+    return ok();
+}
+
 static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_header,
                                       const char *name, ods2_content_source_t *src,
                                       const ods2_record_attrs_t *attrs, unsigned special,
-                                      ods2_fid_t *new_fid_out, create_scratch_t *sc);
+                                      ods2_fid_t *new_fid_out, create_scratch_t *sc,
+                                      int version_req, uint16_t *version_out, char *name_out);
 
 static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_header,
                                  const char *name, ods2_content_source_t *src,
                                  const ods2_record_attrs_t *attrs, unsigned special,
-                                 ods2_fid_t *new_fid_out)
+                                 ods2_fid_t *new_fid_out, int version_req, uint16_t *version_out, char *name_out)
 {
     create_scratch_t sc = { NULL, 0, NULL, NULL, NULL, NULL, 0 };
     ods2_result_t r;
     TXN_BEGIN_OR_RETURN(vol);
-    r = create_file_impl(vol, parent_header, name, src, attrs, special, new_fid_out, &sc);
+    r = create_file_impl(vol, parent_header, name, src, attrs, special, new_fid_out, &sc, version_req, version_out, name_out);
     free(sc.extents); free(sc.seg_first); free(sc.seg_count); free(sc.seg_file_number); free(sc.seg_seq);
     return txn_end(vol, r);
 }
@@ -3473,8 +3575,12 @@ static ods2_result_t create_file(ods2_volume_t *vol, const uint8_t *parent_heade
 static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_header,
                                       const char *name, ods2_content_source_t *src,
                                       const ods2_record_attrs_t *attrs, unsigned special,
-                                      ods2_fid_t *new_fid_out, create_scratch_t *sc)
+                                      ods2_fid_t *new_fid_out, create_scratch_t *sc,
+                                      int version_req, uint16_t *version_out, char *name_out)
 {
+    unsigned new_version = 1;
+    bool version_of_existing = false;
+    uint16_t carry_limit = 0;
     uint64_t content_len = src->length;
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
     uint64_t blocks_needed;
@@ -3528,9 +3634,15 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
 
     r = directory_ready(vol, parent_header, ods2_fid_number(((const ods2_head_core_t *) parent_header)->fid));
     if (!r.ok) return r;
-    r = name_available(vol, parent_header, name,
-                       "a file or directory with this name already exists in the parent");
-    if (!r.ok) return r;
+    if (version_req == ODS2_NEWVER_REFUSE) {
+        r = name_available(vol, parent_header, name,
+                           "a file or directory with this name already exists in the parent");
+        if (!r.ok) return r;
+    } else {
+        r = choose_version(vol, parent_header, upper_name, sizeof(upper_name), version_req, special, &new_version, &version_of_existing, &carry_limit);
+        if (!r.ok) return r;
+        name = upper_name;       /* the stored case of an existing name, as the directory spells it */
+    }
 
     blocks_needed = (content_len + 511) / 512;
     if (blocks_needed == 0) blocks_needed = 1; /* a zero-length file still needs one block for EFBLK=1... */
@@ -3583,7 +3695,7 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
        the primary header holds what fits in its map area, the rest go
        in extension headers chained through FH2$W_EXT_FID (spec 3.3,
        3.5.2.5, 3.5.2.8). */
-    snprintf(ident, sizeof(ident), "%s;1", name);
+    snprintf(ident, sizeof(ident), "%s;%u", name, new_version);
     memset(&spec, 0, sizeof(spec));
     spec.level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
     spec.ident_name = ident;
@@ -3646,7 +3758,7 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
     /* FH2$M_CONTIG only when truly one piece - and on an ODS-5 volume not at all: the
        files VMS V8.4 makes there (ODS5T corpus) have no characteristics */
     spec.filechar = (extent_count == 1 && !vol->ods5) ? 0x0080 : 0;
-    snprintf(ident, sizeof(ident), "%s;1", name);
+    snprintf(ident, sizeof(ident), "%s;%u", name, new_version);
     spec.ident_name = ident;
 
     /* Extension headers first, last to first, then the primary, so
@@ -3684,8 +3796,13 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
     /* Insert an entry for the new file into the parent - growing the
        parent's own allocation automatically if none of its existing
        content blocks have room. */
-    r = insert_into_directory(vol, ods2_fid_number(parent_core->fid), name, 1, spec.fid,
-                              special != 0 ? ODS5_DIR_SPECIAL : 0);
+    if (version_of_existing) {
+        r = insert_new_version(vol, ods2_fid_number(parent_core->fid), name, (uint16_t) new_version, spec.fid,
+                               special != 0 ? ODS5_DIR_SPECIAL : 0);
+    } else {
+        r = insert_into_directory_vl(vol, ods2_fid_number(parent_core->fid), name, (uint16_t) new_version, spec.fid,
+                                     special != 0 ? ODS5_DIR_SPECIAL : 0, carry_limit);
+    }
     if (!r.ok) goto undo;   /* no directory entry: give the headers, blocks and file numbers back */
 
     /* The content goes to the free clusters last, when nothing else can fail: the structure (bitmaps, headers,
@@ -3696,6 +3813,8 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
     if (!r.ok) goto undo;
 
     *new_fid_out = spec.fid;
+    if (version_out != NULL) *version_out = (uint16_t) new_version;
+    if (name_out != NULL) snprintf(name_out, ODS5_MAX_LITERAL_NAME + 8, "%s", name);
     return ok();
 
 undo:
@@ -3999,9 +4118,20 @@ static void loaded_directory_name_state(const ods2_volume_t *vol, const uint8_t 
     }
 }
 
+static ods2_result_t insert_into_directory_vl(ods2_volume_t *vol, unsigned dir_file_number,
+                                              const char *name, uint16_t version, ods2_fid_t fid,
+                                              uint8_t extra_flags, uint16_t verlimit_override);
+
 static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
                                            const char *name, uint16_t version, ods2_fid_t fid,
                                            uint8_t extra_flags)
+{
+    return insert_into_directory_vl(vol, dir_file_number, name, version, fid, extra_flags, 0);
+}
+
+static ods2_result_t insert_into_directory_vl(ods2_volume_t *vol, unsigned dir_file_number,
+                                              const char *name, uint16_t version, ods2_fid_t fid,
+                                              uint8_t extra_flags, uint16_t verlimit_override)
 {
     uint8_t dir_header[512];
     uint8_t *blocks = NULL;
@@ -4038,7 +4168,7 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
         }
     }
     t = ods2_dir_choose_block(blocks, used, name);
-    verlimit = ((const ods2_head_core_t *) dir_header)->recattr.versions;   /* the directory's default version limit */
+    verlimit = verlimit_override != 0 ? verlimit_override : ((const ods2_head_core_t *) dir_header)->recattr.versions;   /* the directory's default version limit */
     if (ods2_insert_dir_entry_vl(blocks + (size_t) t * 512, 512, name, version, fid,
                                  vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, extra_flags, verlimit)) {
         if (ods2_file_content_length(dir_header) == 0 || !dir_eof_standard(dir_header, used) ||
@@ -4068,6 +4198,180 @@ static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file
                         "(should be unreachable)");
         }
         r = store_directory(vol, dir_file_number, dir_header, blocks, used + 1, used, t);
+    }
+    free(blocks);
+    return r;
+}
+
+/* ---- versions of a name that already has entries: COPY to a new version (PLAN_WRITE_OPS item 1) ---- */
+
+/* What a directory holds of one name: its versions newest first (as stored), the version limit of its first record, and the name as the
+   first record stores it (on an ODS-5 volume the first stored case wins: Abc.txt stays Abc.txt when ABC.TXT is created, CORPUS 49.8 C9).
+   `versions` is allocated here; free it. */
+static ods2_result_t dir_name_info(ods2_volume_t *vol, const uint8_t *dir_header, const char *name, dir_name_info_t *info)
+{
+    uint8_t *blocks = NULL;
+    unsigned used, b;
+    size_t cap = 0;
+    ods2_result_t r;
+
+    memset(info, 0, sizeof(*info));
+    r = load_directory(vol, dir_header, 0, &blocks, &used);
+    if (!r.ok) return r;
+    for (b = 0; b < used; b++) {
+        ods2_dir_entry_t e[ODS2_DIR_MAX_ENTRIES_PER_BLOCK];
+        unsigned bad = 0;
+        int n = ods2_parse_directory_records(blocks + (size_t) b * 512, 512, vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2, e,
+                                             ODS2_DIR_MAX_ENTRIES_PER_BLOCK, &bad), i;
+        for (i = 0; i < n && i < ODS2_DIR_MAX_ENTRIES_PER_BLOCK; i++) {
+            if (ods2_dir_name_compare(e[i].name, strlen(e[i].name), name, strlen(name)) != 0) continue;
+            if (info->count == cap) {
+                uint16_t *nv = realloc(info->versions, (cap ? cap * 2 : 16) * sizeof(*nv));
+                if (nv == NULL) {
+                    free(info->versions);
+                    free(blocks);
+                    memset(info, 0, sizeof(*info));
+                    return fail("out of memory");
+                }
+                info->versions = nv;
+                cap = cap ? cap * 2 : 16;
+            }
+            if (!info->exists) {
+                info->exists = true;
+                info->verlimit = e[i].verlimit;
+                snprintf(info->stored, sizeof(info->stored), "%s", e[i].name);
+            }
+            info->versions[info->count++] = e[i].version;
+            if (e[i].version > info->highest) info->highest = e[i].version;
+        }
+    }
+    free(blocks);
+    return ok();
+}
+
+/* Adds version `version` of a name that has records already, in the place the order wants: in front of the first record when it is the
+   highest (the usual COPY: a pair at the front of the existing record, as VMS does, CORPUS 49 C1), between or after the others otherwise;
+   a block with no room is split. `name` is the name as stored. Fails, changing nothing, when the version exists. */
+static ods2_result_t insert_new_version(ods2_volume_t *vol, unsigned dir_file_number, const char *name, uint16_t version,
+                                        ods2_fid_t fid, uint8_t extra_flags)
+{
+    uint8_t dir_header[512];
+    uint8_t *blocks = NULL;
+    unsigned used, b, level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
+    ods2_dir_namerec_t *recs = NULL;
+    unsigned *rblock = NULL;
+    size_t nrec = 0, cap = 0, j;
+    size_t target = (size_t) -1;
+    unsigned idx = 0, tb, t;
+    ods2_result_t r;
+    int rc;
+
+    if (!vol->writable) return not_writable(vol);
+    r = ods2_read_header(vol, dir_file_number, dir_header);
+    if (!r.ok) return r;
+    r = directory_header_ok(dir_header, dir_file_number);
+    if (!r.ok) return r;
+    r = load_directory(vol, dir_header, 1, &blocks, &used);
+    if (!r.ok) return r;
+    for (b = 0; b < used; b++) {
+        ods2_dir_namerec_t tmp[256];
+        int n = ods2_dir_name_records(blocks + (size_t) b * 512, 512, name, tmp, 256), i;
+        if (n < 0) { free(blocks); free(recs); free(rblock); return fail("a directory block is damaged: not changed"); }
+        for (i = 0; i < n && i < 256; i++) {
+            if (nrec == cap) {
+                ods2_dir_namerec_t *nr = realloc(recs, (cap ? cap * 2 : 8) * sizeof(*nr));
+                unsigned *nb;
+                if (nr == NULL) { free(blocks); free(recs); free(rblock); return fail("out of memory"); }
+                recs = nr;
+                nb = realloc(rblock, (cap ? cap * 2 : 8) * sizeof(*nb));
+                if (nb == NULL) { free(blocks); free(recs); free(rblock); return fail("out of memory"); }
+                rblock = nb;
+                cap = cap ? cap * 2 : 8;
+            }
+            recs[nrec] = tmp[i];
+            rblock[nrec] = b;
+            nrec++;
+        }
+    }
+    if (nrec == 0) { free(blocks); free(recs); free(rblock); return fail("internal error: a new version of a name the directory does not hold"); }
+
+    for (j = 0; j < nrec; j++) {
+        if (version == recs[j].first || version == recs[j].last) {
+            free(blocks); free(recs); free(rblock);
+            return fail("a directory entry with this name and version exists already: not added");
+        }
+        if (version > recs[j].first) {
+            if (j == 0) { target = 0; idx = 0; }                      /* the new highest: in front of the first record */
+            else { target = j - 1; idx = recs[j - 1].nentries; }       /* between two records: at the end of the one above */
+            break;
+        }
+        if (version > recs[j].last) {                                  /* inside this record: after the pairs above it */
+            const uint8_t *rb = blocks + (size_t) rblock[j] * 512 + recs[j].first_pair;
+            unsigned k;
+            target = j;
+            idx = 0;
+            for (k = 0; k < recs[j].nentries; k++) {
+                uint16_t v = (uint16_t) (rb[k * 8] | (rb[k * 8 + 1] << 8));
+                if (v == version) { free(blocks); free(recs); free(rblock); return fail("a directory entry with this name and version exists already: not added"); }
+                if (v > version) idx = k + 1;
+            }
+            break;
+        }
+    }
+    if (target == (size_t) -1) { target = nrec - 1; idx = recs[nrec - 1].nentries; }   /* below all: at the end of the last record */
+    tb = rblock[target];
+    t = tb;
+
+    rc = ods2_dir_record_add_version(blocks + (size_t) tb * 512, 512, recs[target].pos, idx, version, fid);
+    if (rc == -2) { free(blocks); free(recs); free(rblock); return fail("a directory block is damaged: not changed"); }
+    if (rc == -1) {
+        /* the record is full (510 bytes): a record of its own, before it or after it; not into the middle of it */
+        size_t pos;
+        if (idx == 0) pos = recs[target].pos;
+        else if (idx == recs[target].nentries) pos = recs[target].pos + recs[target].total;
+        else { free(blocks); free(recs); free(rblock);
+               return fail("the record that holds the neighbouring versions is full and this version belongs inside it: not added "
+                           "(a full record is not split)"); }
+        if (ods2_dir_insert_record_at(blocks + (size_t) tb * 512, 512, pos, name, version, fid, level, extra_flags, recs[target].verlimit)) {
+            rc = 1;
+        } else {
+            uint8_t combined[1024];
+            memcpy(combined, blocks + (size_t) tb * 512, 512);
+            memset(combined + 512, 0, 512);
+            if (!ods2_dir_insert_record_at(combined, sizeof(combined), pos, name, version, fid, level, extra_flags, recs[target].verlimit)) {
+                free(blocks); free(recs); free(rblock);
+                return fail("internal error: a block plus one record overflowed 1024 bytes (should be unreachable)");
+            }
+            rc = 2;
+            memmove(blocks + (size_t) (tb + 2) * 512, blocks + (size_t) (tb + 1) * 512, (size_t) (used - tb - 1) * 512);
+            if (!ods2_dir_split_block(combined, sizeof(combined), blocks + (size_t) tb * 512, blocks + (size_t) (tb + 1) * 512)) {
+                free(blocks); free(recs); free(rblock);
+                return fail("internal error: could not split a full directory block (should be unreachable)");
+            }
+        }
+    } else if (rc == 0) {
+        uint8_t combined[1024];
+        memcpy(combined, blocks + (size_t) tb * 512, 512);
+        memset(combined + 512, 0, 512);
+        if (ods2_dir_record_add_version(combined, sizeof(combined), recs[target].pos, idx, version, fid) != 1) {
+            free(blocks); free(recs); free(rblock);
+            return fail("internal error: a block plus one pair overflowed 1024 bytes (should be unreachable)");
+        }
+        rc = 2;
+        memmove(blocks + (size_t) (tb + 2) * 512, blocks + (size_t) (tb + 1) * 512, (size_t) (used - tb - 1) * 512);
+        if (!ods2_dir_split_block(combined, sizeof(combined), blocks + (size_t) tb * 512, blocks + (size_t) (tb + 1) * 512)) {
+            free(blocks); free(recs); free(rblock);
+            return fail("internal error: could not split a full directory block (should be unreachable)");
+        }
+    }
+    free(recs);
+    free(rblock);
+    if (rc == 2) {
+        r = store_directory(vol, dir_file_number, dir_header, blocks, used + 1, used, t);
+    } else if (ods2_file_content_length(dir_header) == 0 || !dir_eof_standard(dir_header, used) || !below_highwater(dir_header, t + 1)) {
+        r = store_directory(vol, dir_file_number, dir_header, blocks, used, used, t);
+    } else {
+        r = ods2_write_file_block(vol, dir_header, t + 1, blocks + (size_t) t * 512);
     }
     free(blocks);
     return r;
