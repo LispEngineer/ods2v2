@@ -32,23 +32,23 @@ int main(int argc, char **argv)
     r = ods2_mount_write(argv[1], &vol);
     if (!r.ok) { fprintf(stderr, "mount: %s\n", r.problem); return 1; }
     r = ods2_read_header(&vol, 4, header);
-    if (!r.ok) { fprintf(stderr, "root: %s\n", r.problem); return 1; }
+    if (!r.ok) { fprintf(stderr, "root: %s\n", r.problem); ods2_dismount(&vol); return 1; }
     for (n = 1; n <= levels; n++) {
         char name[32], fname[32], content[32];
         ods2_fid_t fid;
 
         snprintf(name, sizeof(name), "L%d", n);
         r = ods2_create_directory(&vol, header, name, &fid);
-        if (!r.ok) { fprintf(stderr, "level %d: %s\n", n, r.problem); return 1; }
+        if (!r.ok) { fprintf(stderr, "level %d: %s\n", n, r.problem); ods2_dismount(&vol); return 1; }
         r = ods2_read_header_fid(&vol, fid, header);
-        if (!r.ok) { fprintf(stderr, "level %d header: %s\n", n, r.problem); return 1; }
+        if (!r.ok) { fprintf(stderr, "level %d header: %s\n", n, r.problem); ods2_dismount(&vol); return 1; }
         for (i = 3; i < argc; i++) {
             if (atoi(argv[i]) == n) {
                 ods2_fid_t ffid;
                 snprintf(fname, sizeof(fname), "F%d.TXT", n);
                 snprintf(content, sizeof(content), "deep %d\n", n);
                 r = ods2_create_file(&vol, header, fname, (const uint8_t *) content, strlen(content), 5, &ffid);
-                if (!r.ok) { fprintf(stderr, "file at level %d: %s\n", n, r.problem); return 1; }
+                if (!r.ok) { fprintf(stderr, "file at level %d: %s\n", n, r.problem); ods2_dismount(&vol); return 1; }
             }
         }
     }
