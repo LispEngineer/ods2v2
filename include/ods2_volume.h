@@ -528,7 +528,9 @@ ods2_result_t ods2_create_file_source(ods2_volume_t *vol, const uint8_t *parent_
  * file is version 1. 0 makes the next version of a name that exists (highest + 1; version 1 if the name is new); n (1 to 32767) makes that
  * version if it is free and fails with %RMS-E-FEX if it exists. The name is matched as VMS does (on ODS-5 ignoring case) and an existing
  * name keeps the case first stored. A version above 32767 (a plain create after ;32767 too) fails with %RMS-E-CRE and %SYSTEM-W-BADFILEVER.
- * The entry's version limit is enforced as part of the create: the oldest versions are deleted first, in the same all-or-nothing change.
+ * The entry's version limit is enforced as part of the create, in VMS's order: the new file is made from space and a header slot that were free
+ * before the change began, then the oldest version is removed, in the same all-or-nothing change; a name with more versions than its limit
+ * is refused (one version at most is removed per create).
  * *version_out (if not NULL) gets the version made, name_out (if not NULL; at least ODS5_MAX_LITERAL_NAME + 8 bytes) the name as stored
  * (UTF-8; on an existing name the case first stored). Everything else is as ods2_create_file_source(). */
 #define ODS2_NEWVER_REFUSE (-1)

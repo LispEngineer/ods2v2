@@ -117,6 +117,36 @@ for level in 2 5; do
     check "ODS-$level: at the limit, an explicit version below all the kept ones is refused (it would be deleted at once)" "1 $fb 7 6 5" \
         "$(echo "$o" | grep -c 'ODS2-E-COPYERR') $(free_blocks "$img") $(vers "$img" '[L]B.TXT;*')"
 
+    # --- the limit with versions of DIFFERENT contents: the survivors keep their own bytes; the order of delete and create (review 40 F1) -----------------------------
+    $ODS2 "$img" "CREATE/DIRECTORY [Q]" >/dev/null 2>&1
+    for n in 1 2 3; do echo "content of creation $n" > "$TMP/q$n.txt"; $ODS2 "$img" "COPY $TMP/q$n.txt [Q]K.TXT" >/dev/null 2>&1; done
+    $ODS2 "$img" "SET FILE/VERSION_LIMIT=3 [Q]K.TXT" >/dev/null 2>&1
+    for n in 4 5; do echo "content of creation $n" > "$TMP/q$n.txt"; $ODS2 "$img" "COPY $TMP/q$n.txt [Q]K.TXT" >/dev/null 2>&1; done
+    check "ODS-$level: limit 3, versions with different contents: ;5 ;4 ;3 are left, each with its own bytes" "5 4 3 | creation 5 creation 4 creation 3" \
+        "$(vers "$img" '[Q]K.TXT;*') | $(for v in 5 4 3; do $ODS2 "$img" "TYPE [Q]K.TXT;$v" 2>&1 | grep -v '^%' | sed 's/content of //'; done | tr '\n' ' ' | sed 's/ $//')"
+    # the new file takes its blocks and its file header before the oldest version is removed (VMS's order: the freed header slot goes to the NEXT
+    # create, CORPUS 49.1 C4): the create that removes ;3 does not get ;3's file number
+    fid3=$(fid_of "$img" '[Q]K.TXT;3')
+    echo "content of creation 6" > "$TMP/q6.txt"; $ODS2 "$img" "COPY $TMP/q6.txt [Q]K.TXT" >/dev/null 2>&1
+    fid6=$(fid_of "$img" '[Q]K.TXT;6')
+    check "ODS-$level: the create that removed ;3 did not take ;3's file header (a new header: another file number)" "different" \
+        "$([ -n "$fid3" ] && [ -n "$fid6" ] && [ "${fid6%%,*}" != "${fid3%%,*}" ] && echo different || echo "same: $fid3 $fid6")"
+    echo "content of creation 7" > "$TMP/q7.txt"; $ODS2 "$img" "COPY $TMP/q7.txt [Q]K.TXT" >/dev/null 2>&1
+    check "ODS-$level: limit 3 still: ;7 ;6 ;5" "7 6 5" "$(vers "$img" '[Q]K.TXT;*')"
+    check "ODS-$level: ods5check is clean after the limit" "0 error(s), 0 warning(s)" "$(clean "$img")"
+
+    # --- more versions than the limit: the COPY is refused, nothing is deleted (VMS's rule is not measured: review 40 F2) ------------------------------------------------
+    $ODS2 "$img" "CREATE/DIRECTORY [R]" >/dev/null 2>&1
+    for n in 1 2 3 4 5; do $ODS2 "$img" "COPY $TMP/src.txt [R]M.TXT" >/dev/null 2>&1; done
+    $ODS2 "$img" "SET FILE/VERSION_LIMIT=2 [R]M.TXT" >/dev/null 2>&1
+    fb=$(free_blocks "$img")
+    o=$($ODS2 "$img" "COPY $TMP/src.txt [R]M.TXT" 2>&1)
+    check "ODS-$level: five versions, limit lowered to 2: a COPY is refused (it would have to delete three), nothing changes" "1 5 4 3 2 1 $fb" \
+        "$(echo "$o" | grep -c 'more than one version') $(vers "$img" '[R]M.TXT;*') $(free_blocks "$img")"
+    $ODS2 "$img" "SET FILE/VERSION_LIMIT=0 [R]M.TXT" >/dev/null 2>&1
+    $ODS2 "$img" "COPY $TMP/src.txt [R]M.TXT" >/dev/null 2>&1
+    check "ODS-$level: ... with the limit raised the COPY works (;6)" "6 5 4 3 2 1" "$(vers "$img" '[R]M.TXT;*')"
+
     # --- C6: ;32767 is the last version ------------------------------------------------------------------------------------------------------------
     $ODS2 "$img" "CREATE/DIRECTORY [N]" >/dev/null 2>&1
     $ODS2 "$img" "COPY $TMP/src.txt [N]Z.TXT;32766" >/dev/null 2>&1
@@ -187,6 +217,24 @@ check "ODS-5 C9: each version's header carries the stored case" "3" "$($ODS2 "$i
 o=$($ODS2 "$img" "COPY $TMP/src.txt [K]ABC.TXT;1" 2>&1)
 check "ODS-5 C9: COPY to ABC.TXT;1 (exists, other case): FEX, the message names the file by its stored case" "1 1" "$(echo "$o" | grep -c 'RMS-E-FEX') $(echo "$o" | grep -c 'Abc.txt')"
 check "ODS-5 C9: ods5check is clean" "0 error(s), 0 warning(s)" "$(clean "$img")"
+
+# --- at the version limit on a nearly full volume: the new version needs space of its own (the removed version's blocks are not given to it), so a COPY that does not fit is refused and every version is intact ---
+for level in 2 5; do
+    img="$TMP/lim$level.img"
+    $INIT "$img" 8192 --structure=$level --label=LM$level >/dev/null 2>&1
+    $ODS2 "$img" "CREATE/DIRECTORY [F]" >/dev/null 2>&1
+    for n in 1 2 3; do head -c 1000000 /dev/zero | tr '\0' "$n" > "$TMP/big$n.bin"; $ODS2 "$img" "COPY $TMP/big$n.bin [F]A.BIN" >/dev/null 2>&1; done
+    $ODS2 "$img" "SET FILE/VERSION_LIMIT=3 [F]A.BIN" >/dev/null 2>&1
+    fb=$(free_blocks "$img")
+    head -c $(( (fb + 100) * 512 )) /dev/zero > "$TMP/huge.bin"
+    sha_before=$(sha256sum "$img" | cut -d' ' -f1)
+    o=$($ODS2 "$img" "COPY $TMP/huge.bin [F]A.BIN" 2>&1)
+    check "ODS-$level: at the limit, a COPY that does not fit is refused (the oldest version's blocks are not lent to it) and the image is as it was" "1 $sha_before" \
+        "$(echo "$o" | grep -c 'ODS2-E-COPYERR') $(sha256sum "$img" | cut -d' ' -f1)"
+    check "ODS-$level: ... all three versions still hold their own bytes" "$(sha256sum < "$TMP/big1.bin" | cut -d' ' -f1) $(sha256sum < "$TMP/big2.bin" | cut -d' ' -f1) $(sha256sum < "$TMP/big3.bin" | cut -d' ' -f1)" \
+        "$(for v in 1 2 3; do $ODS2 "$img" "EXPORT/OVERWRITE [F]A.BIN;$v $TMP/exp$v.bin" >/dev/null 2>&1; sha256sum < "$TMP/exp$v.bin" | cut -d' ' -f1; done | tr '\n' ' ' | sed 's/ $//')"
+    rm -f "$TMP/huge.bin" "$TMP"/exp?.bin "$TMP"/big?.bin
+done
 
 # --- IMPORT/NEW_VERSION: a name that exists gets a new version; without the qualifier it is still skipped -----------------------------------------------------------------------------------
 for level in 2 5; do

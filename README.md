@@ -189,9 +189,17 @@ removes one version - the one given, or the highest if none is - and
 `DELETE NAME;*` removes them all. `COPY` makes a **new version** of a name that exists, as VMS's COPY does (measured on VAX V7.3 and
 V8.4: CORPUS 49 and 49.8): `COPY x [D]A.TXT` (or `A.TXT;` or `A.TXT;0`) makes the highest version + 1 (version 1 of a new name); `A.TXT;n` makes version n if
 it is free (a gap is fine) and fails with `%RMS-E-FEX` if it exists; ;32767 is the last (a plain COPY after it, or `;32768`, is `%RMS-E-CRE` with
-`%SYSTEM-W-BADFILEVER`); `;*` and `;-1` are refused. The entry's version limit (`SET FILE/VERSION_LIMIT`, stored in the directory entry) is enforced as part of the COPY:
-the oldest versions are deleted first, inside the same all-or-nothing change (a version that the limit would delete at once, an explicit one below all the kept ones, is
-refused). `IMPORT/NEW_VERSION` does the same for every file of a tree that exists (without the qualifier an existing name is skipped).
+`%SYSTEM-W-BADFILEVER`); `;*` and `;-1` are refused. The entry's version limit (`SET FILE/VERSION_LIMIT`, stored in the directory entry) is enforced as part of the COPY, in VMS's
+order (CORPUS 49.1 C4): the new version is made first, from blocks and a file header that were free before the change began and written, and the oldest
+version is removed after it, in the same all-or-nothing change (the freed header slot goes to the next create; free blocks are the same
+before and after; a full volume refuses the COPY, honestly). An interrupted COPY leaves the old version intact or gone, never changed
+(review 40 F1: removing it first let the new file's content be written onto its blocks before the commit). Refused, changing nothing, because VMS's
+behaviour there is not measured: an explicit version below all the kept ones when the limit is reached (it would be deleted at once), and a
+name that has **more versions than its limit** (the limit was lowered after the versions were made: one COPY would have to delete several):
+raise the limit with `SET FILE/VERSION_LIMIT` or `DELETE` versions first. **The new version's owner and protection are not taken from the
+version before it**: today it gets the volume's usual owner and the default protection of a new file, whatever the existing versions have
+(VMS's rule for a new version is not measured yet: the step-0 measurement of owner and protection of a new version is to come, and this will
+then follow it). `IMPORT/NEW_VERSION` does the same for every file of a tree that exists (without the qualifier an existing name is skipped).
 
 ### Record formats
 

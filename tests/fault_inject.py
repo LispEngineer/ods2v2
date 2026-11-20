@@ -213,10 +213,27 @@ def setup_index(level, kind):
     return img
 
 
+def setup_limit(level, kind):
+    """A volume for the version limit with versions of DIFFERENT contents of 2.2 MiB each (three content chunks of the write): 'limit3big' has
+    A.BIN;1 to ;3 with the limit 3, 'limit1big' has A.BIN;1 with the limit 1. The next COPY removes the oldest version, so every
+    interruption of it is a chance to see the old version's blocks overwritten (review 40 F1)."""
+    img = os.path.join(WORK, 'base_%s_%d.img' % (kind, level))
+    assert run([INIT, img, '32768', '--structure=%d' % level, '--label=FAULT'])[0] == 0
+    assert ods2(img, 'CREATE/DIRECTORY [BIG]')[0] == 0
+    count = 3 if kind == 'limit3big' else 1
+    for v in range(count):
+        src = put_host('ver%d.bin' % v, blob(int(2.2 * 1024 * 1024), 10 + v))
+        assert ods2(img, 'COPY %s [BIG]A.BIN' % src)[0] == 0
+    assert ods2(img, 'SET FILE/VERSION_LIMIT=%d [BIG]A.BIN' % count)[0] == 0
+    return img
+
+
 def setup(level, hardlinks, fill_for=None, cluster=None):
     """the base volume: files of several sizes (one fragmented over holes), subdirectories, links"""
     if fill_for and fill_for.startswith('ix'):
         return setup_index(level, fill_for)
+    if fill_for in ('limit3big', 'limit1big'):
+        return setup_limit(level, fill_for)
     img = os.path.join(WORK, 'base_%d%s%s%s.img' % (level, 'h' if hardlinks else '', fill_for or '', cluster or ''))
     if os.path.exists(img):
         os.remove(img)
@@ -340,9 +357,15 @@ OPS = {
     'newver_limit': ('COPY %(small)s [000000]V.TXT', ['V.TXT;1', 'V.TXT;3'], False, False, None),
     'newver_mid': ('COPY %(small)s [000000]W.TXT;5', ['W.TXT;5'], False, False, None),
     'newver_split': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s'], False, False, 'versplit'),
+    # at the version limit, with versions of different contents spread over three content chunks each: the removed version must be
+    # intact or gone at every interruption, never changed (review 40 F1)
+    'newver_limit3_big': ('COPY %(newbig)s [BIG]A.BIN', ['BIG/A.BIN;1', 'BIG/A.BIN;4'], False, False, 'limit3big'),
+    'newver_limit1_big': ('COPY %(newbig)s [BIG]A.BIN', ['BIG/A.BIN;1', 'BIG/A.BIN;2'], False, False, 'limit1big'),
 }
+# the operations that are also run with an I/O error at the k-th write of the commit (the process goes on and says so), not only killed
+ERROR_MODE_OPS = ['newver_limit', 'newver_limit3_big', 'newver_limit1_big', 'newver_front']
 QUICK = ['index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
-         'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split']
+         'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split', 'newver_limit3_big', 'newver_limit1_big']
 
 
 def main():
@@ -358,6 +381,7 @@ def main():
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(WORK)
     ctx = {'small': put_host('small.txt', b'one block of text\n'), 'empty': put_host('empty.txt', b''),
+           'newbig': put_host('newbig.bin', blob(int(2.2 * 1024 * 1024), 99)),
            'frag2': put_host('frag2.dat', blob(900 * 512, 5))}
     followup = put_host('zz.dat', blob(1536, 77))
     failures = 0
@@ -390,18 +414,22 @@ def main():
                 pass
             counts = {'leak': 0, 'clean': 0}
             bad_here = 0
-            for k in range(1, n + 1, args.every):
+            runs = [('crash', k) for k in range(1, n + 1, args.every)]
+            if name in ERROR_MODE_OPS:
+                runs += [('error', k) for k in range(1, n + 1, args.every)]
+            for mode, k in runs:
                 shutil.copyfile(base, trial)
-                rc, out = ods2(trial, cmd, dict(openv, ODS2_FAULT_AFTER_WRITES=str(k)))
+                faultenv = {'ODS2_FAULT_AFTER_WRITES': str(k)} if mode == 'crash' else {'ODS2_FAULT_ERROR_AT_WRITE': str(k)}
+                rc, out = ods2(trial, cmd, dict(openv, **faultenv))
                 prob = []
                 # the run that completes (k = n) must be clean: no duplicate allowance (R9-3)
-                allow = name if k < n else None
+                allow = name if (k < n or mode == 'error') else None
                 bad, leaks = check(trial, allow)
                 prob += ['checker: ' + b for b in bad]
                 counts['leak' if leaks else 'clean'] += 1
                 rc2, files, text = tree(trial, 'after')
                 for p, h in base_files.items():
-                    if p in files and files[p] != h and p not in targets:
+                    if p in files and files[p] != h:         # a target may be gone (a removed version), never changed (review 40 F1)
                         prob.append('file %s changed' % p)
                     if p not in files and p not in targets:
                         prob.append('file %s lost' % p)
@@ -429,7 +457,7 @@ def main():
                 prob += ['after COPY, checker: ' + b for b in bad2]
                 rc4, files2, text = tree(trial, 'after2')
                 for p, h in base_files.items():
-                    if p in files2 and files2[p] != h and p not in targets:
+                    if p in files2 and files2[p] != h:
                         prob.append('after COPY: file %s changed' % p)
                     if p not in files2 and p not in targets:
                         prob.append('after COPY: file %s lost' % p)
@@ -455,7 +483,7 @@ def main():
                 if prob:
                     bad_here += 1
                     failures += 1
-                    print('FAIL: %s (ODS-%d) after %d of %d writes:' % (name, level, k, n))
+                    print('FAIL: %s (ODS-%d) after %d of %d writes (%s):' % (name, level, k, n, mode))
                     for p in prob[:6]:
                         print('      ' + p[:200])
             print('%s: %s (ODS-%d): %d writes, %d states tested (%d clean, %d leaked), %d bad' % (

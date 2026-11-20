@@ -414,6 +414,10 @@ struct ods2_txn {
     size_t        table_cap;   /* a power of two */
     ods2_extent_t *saved_extents;   /* INDEXF.SYS's extent cache as it was when the change began */
     int           saved_extent_count;
+    ods2_extent_t *freed;        /* blocks given back inside this change: file content must never be written onto them before the
+                                    commit (content goes straight to the image; the bitmap that frees them is only written at the
+                                    commit, so an interrupted change would leave the new bytes under a file that still owns the blocks) */
+    size_t        nfreed, freed_cap;
 };
 
 static size_t txn_slot(const struct ods2_txn *t, uint32_t lbn)
@@ -722,6 +726,7 @@ static ods2_result_t txn_end(ods2_volume_t *vol, ods2_result_t r)
         bitmap_cache_drop(vol);
     }
     free(t->saved_extents);
+    free(t->freed);
     free(t->w);
     free(t->table);
     free(t);
@@ -2912,6 +2917,20 @@ static ods2_result_t write_extents(ods2_volume_t *vol, const ods2_extent_t *exte
             return fail("a file's blocks lie at or past the end of the volume (the storage control block's volume "
                         "size): nothing is written there");
         }
+        if (vol->txn != NULL) {
+            /* the allocator must not have handed out blocks freed in this still open change (review 40 F1: the oldest version's
+               clusters were overwritten before the commit): refused here, before the first byte goes out */
+            size_t k;
+            for (k = 0; k < vol->txn->nfreed; k++) {
+                const ods2_extent_t *f = &vol->txn->freed[k];
+                if ((uint64_t) extents[i].lbn < (uint64_t) f->lbn + f->block_count &&
+                    (uint64_t) f->lbn < (uint64_t) extents[i].lbn + extents[i].block_count) {
+                    free(chunk);
+                    return fail("internal error: file content would be written onto blocks freed in the same, uncommitted change: "
+                                "nothing is written");
+                }
+            }
+        }
     }
     for (i = 0; i < extent_count && r.ok; i++) {
         uint64_t run_bytes = (uint64_t) extents[i].block_count * 512u;
@@ -3460,9 +3479,6 @@ static bool scratch_seg_room(create_scratch_t *sc, size_t count)
     return true;
 }
 
-static ods2_result_t insert_into_directory_vl(ods2_volume_t *vol, unsigned dir_file_number,
-                                              const char *name, uint16_t version, ods2_fid_t fid,
-                                              uint8_t extra_flags, uint16_t verlimit_override);
 typedef struct {
     bool exists;
     unsigned count;
@@ -3476,15 +3492,18 @@ static ods2_result_t dir_name_info(ods2_volume_t *vol, const uint8_t *dir_header
 static ods2_result_t insert_new_version(ods2_volume_t *vol, unsigned dir_file_number, const char *name, uint16_t version,
                                         ods2_fid_t fid, uint8_t extra_flags);
 
-/* Which version a create makes, and what it takes out of the way (PLAN_WRITE_OPS item 1; CORPUS 49 on VAX V7.3, 49.8 on V8.4). `name` holds
-   the normalized name on entry and, if the directory has the name already, the name as the directory stores it (the first stored case wins
-   on ODS-5) on return. version_req 0: highest + 1 (1 for a new name); n: that version if it is free, %RMS-E-FEX if it is not. A version
-   above 32767 is refused (%RMS-E-CRE, %SYSTEM-W-BADFILEVER). When the name's version limit would be exceeded the oldest versions are
-   deleted first, here, inside the create's own change (VMS does it as part of the create: the blocks and the file header slot are free for
-   the new file; free blocks are the same before and after): a version that is itself the one that would go (an explicit version below all
-   the kept ones) is refused. Nothing is changed when this fails. */
+/* Which version a create makes (PLAN_WRITE_OPS item 1; CORPUS 49 on VAX V7.3, 49.8 on V8.4). `name` holds the normalized name on entry and,
+   if the directory has the name already, the name as the directory stores it (the first stored case wins on ODS-5) on return.
+   version_req 0: highest + 1 (1 for a new name); n: that version if it is free, %RMS-E-FEX if it is not. A version above 32767 is
+   refused (%RMS-E-CRE, %SYSTEM-W-BADFILEVER). *drop_out is the one old version the entry's version limit makes the create remove, or 0:
+   it is NOT removed here. The create makes the new file from space and a header slot that were free before the change began, writes
+   it, and only then removes that version, in the same change, as VMS does (the new version gets a new header, the freed slot goes to
+   the next create: CORPUS 49.1 C4). Removing it first let the allocator give the new file its clusters, which were written before the
+   commit: an interrupted change left a listed version holding the new file's bytes (review 40 F1).
+   Refused, changing nothing: a version the limit would delete at once (an explicit one below all the kept ones), and a name that has more
+   versions than its limit allows (more than one would have to go: VMS's rule for that is not measured: review 40 F2). */
 static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_header, char *name, size_t name_cap, int version_req,
-                                    unsigned special, unsigned *version_out, bool *existing_out, uint16_t *limit_out)
+                                    unsigned special, unsigned *version_out, bool *existing_out, unsigned *drop_out)
 {
     dir_name_info_t info;
     unsigned dir_number = ods2_fid_number(((const ods2_head_core_t *) parent_header)->fid), v, i;
@@ -3492,7 +3511,7 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
 
     (void) special;
     *existing_out = false;
-    *limit_out = 0;
+    *drop_out = 0;
     if (version_req < 0 || version_req > ODS2_MAX_VERSION) {
         return fail("%RMS-E-CRE, ACP file create failed; -SYSTEM-W-BADFILEVER, bad file version number");
     }
@@ -3538,30 +3557,19 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
     }
     /* the version limit of the entry: 0 and 32767 are no limit */
     if (info.verlimit >= 1 && info.verlimit < ODS2_MAX_VERSION && info.count + 1 > info.verlimit) {
-        unsigned drop = info.count + 1 - info.verlimit;       /* versions to remove: the lowest `drop` of the old ones and the new one */
-        uint16_t *all = malloc(((size_t) info.count + 1) * sizeof(*all));
-        unsigned n = 0, k, cut;
-        if (all == NULL) { free(info.versions); return fail("out of memory"); }
-        for (i = 0; i < info.count; i++) all[n++] = info.versions[i];
-        all[n++] = (uint16_t) v;
-        for (i = 0; i < n; i++) for (k = i + 1; k < n; k++) if (all[k] < all[i]) { uint16_t t = all[i]; all[i] = all[k]; all[k] = t; }
-        for (cut = 0; cut < drop; cut++) {
-            if (all[cut] == v) {
-                free(all);
-                free(info.versions);
-                return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not made");
-            }
+        unsigned drop = info.count + 1 - info.verlimit;       /* versions that have to go: the lowest `drop` of the old ones and the new one */
+        unsigned lowest = 0, k;
+        if (drop > 1) {
+            free(info.versions);
+            return fail("the name has more versions than its version limit allows: one COPY would have to delete more than one version, "
+                        "and what VMS does then is not measured: not made (raise the limit with SET FILE/VERSION_LIMIT, or DELETE versions)");
         }
-        for (cut = 0; cut < drop; cut++) {
-            r = ods2_delete_version(vol, dir_number, name, (int) all[cut], NULL);
-            if (!r.ok) { free(all); free(info.versions); return r; }
+        for (k = 0; k < info.count; k++) if (lowest == 0 || info.versions[k] < lowest) lowest = info.versions[k];
+        if (v < lowest) {
+            free(info.versions);
+            return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not made");
         }
-        free(all);
-        if (info.count <= drop) {
-            /* every old version went (limit 1): the name has no record now, the new one makes it, with the same limit */
-            *existing_out = false;
-            *limit_out = info.verlimit;
-        }
+        *drop_out = lowest;
     }
     free(info.versions);
     *version_out = v;
@@ -3595,7 +3603,7 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
 {
     unsigned new_version = 1;
     bool version_of_existing = false;
-    uint16_t carry_limit = 0;
+    unsigned drop_version = 0;
     uint64_t content_len = src->length;
     const ods2_head_core_t *parent_core = (const ods2_head_core_t *) parent_header;
     uint64_t blocks_needed;
@@ -3654,7 +3662,7 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
                            "a file or directory with this name already exists in the parent");
         if (!r.ok) return r;
     } else {
-        r = choose_version(vol, parent_header, upper_name, sizeof(upper_name), version_req, special, &new_version, &version_of_existing, &carry_limit);
+        r = choose_version(vol, parent_header, upper_name, sizeof(upper_name), version_req, special, &new_version, &version_of_existing, &drop_version);
         if (!r.ok) return r;
         name = upper_name;       /* the stored case of an existing name, as the directory spells it */
     }
@@ -3815,8 +3823,8 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
         r = insert_new_version(vol, ods2_fid_number(parent_core->fid), name, (uint16_t) new_version, spec.fid,
                                special != 0 ? ODS5_DIR_SPECIAL : 0);
     } else {
-        r = insert_into_directory_vl(vol, ods2_fid_number(parent_core->fid), name, (uint16_t) new_version, spec.fid,
-                                     special != 0 ? ODS5_DIR_SPECIAL : 0, carry_limit);
+        r = insert_into_directory(vol, ods2_fid_number(parent_core->fid), name, (uint16_t) new_version, spec.fid,
+                                  special != 0 ? ODS5_DIR_SPECIAL : 0);
     }
     if (!r.ok) goto undo;   /* no directory entry: give the headers, blocks and file numbers back */
 
@@ -3826,6 +3834,12 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
        written a byte. */
     r = write_extents(vol, sc->extents, extent_count, src);
     if (!r.ok) goto undo;
+
+    /* the version the limit removes goes last, in this same change (the new file has its own clusters and header slot, taken before this) */
+    if (drop_version != 0) {
+        r = ods2_delete_version(vol, ods2_fid_number(parent_core->fid), name, (int) drop_version, NULL);
+        if (!r.ok) goto undo;
+    }
 
     *new_fid_out = spec.fid;
     if (version_out != NULL) *version_out = (uint16_t) new_version;
@@ -4653,6 +4667,20 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
     if (lbn % vol->home.cluster != 0 || block_count % vol->home.cluster != 0) {
         return fail("lbn/block_count must be cluster-aligned (exactly what "
                     "ods2_allocate_blocks() returned)");
+    }
+    if (vol->txn != NULL) {
+        /* remembered for write_extents(): see struct ods2_txn */
+        struct ods2_txn *t = vol->txn;
+        if (t->nfreed == t->freed_cap) {
+            size_t ncap = t->freed_cap ? t->freed_cap * 2 : 16;
+            ods2_extent_t *nf = realloc(t->freed, ncap * sizeof(*nf));
+            if (nf == NULL) return fail("out of memory");
+            t->freed = nf;
+            t->freed_cap = ncap;
+        }
+        t->freed[t->nfreed].lbn = lbn;
+        t->freed[t->nfreed].block_count = block_count;
+        t->nfreed++;
     }
 
     r = ods2_read_header(vol, 2, bitmap_header); /* BITMAP.SYS is always file 2 */
