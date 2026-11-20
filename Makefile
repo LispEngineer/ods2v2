@@ -314,6 +314,10 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_newver_check.sh
 	@echo "--- cli_newver_vms_check (against the directories VMS wrote) ---"
 	@sh tests/cli_newver_vms_check.sh
+	@echo "--- cli_dirhdr_check (a new directory's header as VMS makes it) ---"
+	@sh tests/cli_dirhdr_check.sh
+	@echo "--- cli_dirhdr_vms_check (against the directories VMS made) ---"
+	@sh tests/cli_dirhdr_vms_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
 	@echo "--- CLI directory loop checks ---"

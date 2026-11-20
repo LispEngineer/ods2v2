@@ -160,6 +160,26 @@ int main(void)
         printf("PASS: fileowner_uic/fileprot/recprot match real VMS-written values\n");
     }
 
+    /* A directory header at level 2 as VMS's CREATE/DIRECTORY makes it (CORPUS 49 and 53: the directories of the VAX V7.3 and V8.4 ODS-2 step 0 containers): protection
+       0xBA88 (S:RWE,O:RWE,G:RE,W:E), record protection 0, revision 0 (a file's is 1). Follow-up c. */
+    {
+        ods2_header_spec_t dspec = spec;
+        uint8_t dh[512];
+        const uint8_t *ident;
+        dspec.filechar = 0x2080;
+        assert(ods2_build_file_header(dh, &dspec));
+        core = (ods2_head_core_t *) dh;
+        ident = dh + (size_t) core->idoffset * 2;
+        assert(core->fileprot == 0xba88);
+        assert(core->recprot == 0);
+        assert(ident[20] == 0 && ident[21] == 0);
+        assert(ods2_build_file_header(header, &spec));              /* a file keeps its values */
+        core = (ods2_head_core_t *) header;
+        ident = header + (size_t) core->idoffset * 2;
+        assert(core->fileprot == 0xfa00 && core->recprot == 0xfe00 && ident[20] == 1);
+        printf("PASS: a level 2 directory header has protection 0xBA88, record protection 0 and revision 0; a file's are unchanged\n");
+    }
+
     printf("\nods2_header_build_selftest: all checks passed\n");
     return 0;
 }
