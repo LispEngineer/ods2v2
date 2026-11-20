@@ -3234,7 +3234,7 @@ ods2_result_t ods2_create_file_attrs(ods2_volume_t *vol, const uint8_t *parent_h
                                       ods2_fid_t *new_fid_out)
 {
     memory_source_t ctx;
-    ods2_content_source_t src;
+    ods2_content_source_t src = { 0 };           /* every field set: partial_fix_ok was read uninitialized (UBSan, make sancheck) */
     if (ods2_stream_format(attrs->rtype)) {
         /* RMS refuses a stream file read back with a record longer than its MRS or its LRL (%RMS-W-RTB) */
         size_t longest = ods2_longest_record(attrs->rtype, content, content_len);
@@ -3442,7 +3442,7 @@ ods2_result_t ods2_create_symlink(ods2_volume_t *vol, const uint8_t *parent_head
     size_t len = 0;
     bool wide;
     memory_source_t ctx;
-    ods2_content_source_t src;
+    ods2_content_source_t src = { 0 };           /* every field set: partial_fix_ok was read uninitialized (UBSan, make sancheck) */
     ods2_record_attrs_t attrs;
 
     if (!vol->writable) return not_writable(vol);
@@ -3495,7 +3495,7 @@ ods2_result_t ods2_create_file(ods2_volume_t *vol, const uint8_t *parent_header,
     }
     {
         memory_source_t ctx;
-        ods2_content_source_t src;
+        ods2_content_source_t src = { 0 };           /* every field set: partial_fix_ok was read uninitialized (UBSan, make sancheck) */
         ctx.data = content;
         ctx.pos = 0;
         src.length = content_len;

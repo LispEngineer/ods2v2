@@ -2340,7 +2340,7 @@ static void cmd_copy(ods2_volume_t *vol, const char *local_file, const ods2_pars
     uint8_t dir_header[512];
     ods2_fid_t dir_fid, new_fid;
     host_input_t in;
-    ods2_content_source_t src;
+    ods2_content_source_t src = { 0 };
     ods2_record_attrs_t attrs = *attrs_in;
     ods2_text_var_scan_t scan;
     convert_ctx_t conv;
@@ -2690,7 +2690,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             import_tree(st, path, ods2_fid_number(fid), depth + 1);
         } else if (S_ISREG(sb.st_mode)) {
             host_input_t in;
-            ods2_content_source_t src;
+            ods2_content_source_t src = { 0 };
             ods2_record_attrs_t attrs;
             if (!st->opts->new_version && ods2_lookup_name(st->vol, dir_header, literal, &fid).ok) {
                 fprintf(stderr, "%%ODS2-W-EXISTS, %s already exists: skipped\n", shown);
