@@ -3506,6 +3506,26 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
            sorted here, highest first, the first `keep` stay. Sorting and not refusing the name: the deletes name each version, so they are right
            whatever the stored order, and a refusal would leave the volume's owner no way to purge it. */
         qsort(x.items + i, j - i, sizeof(*x.items), purge_item_cmp);
+        /* Review 49 S1: the deletes name a version by its number, so a number that is not a usable one makes the delete reach another file: 0 is read as "the
+           highest", a number over 32767 sorts above every real one, and two entries with one number delete the first match. A name like that is not purged (the
+           other names go on); ods5check warns of it. Valid, different numbers in the wrong order are sorted and purged as above. */
+        {
+            bool bad = false;
+            const char *why = NULL;
+            for (k = i; k < j; k++) {
+                if (x.items[k].version == 0) { bad = true; why = "a version number is 0"; }
+                else if (x.items[k].version > 32767) { bad = true; why = "a version number is over 32767"; }
+                else if (k > i && x.items[k].version == x.items[k - 1].version) { bad = true; why = "two entries have the same version number"; }
+            }
+            if (bad) {
+                char nm[ODS2_PATH_MAX], what[ODS2_PATH_MAX * 2 + 8];
+                display_name(x.items[i].name, nm, sizeof(nm));
+                spec_dir_text(x.items[i].dir, what, sizeof(what));
+                report_error("%%PURGE-W-FILNOTPUR, error deleting %s%s: %s (the directory entry is damaged): the name is not purged\n", what, nm, why);
+                i = j;
+                continue;
+            }
+        }
         for (k = i + (size_t) keep; k < j; k++) {
             const purge_item_t *it = &x.items[k];
             char what[ODS2_PATH_MAX * 2 + 16];
@@ -3854,7 +3874,7 @@ static void cmd_set_file_security(ods2_volume_t *vol, const char *quals, const c
         x.what = ODS2_SETSEC_PROT;
         if (!parse_protection_spec(protv, &x.mask, &x.value, bad, sizeof(bad))) {
             if (strcmp(bad, "VALREQ") == 0) report_error("%%DCL-W-VALREQ, missing qualifier or keyword value\n");
-            else if (strcmp(bad, "TOOLONG") == 0) report_error("%%SET-F-SYNTAX, the protection list is too long (more than 120 characters): not run\n");
+            else if (strcmp(bad, "TOOLONG") == 0) report_error("%%SET-F-SYNTAX, the protection list is too long (more than 127 characters): not run\n");
             else report_error("%%SET-F-SYNTAX, error parsing '%s'\n", bad);
             return;
         }
@@ -4285,6 +4305,12 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
             report_error("%%ODS2-E-NOPARM, usage: SET FILE/PROTECTION=(S:RWED,O:RWED,G:RE,W) <spec>  or  SET FILE/OWNER_UIC=[group,member] <spec>\n");
             return true;
         }
+        if (k + 1 < n) {
+            /* review 49 N2: a second spec was silently ignored */
+            report_error("%%SET-F-TOOMANY, SET FILE takes one file specification, and \"%s\" follows \"%s\": nothing is changed (run SET FILE once for each%s)\n", tokens[k + 1], tokens[k],
+                         tokens[k + 1][0] == '/' ? "; qualifiers go before the spec, SET FILE/LOG/PROTECTION=(...) spec" : "");
+            return true;
+        }
         cmd_set_file_security(vol, quals_buf, tokens[k]);
         return true;
     }
@@ -4297,7 +4323,10 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
         while (qs != NULL && *qs == '/') {
             char q[64];
             size_t ql = strcspn(qs + 1, "/");
-            if (ql >= sizeof(q)) ql = sizeof(q) - 1;
+            if (ql >= sizeof(q)) {
+                report_error("%%PURGE-F-IVQUAL, a qualifier is longer than %d characters: not run\n", (int) sizeof(q) - 1);      /* review 49 N1: refused, never cut */
+                return true;
+            }
             memcpy(q, qs + 1, ql);
             q[ql] = '\0';
             if (strncasecmp(q, "KEEP=", 5) == 0) {
@@ -4319,7 +4348,8 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
         }
         if (n > 2) {
             /* review 49 / N7: a second spec was silently ignored; a user who types two could think both were purged */
-            report_error("%%PURGE-F-TOOMANY, PURGE takes one file specification, and \"%s\" follows \"%s\": nothing is purged (run PURGE once for each)\n", tokens[2], tokens[1]);
+            report_error("%%PURGE-F-TOOMANY, PURGE takes one file specification, and \"%s\" follows \"%s\": nothing is purged (run PURGE once for each%s)\n", tokens[2], tokens[1],
+                         tokens[2][0] == '/' ? "; qualifiers go on the command word, PURGE/LOG spec" : "");
             return true;
         }
         if (n > 1) {

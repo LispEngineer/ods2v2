@@ -153,6 +153,25 @@ for level in 2 5; do
     python3 -I tests/swap_versions.py "$img" "$dn" X.TXT >/dev/null 2>&1
     o=$($ODS2 "$img" "PURGE/LOG [P]X.TXT" 2>&1)
     check "ODS-$level P8: versions stored as ;1 ;2 ;3: PURGE deletes ;2 and ;1 (highest of the deleted first) and keeps ;3" "%PURGE-I-FILPURG, [P]X.TXT;2 deleted (2 blocks)|%PURGE-I-FILPURG, [P]X.TXT;1 deleted (2 blocks)|%PURGE-I-TOTAL, 2 files deleted (4 blocks)|X.TXT;3" "$(echo "$o" | tr '\n' '|')$(vers "$img" '[P]X.TXT;*')"
+
+    # --- P11: version numbers that are not usable (review 49 S1): the name is refused with FILNOTPUR and the reason, nothing of it is deleted, the other names go on ----------
+    for case in "0:2:0:a version number is 0" "1:1:3:two entries have the same version number" "2:1:40000:a version number is over 32767"; do
+        tag=${case%%:*}; rest=${case#*:}; idx=${rest%%:*}; rest=${rest#*:}; val=${rest%%:*}; why=${rest#*:}
+        d=R$tag
+        $ODS2 "$img" "CREATE/DIRECTORY [$d]" >/dev/null 2>&1; mk "$img" $d X.TXT 3; mk "$img" $d Y.TXT 3
+        dn=$($ODS2 "$img" "DIR/FULL [000000]$d.DIR" 2>&1 | sed -n 's/.*File ID: *(\([0-9]*\),.*/\1/p' | head -1)
+        python3 -I tests/swap_versions.py "$img" "$dn" X.TXT setver "$idx" "$val" >/dev/null 2>&1
+        before=$(vers "$img" "[$d]X.TXT;*")
+        o=$($ODS2 "$img" "PURGE/LOG [$d]*.TXT" 2>&1)
+        check "ODS-$level P11.$tag: X.TXT with $why is refused (FILNOTPUR and the reason), its entries are as they were; Y.TXT is purged" "%PURGE-W-FILNOTPUR, error deleting [$d]X.TXT: $why (the directory entry is damaged): the name is not purged|%PURGE-I-FILPURG, [$d]Y.TXT;2 deleted (2 blocks)|%PURGE-I-FILPURG, [$d]Y.TXT;1 deleted (2 blocks)|%PURGE-I-TOTAL, 2 files deleted (4 blocks)|$before|Y.TXT;3" \
+            "$(echo "$o" | tr '\n' '|')$(vers "$img" "[$d]X.TXT;*")|$(vers "$img" "[$d]Y.TXT;*")"
+    done
+
+    # --- P12: /KEEP= values and qualifiers that do not fit are refused, never cut (review 49 N1) ---------------------------------------------------------------------
+    $ODS2 "$img" "CREATE/DIRECTORY [R9]" >/dev/null 2>&1; mk "$img" R9 X.TXT 4
+    z57=$(awk 'BEGIN { for (i = 0; i < 57; i++) printf "0" }')
+    o=$($ODS2 "$img" "PURGE/LOG/KEEP=${z57}25 [R9]X.TXT" 2>&1)
+    check "ODS-$level P12: /KEEP= with 59 characters is refused (it used to be cut to 58 and read as 2), nothing purged" "1 4" "$(echo "$o" | grep -c 'IVQUAL') $(vers "$img" '[R9]X.TXT;*' | wc -w)"
 done
 
 # --- P10: two specs, or a comma list, are refused with a message and purge nothing (review 49, N7: the second used to be ignored in silence) ---------------------

@@ -225,20 +225,38 @@ ods2_rm: tools/ods2_rm.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c incl
 ods2: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c include/ods2_volume.h include/ods2_text_var.h include/ods2_records.h include/ods2_acl.h include/ods2_path.h include/ods2_wildcard.h third_party/linenoise/linenoise.h
 	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Ithird_party/linenoise $(SANFLAGS) tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_party/linenoise/linenoise.c -o $@
 
-# The sanitizer gate (review 48): ods2 is built with -fsanitize=address,undefined (SANFLAGS), so `make test` already runs every cli_*_check.sh under
-# the sanitizers; `make sancheck` says so, refuses a binary that is not sanitized, and runs the long-argument test and every cli_*_check.sh again
-# (alone, with the sanitizer options that make an error stop the run) without the unit tests.
-.PHONY: sancheck
-sancheck: $(TESTS) ods2 ods2_init ods2_fault ods2_put ods2_dump_header ods2_deep_make $(BUILD)/ods2_make_loop tools
-	@nm ods2 | grep -q '__asan_init\|__ubsan' || { echo "ods2 is not built with -fsanitize=address,undefined"; exit 1; }
-	@echo "sancheck: ods2 is built with -fsanitize=address,undefined"
-	@export UBSAN_OPTIONS=print_stacktrace=1; failed=0; \
+# The sanitizer gate (review 48, 49): ods2 is built with -fsanitize=address,undefined (SANFLAGS), so `make test` already runs every cli_*_check.sh under the
+# sanitizers. `make sancheck` says so, refuses a binary that is not sanitized, and runs the long-argument test and every cli_*_check.sh again, in two passes
+# without the unit tests' output:
+#   pass 1, the normal build (AddressSanitizer + UBSan): UBSAN_OPTIONS=halt_on_error=1 ends the tool with status 1 at a UB report, and ASAN_OPTIONS=log_path writes
+#     every AddressSanitizer report to a file, so a run whose output and status a test throws away (about 300 of the cli tests' 800 calls) is still seen;
+#   pass 2, `make sancheck-ub`: the tools built with -fsanitize=undefined alone, whose runtime (unlike the combined one: GCC 16, measured) honours
+#     UBSAN_OPTIONS=log_path, so a UB report from any call, discarded output or not, leaves a file. The normal binaries are built again afterwards.
+# Any report file, any "Sanitizer" or "runtime error" text in a test's output, or a failing test fails the target.
+SAN_TESTS = tests/cli_longargs_check.sh tests/cli_*_check.sh
+SAN_BINS = ods2 ods2_init ods2_fault ods2_put ods2_dump_header ods2_deep_make
+.PHONY: sancheck sancheck-ub sancheck-run
+sancheck: $(TESTS) $(SAN_BINS) $(BUILD)/ods2_make_loop tools
+	@nm ods2 | grep -q '__asan_init' || { echo "ods2 is not built with -fsanitize=address,undefined"; exit 1; }
+	@echo "sancheck pass 1: ods2 is built with -fsanitize=address,undefined"
+	@$(MAKE) --no-print-directory sancheck-run SANWHAT="address,undefined" SAN_ENV_ASAN="log_path=$(CURDIR)/$(BUILD)/sanlog" SAN_ENV_UBSAN="halt_on_error=1:print_stacktrace=1"
+	@echo "sancheck pass 2: the tools built with -fsanitize=undefined alone (its runtime logs to files)"
+	@$(MAKE) --no-print-directory -B SANFLAGS=-fsanitize=undefined $(SAN_BINS) tools
+	@nm ods2 | grep -q '__ubsan' || { echo "the UBSan-only build did not happen"; exit 1; }
+	@rc=0; $(MAKE) --no-print-directory sancheck-run SANWHAT="undefined" SAN_ENV_ASAN="" SAN_ENV_UBSAN="print_stacktrace=1:log_path=$(CURDIR)/$(BUILD)/sanlog" || rc=1; \
+	$(MAKE) --no-print-directory -B $(SAN_BINS) tools > /dev/null; nm ods2 | grep -q '__asan_init' || { echo "the normal build was not restored"; exit 1; }; \
+	if [ $$rc != 0 ]; then exit 1; fi
+	@echo "sancheck: all cli tests clean under the sanitizers (both passes)"
+
+sancheck-run:
+	@rm -f $(BUILD)/sanlog.*; export ASAN_OPTIONS="$(SAN_ENV_ASAN)" UBSAN_OPTIONS="$(SAN_ENV_UBSAN)"; failed=0; \
 	for u in $(TESTS); do ODS2_NOLOCK=1 $$u > $(BUILD)/sancheck.log 2>&1 || { echo "sancheck: FAIL $$u (it makes the images the cli tests use)"; failed=1; }; done; \
-	for t in tests/cli_longargs_check.sh tests/cli_*_check.sh; do \
+	for t in $(SAN_TESTS); do \
 	    if sh $$t > $(BUILD)/sancheck.log 2>&1; then echo "sancheck: PASS $$t"; else echo "sancheck: FAIL $$t"; tail -5 $(BUILD)/sancheck.log; failed=1; fi; \
-	    if grep -q 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; then echo "sancheck: SANITIZER REPORT in $$t"; grep -m3 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; failed=1; fi; \
+	    if grep -q 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; then echo "sancheck: SANITIZER TEXT in $$t"; grep -m3 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; failed=1; fi; \
+	    if ls $(BUILD)/sanlog.* > /dev/null 2>&1; then echo "sancheck: SANITIZER REPORT FILE after $$t (a call whose output the test discards):"; head -12 $(BUILD)/sanlog.* | cut -c1-200; rm -f $(BUILD)/sanlog.*; failed=1; fi; \
 	done; \
-	if [ $$failed = 0 ]; then echo "sancheck: all cli tests clean under the sanitizers"; else exit 1; fi
+	if [ $$failed = 0 ]; then echo "sancheck: pass clean ($(SANWHAT))"; else echo "sancheck: pass FAILED ($(SANWHAT))"; exit 1; fi
 
 # The same CLI with the fault-injection hook (ODS2_FAULT_AFTER_WRITES, see src/ods2_volume.c), for
 # tests/fault_inject.py only: the ods2 people run has no hook.
