@@ -241,11 +241,11 @@ sancheck: $(TESTS) $(SAN_BINS) $(BUILD)/ods2_make_loop tools
 	@echo "sancheck pass 1: ods2 is built with -fsanitize=address,undefined"
 	@$(MAKE) --no-print-directory sancheck-run SANWHAT="address,undefined" SAN_ENV_ASAN="log_path=$(CURDIR)/$(BUILD)/sanlog" SAN_ENV_UBSAN="halt_on_error=1:print_stacktrace=1"
 	@echo "sancheck pass 2: the tools built with -fsanitize=undefined alone (its runtime logs to files)"
-	@$(MAKE) --no-print-directory -B SANFLAGS=-fsanitize=undefined $(SAN_BINS) tools
-	@nm ods2 | grep -q '__ubsan' || { echo "the UBSan-only build did not happen"; exit 1; }
-	@rc=0; $(MAKE) --no-print-directory sancheck-run SANWHAT="undefined" SAN_ENV_ASAN="" SAN_ENV_UBSAN="print_stacktrace=1:log_path=$(CURDIR)/$(BUILD)/sanlog" || rc=1; \
-	$(MAKE) --no-print-directory -B $(SAN_BINS) tools > /dev/null; nm ods2 | grep -q '__asan_init' || { echo "the normal build was not restored"; exit 1; }; \
-	if [ $$rc != 0 ]; then exit 1; fi
+	@trap '$(MAKE) --no-print-directory -B $(SAN_BINS) tools > /dev/null 2>&1' EXIT INT TERM HUP; \
+	$(MAKE) --no-print-directory -B SANFLAGS=-fsanitize=undefined $(SAN_BINS) tools || exit 1; \
+	nm ods2 | grep -q '__ubsan' || { echo "the UBSan-only build did not happen"; exit 1; }; \
+	rc=0; $(MAKE) --no-print-directory sancheck-run SANWHAT="undefined" SAN_ENV_ASAN="" SAN_ENV_UBSAN="print_stacktrace=1:log_path=$(CURDIR)/$(BUILD)/sanlog" || rc=1; exit $$rc
+	@nm ods2 | grep -q '__asan_init' || { echo "the normal build was not restored"; exit 1; }
 	@echo "sancheck: all cli tests clean under the sanitizers (both passes)"
 
 sancheck-run:
@@ -269,6 +269,7 @@ ods2_deep_make: tests/ods2_deep_make.c $(VOLUME_SRCS) include/ods2_volume.h
 	$(CC) $(CFLAGS) -DODS2_FAULT_INJECTION $(SANFLAGS) tests/ods2_deep_make.c $(VOLUME_SRCS) -o $@
 
 test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_fault ods2_deep_make
+	@nm ods2 | grep -q '__asan_init' || { echo "ods2 is not built with the AddressSanitizer: a make sancheck that was stopped leaves the UBSan-only tools. Rebuild them: rm -f ods2 ods2_init ods2_fault ods2_put ods2_dump_header ods2_deep_make && make tools"; exit 1; }
 	@echo "--- ods2_ondisk_selftest ---"
 	@$(BUILD)/ods2_ondisk_selftest
 	@echo "--- ods2_checksum_selftest ---"

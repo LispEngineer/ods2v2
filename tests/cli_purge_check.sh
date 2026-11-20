@@ -167,6 +167,20 @@ for level in 2 5; do
             "$(echo "$o" | tr '\n' '|')$(vers "$img" "[$d]X.TXT;*")|$(vers "$img" "[$d]Y.TXT;*")"
     done
 
+    # --- P13: a name held in two records with another name between them (review 50 F1): every group of the name is refused, once, and no file is lost; other names go on ---
+    d=R7
+    $ODS2 "$img" "CREATE/DIRECTORY [$d]" >/dev/null 2>&1; mk "$img" $d A.TXT 2; mk "$img" $d B.TXT 1; mk "$img" $d C.TXT 3; mk "$img" $d D.TXT 3
+    dn=$($ODS2 "$img" "DIR/FULL [000000]$d.DIR" 2>&1 | sed -n 's/.*File ID: *(\([0-9]*\),.*/\1/p' | head -1)
+    python3 -I tests/swap_versions.py "$img" "$dn" C.TXT rename A.TXT >/dev/null 2>&1
+    before=$(vers "$img" "[$d]*.TXT;*")
+    o=$($ODS2 "$img" "PURGE/LOG [$d]*.TXT" 2>&1)
+    check "ODS-$level P13: A.TXT in two records (B.TXT between): refused once with FILNOTPUR, nothing of it deleted; D.TXT is purged in the same command" "%PURGE-W-FILNOTPUR, error deleting [$d]A.TXT: the name is listed in more than one place in the directory (the directory entry is damaged): the name is not purged|%PURGE-I-FILPURG, [$d]D.TXT;2 deleted (2 blocks)|%PURGE-I-FILPURG, [$d]D.TXT;1 deleted (2 blocks)|%PURGE-I-TOTAL, 2 files deleted (4 blocks)|" \
+        "$(echo "$o" | tr '\n' '|')"
+    after=$(vers "$img" "[$d]*.TXT;*")
+    check "ODS-$level P13: the entries of A.TXT and B.TXT are as they were (no version of A, no file lost)" "$(echo "$before" | sed 's/ D.TXT;[0-9]*//g')" "$(echo "$after" | sed 's/ D.TXT;[0-9]*//g')"
+    o=$($ODS2 "$img" "PURGE/LOG [$d]A*.TXT" 2>&1)
+    check "ODS-$level P13: a wildcard that matches only A.TXT (the two records are then neighbours, one group with the numbers twice): refused too" "%PURGE-W-FILNOTPUR, error deleting [$d]A.TXT: two entries have the same version number (the directory entry is damaged): the name is not purged|%PURGE-I-NOFILPURG, no files purged|" "$(echo "$o" | tr '\n' '|')"
+
     # --- P12: /KEEP= values and qualifiers that do not fit are refused, never cut (review 49 N1) ---------------------------------------------------------------------
     $ODS2 "$img" "CREATE/DIRECTORY [R9]" >/dev/null 2>&1; mk "$img" R9 X.TXT 4
     z57=$(awk 'BEGIN { for (i = 0; i < 57; i++) printf "0" }')

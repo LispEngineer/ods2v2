@@ -3470,13 +3470,60 @@ static int purge_item_cmp(const void *a, const void *b)
     return va < vb ? 1 : va > vb ? -1 : 0;           /* highest version first */
 }
 
+/* The groups of purge items (one name's versions that follow each other) and the check that no name is in two of them (review 50 F1). */
+typedef struct { size_t start, end; bool dup, first; } purge_group_t;
+static const purge_item_t *g_purge_items;
+static const purge_group_t *g_purge_groups;
+
+static int purge_group_cmp(const void *a, const void *b)
+{
+    const purge_item_t *x = &g_purge_items[g_purge_groups[*(const size_t *) a].start], *y = &g_purge_items[g_purge_groups[*(const size_t *) b].start];
+    int c = strcmp(x->dir, y->dir);
+    if (c != 0) return c;
+    c = ods2_dir_name_compare(x->name, strlen(x->name), y->name, strlen(y->name));
+    if (c != 0) return c;
+    return *(const size_t *) a < *(const size_t *) b ? -1 : 1;      /* the same name: in the order the groups were found */
+}
+
+/* Fills `groups` (capacity x->count) and returns how many; marks a group `dup` when another group has the same directory and name, `first` for the first of them. */
+static size_t purge_find_groups(const purge_ctx_t *x, purge_group_t *groups)
+{
+    size_t i = 0, n = 0, a;
+    size_t *order;
+    while (i < x->count) {
+        size_t j = i;
+        while (j < x->count && strcmp(x->items[j].dir, x->items[i].dir) == 0 && same_name(x->items[j].name, x->items[i].name)) j++;
+        groups[n].start = i;
+        groups[n].end = j;
+        groups[n].dup = groups[n].first = false;
+        n++;
+        i = j;
+    }
+    order = malloc((n > 0 ? n : 1) * sizeof(*order));
+    if (order == NULL) return n;
+    for (a = 0; a < n; a++) order[a] = a;
+    g_purge_items = x->items;
+    g_purge_groups = groups;
+    qsort(order, n, sizeof(*order), purge_group_cmp);
+    for (a = 1; a < n; a++) {
+        const purge_item_t *p = &x->items[groups[order[a - 1]].start], *q = &x->items[groups[order[a]].start];
+        if (strcmp(p->dir, q->dir) == 0 && ods2_dir_name_compare(p->name, strlen(p->name), q->name, strlen(q->name)) == 0) {
+            if (!groups[order[a - 1]].dup) groups[order[a - 1]].first = true;       /* the first group of the name in the order found (the sort kept that order) */
+            groups[order[a - 1]].dup = groups[order[a]].dup = true;
+        }
+    }
+    free(order);
+    return n;
+}
+
 static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep, bool log)
 {
     purge_ctx_t x;
     ods2_parsed_path_t wp;
     bool start_ok;
     int werrs;
-    size_t i = 0;
+    size_t i = 0, gi, ngroups;
+    purge_group_t *groups;
     unsigned deleted = 0;
     uint64_t blocks = 0;
     char echo[ODS2_PATH_MAX + 32];
@@ -3498,9 +3545,24 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
         free(x.items);
         return;
     }
-    while (i < x.count) {
-        size_t j = i, k;
-        while (j < x.count && strcmp(x.items[j].dir, x.items[i].dir) == 0 && same_name(x.items[j].name, x.items[i].name)) j++;
+    groups = malloc((x.count > 0 ? x.count : 1) * sizeof(*groups));
+    if (groups == NULL) { report_error("%%ODS2-E-NOMEM, out of memory\n"); free(x.items); return; }
+    ngroups = purge_find_groups(&x, groups);
+    for (gi = 0; gi < ngroups; gi++) {
+        size_t j = groups[gi].end, k;
+        i = groups[gi].start;
+        if (groups[gi].dup) {
+            /* Review 50 F1: grouping is by neighbours, and a name that a damaged directory holds in two records with another name between them is two groups: each
+               is healthy by itself, and the second one's deletes by number reach the version the first one kept (and an entry taken for an alias leaves a file in no
+               directory). Every group of such a name is refused, once; the other names go on. */
+            if (groups[gi].first) {
+                char nm[ODS2_PATH_MAX], what[ODS2_PATH_MAX * 2 + 8];
+                display_name(x.items[i].name, nm, sizeof(nm));
+                spec_dir_text(x.items[i].dir, what, sizeof(what));
+                report_error("%%PURGE-W-FILNOTPUR, error deleting %s%s: the name is listed in more than one place in the directory (the directory entry is damaged): the name is not purged\n", what, nm);
+            }
+            continue;
+        }
         /* [i, j) are the versions of one name. They are kept by version number, never by the order the directory stores them in (review 48 F3: a
            directory damaged or written by another tool can hold them out of order, and "the first `keep` stay" would then delete the newest data):
            sorted here, highest first, the first `keep` stay. Sorting and not refusing the name: the deletes name each version, so they are right
@@ -3522,7 +3584,6 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
                 display_name(x.items[i].name, nm, sizeof(nm));
                 spec_dir_text(x.items[i].dir, what, sizeof(what));
                 report_error("%%PURGE-W-FILNOTPUR, error deleting %s%s: %s (the directory entry is damaged): the name is not purged\n", what, nm, why);
-                i = j;
                 continue;
             }
         }
@@ -3554,8 +3615,8 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
                 if (log) printf("%%PURGE-I-FILPURG, %s deleted (%llu block%s)\n", what, (unsigned long long) it->blocks, it->blocks == 1 ? "" : "s");
             }
         }
-        i = j;
     }
+    free(groups);
     if (deleted == 0) printf("%%PURGE-I-NOFILPURG, no files purged\n");
     else if (log && deleted > 1) printf("%%PURGE-I-TOTAL, %u files deleted (%llu blocks)\n", deleted, (unsigned long long) blocks);
     free(x.items);

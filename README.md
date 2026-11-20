@@ -739,6 +739,7 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
 - A version of a name whose record is full (58 versions of a 34-character name) starts a new record, as VMS does; an explicit version that belongs inside a full record
   is refused. The version limit of an explicit version below all the kept ones is refused (VMS's behaviour there is not measured).
 - `TYPE` takes wildcards in the name and comma lists, not in the directory part (`TYPE [T...]*.TXT` works on VMS and is refused here: `%ODS2-E-WILDDIR`); `DELETE` takes wildcards in the file name, in one directory (since this branch's port of upstream's #24; see the command table), wildcards in the directory part are refused; `PURGE` and `SET FILE/PROTECTION` take both (`DIR` too).
+- **H1 (open, review 50):** on a directory record that stores a name's versions out of order (;1 ;2 ;3: written by another tool or damaged; ods2v2 and VMS never write it), `DELETE`, `SET FILE` and `TYPE` without a version act on the entry stored first, not on the highest number (the same on ods5 d4bf75f; `PURGE` sorts by number and refuses a name whose numbers are unusable). Behaviour left alone, a follow-up.
 - INDEXF.SYS is extended as new files need it, anywhere on a volume of any size (Format 1 retrieval pointers
   below LBN 4,194,304, Format 2 above it): by 256 blocks at a time while it is under 4,096 blocks, then by half
   its size, at most 16,384 blocks (one Format 2 pointer). New blocks that follow the last piece lengthen its

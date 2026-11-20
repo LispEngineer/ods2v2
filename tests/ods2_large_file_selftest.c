@@ -299,7 +299,7 @@ int main(void)
            and gives everything back. */
         {
             failing_source_t fs;
-            ods2_content_source_t src;
+            ods2_content_source_t src = { 0 };           /* every field set: partial_fix_ok was left unset (review 50) */
             ods2_record_attrs_t attrs;
             fs.delivered = 0;
             fs.fail_after = 3u * ODS2_STREAM_CHUNK;
