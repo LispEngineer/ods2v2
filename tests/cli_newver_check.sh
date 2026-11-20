@@ -153,11 +153,11 @@ for level in 2 5; do
     check "ODS-$level ... with no limit the COPY deletes nothing (;8)" "8 7 6 5 4 3" "$(vers "$img" '[R]M.TXT;*')"
 
     # --- 49.9: the owner and protection of a new version are the highest version's (the header of ;1 is given an owner and a protection that
-    # no default of ods2v2 has; ods2 itself has no SET FILE/PROTECTION) -----------------------------------------------------------------------------------
+    # no default of ods2v2 has, set with SET FILE/PROTECTION and /OWNER_UIC) -----------------------------------------------------------------------------------
     $ODS2 "$img" "CREATE/DIRECTORY [P]" >/dev/null 2>&1
     $ODS2 "$img" "COPY $TMP/src.txt [P]A.TXT" >/dev/null 2>&1
-    numA=$(fid_of "$img" '[P]A.TXT;1'); numA=${numA%%,*}
-    python3 -I tests/newver_setprot.py "$img" "$numA" 1 1 0x0000 >/dev/null 2>&1           # [1,1]? member 1 group 1; protection word 0 = RWED for all
+    $ODS2 "$img" "SET FILE/PROTECTION=(S:RWED,O:RWED,G:RWED,W:RWED) [P]A.TXT;1" >/dev/null 2>&1      # a protection no default of ods2v2 is
+    $ODS2 "$img" "SET FILE/OWNER_UIC=[1,1] [P]A.TXT;1" >/dev/null 2>&1                                # an owner no default of ods2v2 is
     $ODS2 "$img" "COPY $TMP/src2.txt [P]A.TXT" >/dev/null 2>&1
     $ODS2 "$img" "COPY $TMP/src.txt [P]A.TXT;5" >/dev/null 2>&1
     $ODS2 "$img" "COPY $TMP/src.txt [P]B.TXT" >/dev/null 2>&1
@@ -165,8 +165,8 @@ for level in 2 5; do
     pb=$($ODS2 "$img" 'DIR/FULL [P]B.TXT;1' 2>&1 | awk '/Owner:/ {o=$2} /Protection:/ {p=$2 $3 $4 $5; print o "|" p}')
     check "ODS-$level 49.9: ;2 and ;5 of a name take ;1's owner and protection (a new NAME gets the defaults)" "[1,1]|(S:RWED,O:RWED,G:RWED,W:RWED) [1,1]|(S:RWED,O:RWED,G:RWED,W:RWED) [1,1]|(S:RWED,O:RWED,G:RWED,W:RWED)  [1,4]|(S:RWED,O:RWED,G:RE,W:)" \
         "$(echo "$pa" | sed 's/ *$//')  $pb"
-    numA2=$(fid_of "$img" '[P]A.TXT;5'); numA2=${numA2%%,*}
-    python3 -I tests/newver_setprot.py "$img" "$numA2" 1 7 0xffff >/dev/null 2>&1          # the highest version: no access for anybody
+    $ODS2 "$img" "SET FILE/PROTECTION=(S,O,G,W) [P]A.TXT;5" >/dev/null 2>&1                  # the highest version: no access for anybody
+    $ODS2 "$img" "SET FILE/OWNER_UIC=[1,7] [P]A.TXT;5" >/dev/null 2>&1
     $ODS2 "$img" "COPY $TMP/src.txt [P]A.TXT" >/dev/null 2>&1
     pa6=$($ODS2 "$img" 'DIR/FULL [P]A.TXT;6' 2>&1 | awk '/Owner:/ {o=$2} /Protection:/ {p=$2 $3 $4 $5; print o "|" p}')
     check "ODS-$level 49.9: a COPY onto a highest version that nothing can write is NOT refused (privileged), and takes its owner and protection" "[1,7]|(S:,O:,G:,W:)" "$pa6"

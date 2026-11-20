@@ -314,6 +314,14 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_newver_check.sh
 	@echo "--- cli_newver_vms_check (against the directories VMS wrote) ---"
 	@sh tests/cli_newver_vms_check.sh
+	@echo "--- cli_purge_check (PURGE) ---"
+	@sh tests/cli_purge_check.sh
+	@echo "--- cli_typewild_check (TYPE with wildcards and lists) ---"
+	@sh tests/cli_typewild_check.sh
+	@echo "--- cli_setfile_check (SET FILE/PROTECTION and /OWNER_UIC) ---"
+	@sh tests/cli_setfile_check.sh
+	@echo "--- cli_wo_vms_check (TYPE, PURGE, SET FILE against what VMS did) ---"
+	@sh tests/cli_wo_vms_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
 	@echo "--- CLI directory loop checks ---"

@@ -576,6 +576,14 @@ ods2_result_t ods2_set_entry_version_limit(ods2_volume_t *vol, unsigned dir_file
  * changes; *changed is 1 if it did, 0 if it needed nothing (another format, MRS 0 and LRL enough). */
 ods2_result_t ods2_set_stream_record_sizes(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed);
 
+/* SET FILE/PROTECTION and /OWNER_UIC for the file `fid` (CORPUS 49.4): `what` is ODS2_SETSEC_PROT and/or ODS2_SETSEC_OWNER. `prot` is the whole FH2$W_FILEPROT
+ * word (a set bit denies: R 1, W 2, E 4, D 8 for system in bits 0-3, owner 4-7, group 8-11, world 12-15); the owner is [group,member] (numbers, not names).
+ * The primary header is rewritten in one block; the revision number goes up by 1 on every success, the revision date (level 2 header) or the attribute
+ * change date (level 5 header) is the time of the change; the checksum is made again. Refused: the owner of a reserved file. */
+#define ODS2_SETSEC_PROT  1u
+#define ODS2_SETSEC_OWNER 2u
+ods2_result_t ods2_set_file_security(ods2_volume_t *vol, ods2_fid_t fid, unsigned what, uint16_t prot, uint16_t group, uint16_t member);
+
 /* Inserts (name, version, fid) into the directory whose header is at
  * `dir_file_number`, trying each of its existing content blocks
  * first; if none have room, allocates a new block, extends the

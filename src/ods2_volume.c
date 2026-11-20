@@ -4594,6 +4594,68 @@ static ods2_result_t set_stream_record_sizes_impl(ods2_volume_t *vol, ods2_fid_t
     return r;
 }
 
+/* SET FILE/PROTECTION and /OWNER_UIC (PLAN_WRITE_OPS item 4; CORPUS 49.4, 49.7, 49.8 on VAX V7.3 and V8.4 ODS-2 and ODS-5): only the primary header
+   is changed, in one block write. FH2$W_FILEPROT and FH2$L_FILEOWNER (member, group) are the named fields only. Every successful change adds 1 to the
+   revision number, even when the value is the one the file had; the date that moves is the revision date in a level 2 header (also the reserved files'
+   on an ODS-5 volume) and the attribute change date in a level 5 header (its revision date, the data modification date, stays); the access date
+   is not touched. The header's checksum is made again. The reserved files take a protection change (measured: INDEXF.SYS, BITMAP.SYS and the master
+   directory accepted it, the revision number going up by 1); an owner change on one is refused (measured only for INDEXF.SYS, where VMS refuses it
+   because the file is open). */
+static ods2_result_t set_file_security_impl(ods2_volume_t *vol, ods2_fid_t fid, unsigned what, uint16_t prot, uint16_t group, uint16_t member)
+{
+    uint8_t h[512];
+    ods2_head_core_t *core = (ods2_head_core_t *) h;
+    uint8_t *ident;
+    uint16_t sum, revision;
+    unsigned number = ods2_fid_number(fid);
+    ods2_result_t r;
+
+    if (!vol->writable) return not_writable(vol);
+    r = ods2_check_fid(fid);
+    if (!r.ok) return r;
+    r = ods2_read_header_fid(vol, fid, h);
+    if (!r.ok) return r;
+    r = header_ok_for_write(h, number);
+    if (!r.ok) return r;
+    if (!ods2_header_is_file(h, fid)) return fail("the entry's file no longer exists (a dangling entry): nothing is changed");
+    if ((what & ODS2_SETSEC_OWNER) && number >= 1 && number <= 10 && fid.fid_nmx == 0) {
+        return fail("the owner of a reserved file (INDEXF.SYS, BITMAP.SYS, ... SECURITY.SYS) is not changed: not measured on VMS except for "
+                    "INDEXF.SYS, where it is refused (the file is open)");
+    }
+    if (what & ODS2_SETSEC_PROT) core->fileprot = prot;
+    if (what & ODS2_SETSEC_OWNER) {
+        core->fileowner_uic[0] = member;
+        core->fileowner_uic[1] = group;
+    }
+    ident = h + (size_t) core->idoffset * 2;
+    if ((core->struclev >> 8) == ODS5_LEVEL_5) {
+        revision = (uint16_t) (ident[ODS5_FI5_REVISION] | (ident[ODS5_FI5_REVISION + 1] << 8));
+        revision = (uint16_t) (revision + 1u);
+        ident[ODS5_FI5_REVISION] = (uint8_t) (revision & 0xff);
+        ident[ODS5_FI5_REVISION + 1] = (uint8_t) (revision >> 8);
+        ods2_store_vms_time(ident + ODS5_FI5_ATTDATE, ods2_vms_time_now());
+    } else {
+        revision = (uint16_t) (ident[20] | (ident[21] << 8));
+        revision = (uint16_t) (revision + 1u);
+        ident[20] = (uint8_t) (revision & 0xff);
+        ident[21] = (uint8_t) (revision >> 8);
+        ods2_store_vms_time(ident + 30, ods2_vms_time_now());
+    }
+    sum = ods2_checksum(h, 255);
+    h[510] = (uint8_t) (sum & 0xff);
+    h[511] = (uint8_t) (sum >> 8);
+    if (number == 1 && fid.fid_nmx == 0) return write_indexf_header(vol, h);
+    return ods2_write_header(vol, number, h);
+}
+
+ods2_result_t ods2_set_file_security(ods2_volume_t *vol, ods2_fid_t fid, unsigned what, uint16_t prot, uint16_t group, uint16_t member)
+{
+    ods2_result_t r;
+    TXN_BEGIN_OR_RETURN(vol);
+    r = set_file_security_impl(vol, fid, what, prot, group, member);
+    return txn_end(vol, r);
+}
+
 ods2_result_t ods2_set_stream_record_sizes(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed)
 {
     ods2_result_t r;

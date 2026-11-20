@@ -178,6 +178,7 @@ static bool g_command_failed = false;
 static void report_error(const char *fmt, ...)
 {
     va_list ap;
+    fflush(stdout);              /* what came before comes first when both go to one pipe */
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -3035,9 +3036,44 @@ static bool stdout_sink(void *ctx, const uint8_t *data, size_t n)
     return fwrite(data, 1, n, stdout) == n;
 }
 
+/* The records of one file to stdout (streamed a chunk at a time). `spec` names it in messages. */
+static void type_one_file(ods2_volume_t *vol, ods2_fid_t file_fid, const char *spec, bool raw, bool lines)
+{
+    uint8_t file_header[512];
+    ods2_result_t r;
+
+    r = ods2_read_header_fid(vol, file_fid, file_header);
+    if (!r.ok) {
+        report_error("%%ODS2-E-READERR, %s\n", r.problem);
+        return;
+    }
+    if (!ods2_header_is_file(file_header, file_fid)) {
+        report_error("%%ODS2-E-FNF, %s not found (a dangling entry: its file is gone)\n", spec);
+        return;
+    }
+    /* Streamed a chunk at a time, so any size of file can be typed
+       without holding it in memory (issue #16). A short write (a full
+       disk, a closed pipe) is a failed TYPE: whatever was extracting
+       the file got less than all of it. */
+    {
+        bool sink_failed = false;
+        uint64_t bytes = 0;
+        const char *note = NULL;
+        r = read_file_content(vol, file_header, !raw, lines ? ODS2_REC_LINES : 0, stdout_sink, NULL, &bytes, &sink_failed, &note);
+        if (r.ok && fflush(stdout) != 0) sink_failed = true;
+        if (note != NULL && r.ok && !sink_failed) fprintf(stderr, "%%ODS2-W-RECORDS, %s: %s\n", spec, note);
+        if (sink_failed) {
+            report_error("%%ODS2-E-WRITEERR, %s: could not write all %llu bytes to output\n",
+                         spec, (unsigned long long) ods2_file_content_length(file_header));
+        } else if (!r.ok) {
+            report_error("%%ODS2-E-READERR, %s: %s\n", spec, r.problem);
+        }
+    }
+}
+
 static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw, bool lines)
 {
-    uint8_t dir_header[512], file_header[512];
+    uint8_t dir_header[512];
     ods2_fid_t dir_fid, file_fid;
     ods2_result_t r;
     char spec[ODS2_PATH_MAX + 16];
@@ -3074,33 +3110,7 @@ static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw, 
         report_error("%%ODS2-E-FNF, %s not found\n", spec);
         return;
     }
-    r = ods2_read_header_fid(vol, file_fid, file_header);
-    if (!r.ok) {
-        report_error("%%ODS2-E-READERR, %s\n", r.problem);
-        return;
-    }
-    if (!ods2_header_is_file(file_header, file_fid)) {
-        report_error("%%ODS2-E-FNF, %s not found (a dangling entry: its file is gone)\n", spec);
-        return;
-    }
-    /* Streamed a chunk at a time, so any size of file can be typed
-       without holding it in memory (issue #16). A short write (a full
-       disk, a closed pipe) is a failed TYPE: whatever was extracting
-       the file got less than all of it. */
-    {
-        bool sink_failed = false;
-        uint64_t bytes = 0;
-        const char *note = NULL;
-        r = read_file_content(vol, file_header, !raw, lines ? ODS2_REC_LINES : 0, stdout_sink, NULL, &bytes, &sink_failed, &note);
-        if (r.ok && fflush(stdout) != 0) sink_failed = true;
-        if (note != NULL && r.ok && !sink_failed) fprintf(stderr, "%%ODS2-W-RECORDS, %s: %s\n", spec, note);
-        if (sink_failed) {
-            report_error("%%ODS2-E-WRITEERR, %s: could not write all %llu bytes to output\n",
-                         spec, (unsigned long long) ods2_file_content_length(file_header));
-        } else if (!r.ok) {
-            report_error("%%ODS2-E-READERR, %s: %s\n", spec, r.problem);
-        }
-    }
+    type_one_file(vol, file_fid, spec, raw, lines);
 }
 
 /* The message for one entry DELETE removed: deleted, or only the entry removed (an alias, or one whose file is
@@ -3309,6 +3319,535 @@ static void cmd_delete(ods2_volume_t *vol, const ods2_parsed_path_t *p)
     }
 }
 
+/* ---- shared by PURGE, TYPE with wildcards and SET FILE/PROTECTION, /OWNER_UIC (PLAN_WRITE_OPS items 2 to 4; CORPUS 49.2 to 49.4, 49.7 to 49.9) ---- */
+
+/* "[T]" for the directory spelling the walk gives ("" is the master directory). */
+static void spec_dir_text(const char *dir_spelling, char *out, size_t cap)
+{
+    snprintf(out, cap, "[%s%s]", dir_spelling[0] == '\0' ? "000000" : "", dir_spelling);
+}
+
+/* "[T]A1.TXT;3": what VMS prints with its device in front. */
+static void spec_entry_text(const char *dir_spelling, const char *literal_name, unsigned version, char *out, size_t cap)
+{
+    char d[ODS2_PATH_MAX + 4], n[ODS2_PATH_MAX];
+    size_t l;
+    spec_dir_text(dir_spelling, d, sizeof(d));
+    display_name(literal_name, n, sizeof(n));
+    l = (size_t) snprintf(out, cap, "%s", d);
+    if (l < cap) snprintf(out + l, cap - l, "%s;%u", n, version);
+}
+
+/* The parsed path as the walk wants it: no version means the highest of each name (as TYPE, SET FILE and DELETE read it), `all_versions` every version. */
+static void walk_path_for(const ods2_parsed_path_t *p, bool all_versions, ods2_parsed_path_t *out)
+{
+    *out = *p;
+    if (all_versions) {
+        out->has_version = true;
+        out->version_wildcard = true;
+    } else if (!out->has_version) {
+        out->has_version = true;
+        out->version = 0;
+        out->version_wildcard = false;
+    }
+}
+
+/* Runs the walk of DIR over the files `p` names, calling `hook` for each entry (directory order, a name's versions highest first). Returns the
+   number of walk errors; *start_ok says whether the starting directory was found. */
+static int walk_matches(ods2_volume_t *vol, const ods2_parsed_path_t *p, entry_hook_fn hook, void *ctx, bool *start_ok)
+{
+    entry_hook_fn saved_hook = g_entry_hook;
+    void *saved_ctx = g_entry_hook_ctx;
+    bool saved_paths = g_paths_mode;
+    char effective[ODS2_PATH_MAX], spec[ODS2_PATH_MAX + 4], start[ODS2_PATH_MAX], pattern[ODS2_PATH_MAX + 4];
+    const char *rest;
+    dir_walk_t w;
+    bool ok;
+
+    *start_ok = false;
+    resolve_effective_path(p, effective, sizeof(effective));
+    snprintf(spec, sizeof(spec), "%s%s", effective, p->recursive ? "..." : "");
+    rest = ods2_dir_spec_split_prefix(spec, start, sizeof(start));
+    if (rest == NULL) {
+        report_error("%%ODS2-E-BADPATH, [%s]: invalid directory specification\n", spec);
+        return 1;
+    }
+    canonical_dir_path(vol, start, sizeof(start));
+    {
+        uint8_t sh[512];
+        ods2_fid_t sf;
+        if (!resolve_dir(vol, start, sh, &sf).ok) return 0;      /* no such directory: the caller says so in VMS's words */
+    }
+    if (p->filename[0] == '\0') snprintf(pattern, sizeof(pattern), "*.*");
+    else if (ods5_find_unescaped(p->filename, '.') == NULL) snprintf(pattern, sizeof(pattern), "%s.*", p->filename);
+    else snprintf(pattern, sizeof(pattern), "%s", p->filename);
+    memset(&w, 0, sizeof(w));
+    w.vol = vol;
+    w.spec = rest;
+    w.pattern = pattern;
+    w.p = p;
+    g_entry_hook = hook;
+    g_entry_hook_ctx = ctx;
+    g_paths_mode = false;
+    ok = walk_from(&w, start);
+    g_entry_hook = saved_hook;
+    g_entry_hook_ctx = saved_ctx;
+    g_paths_mode = saved_paths;
+    *start_ok = ok;
+    return w.errors;
+}
+
+/* The three-line message VMS gives when a search finds nothing; `dir_missing` for a directory that does not exist. */
+static void search_failed(const char *command, const char *spec, bool dir_missing)
+{
+    report_error("%%%s-W-SEARCHFAIL, error searching for %s\n", command, spec);
+    if (dir_missing) {
+        report_error("-RMS-E-DNF, directory not found\n-SYSTEM-W-NOSUCHFILE, no such file\n");
+    } else {
+        report_error("-RMS-E-FNF, file not found\n");
+    }
+}
+
+/* The text of a parsed path as VMS echoes it in SEARCHFAIL: the directory, the name, and the version (";" when none was typed). */
+static void echo_spec(const ods2_parsed_path_t *p, char *out, size_t cap)
+{
+    char eff[ODS2_PATH_MAX];
+    resolve_effective_path(p, eff, sizeof(eff));
+    snprintf(out, cap, "[%s%s]%s;", eff[0] == '\0' ? "000000" : "", eff, p->filename);
+    if (p->has_version && p->version_wildcard) {
+        size_t n = strlen(out);
+        snprintf(out + n, cap - n, "*");
+    } else if (p->has_version && p->version != 0) {
+        size_t n = strlen(out);
+        snprintf(out + n, cap - n, "%d", p->version);
+    }
+}
+
+/* ---- PURGE [/KEEP=n] [/LOG] [spec] ----
+   CORPUS 49.2: the default keep is 1 and /KEEP=0 is %PURGE-F-BADVALUE; the lowest versions go and the highest `keep` stay, in name order, each name's
+   deleted versions highest first; /LOG prints one %PURGE-I-FILPURG line per version ("[dir]NAME;v deleted (n blocks)") and, when more than one went,
+   %PURGE-I-TOTAL; nothing purged prints %PURGE-I-NOFILPURG; a name that does not exist is SEARCHFAIL plus NOFILPURG; on a read-only volume each version
+   to delete is %PURGE-W-FILNOTPUR with -RMS-E-MKD and -SYSTEM-F-WRITLCK. Deletes go through the DELETE path (aliases and hard links are reported as DELETE
+   reports them). ods2v2 acts as a privileged process, so a version whose protection forbids its owner to delete is purged too (VMS refuses it with
+   -SYSTEM-F-NOPRIV to an unprivileged process that is not the volume owner: CORPUS 49.7). */
+typedef struct {
+    char dir[ODS2_PATH_MAX];
+    char name[ODS2_DIR_MAX_NAME + 1];
+    unsigned version;
+    uint64_t blocks;
+} purge_item_t;
+typedef struct {
+    purge_item_t *items;
+    size_t count, cap;
+    int errors;
+} purge_ctx_t;
+
+static void purge_collect(void *ctx_, ods2_volume_t *vol, const char *dir_spelling, const ods2_dir_entry_t *e)
+{
+    purge_ctx_t *x = (purge_ctx_t *) ctx_;
+    uint8_t h[512];
+    purge_item_t *it;
+
+    if (ods2_fid_number(e->fid) <= 10 && ods2_fid_number(e->fid) != 0 && e->fid.fid_nmx == 0) return;     /* the reserved files are never purged */
+    if (x->count == x->cap) {
+        size_t nc = x->cap ? x->cap * 2 : 64;
+        purge_item_t *ni = realloc(x->items, nc * sizeof(*ni));
+        if (ni == NULL) { report_error("%%ODS2-E-NOMEM, out of memory\n"); x->errors++; return; }
+        x->items = ni;
+        x->cap = nc;
+    }
+    it = &x->items[x->count++];
+    snprintf(it->dir, sizeof(it->dir), "%s", dir_spelling);
+    snprintf(it->name, sizeof(it->name), "%s", e->name);
+    it->version = e->version;
+    it->blocks = 0;
+    if (ods2_read_header_fid(vol, e->fid, h).ok && ods2_header_is_file(h, e->fid)) it->blocks = (ods2_file_allocated_bytes(h) + 511) / 512;
+}
+
+static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep, bool log)
+{
+    purge_ctx_t x;
+    ods2_parsed_path_t wp;
+    bool start_ok;
+    int werrs;
+    size_t i = 0;
+    unsigned deleted = 0;
+    uint64_t blocks = 0;
+    char echo[ODS2_PATH_MAX + 32];
+
+    memset(&x, 0, sizeof(x));
+    walk_path_for(p, true, &wp);
+    werrs = walk_matches(vol, &wp, purge_collect, &x, &start_ok);
+    if (!start_ok) {
+        echo_spec(&wp, echo, sizeof(echo));
+        search_failed("PURGE", echo, true);
+        printf("%%PURGE-I-NOFILPURG, no files purged\n");
+        free(x.items);
+        return;
+    }
+    if (x.count == 0 && werrs == 0) {
+        echo_spec(&wp, echo, sizeof(echo));
+        search_failed("PURGE", echo, false);
+        printf("%%PURGE-I-NOFILPURG, no files purged\n");
+        free(x.items);
+        return;
+    }
+    while (i < x.count) {
+        size_t j = i, k;
+        while (j < x.count && strcmp(x.items[j].dir, x.items[i].dir) == 0 && same_name(x.items[j].name, x.items[i].name)) j++;
+        /* [i, j) are the versions of one name, highest first: the first `keep` stay */
+        for (k = i + (size_t) keep; k < j; k++) {
+            const purge_item_t *it = &x.items[k];
+            char what[ODS2_PATH_MAX * 2 + 16];
+            spec_entry_text(it->dir, it->name, it->version, what, sizeof(what));
+            if (!vol->writable) {
+                report_error("%%PURGE-W-FILNOTPUR, error deleting %s\n-RMS-E-MKD, ACP could not mark file for deletion\n-SYSTEM-F-WRITLCK, write lock error\n", what);
+                continue;
+            }
+            {
+                ods2_fid_t dfid;
+                ods2_delete_info_t info;
+                uint16_t done = 0;
+                ods2_result_t r = ods2_lookup_path(vol, it->dir, &dfid);
+                if (r.ok) r = ods2_check_fid(dfid);
+                if (r.ok) r = ods2_delete_version_info(vol, ods2_fid_number(dfid), it->name, (int) it->version, &done, &info);
+                if (!r.ok) {
+                    report_error("%%PURGE-W-FILNOTPUR, error deleting %s\n-ODS2-E-DELETEERR, %s\n", what, r.problem);
+                    continue;
+                }
+                deleted++;
+                blocks += it->blocks;
+                if (info.kept != 0) report_deletion(it->name, done, &info);
+                else if (log) printf("%%PURGE-I-FILPURG, %s deleted (%llu block%s)\n", what, (unsigned long long) it->blocks, it->blocks == 1 ? "" : "s");
+            }
+        }
+        i = j;
+    }
+    if (deleted == 0) printf("%%PURGE-I-NOFILPURG, no files purged\n");
+    else if (log && deleted > 1) printf("%%PURGE-I-TOTAL, %u files deleted (%llu blocks)\n", deleted, (unsigned long long) blocks);
+    free(x.items);
+}
+
+/* ---- TYPE with wildcards and comma lists (CORPUS 49.3) ----
+   For each file found by a wildcard, and for every file of a list but the first one named without a wildcard: a line with one space, a line with the full
+   name (here without the device VMS prints in front: "[T]A1.TXT;1"), a line with one space, then the records. With no wildcard and no list there is no
+   header (the old single-file TYPE). A wildcard without a version shows the highest version of each name in name order; ;* every version, highest first.
+   Nothing found: %TYPE-W-SEARCHFAIL, error searching for [T]*.NOSUCH; and -RMS-E-FNF (or -RMS-E-DNF and -SYSTEM-W-NOSUCHFILE for a missing directory);
+   the messages of a list come after what was typed. */
+typedef struct {
+    bool raw, lines, header;
+    unsigned found;
+} typewild_ctx_t;
+
+static void typewild_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spelling, const ods2_dir_entry_t *e)
+{
+    typewild_ctx_t *x = (typewild_ctx_t *) ctx_;
+    char what[ODS2_PATH_MAX * 2 + 16];
+    uint8_t h[512];
+
+    if (!ods2_read_header_fid(vol, e->fid, h).ok || !ods2_header_is_file(h, e->fid)) return;     /* a dangling alias: not a file to type */
+    spec_entry_text(dir_spelling, e->name, e->version, what, sizeof(what));
+    if (x->header) printf(" \n%s\n \n", what);
+    fflush(stdout);
+    x->found++;
+    type_one_file(vol, e->fid, what, x->raw, x->lines);
+}
+
+static bool spec_has_wildcard(const ods2_parsed_path_t *p)
+{
+    size_t i;
+    if (p->version_wildcard) return true;
+    for (i = 0; p->filename[i]; i++) {
+        if (p->filename[i] == '^') { if (p->filename[i + 1]) i++; continue; }
+        if (p->filename[i] == '*' || p->filename[i] == '%' || p->filename[i] == '?') return true;
+    }
+    return false;
+}
+
+/* Splits "[T]A1.TXT,A3.TXT" at the commas outside brackets; an element with no directory takes the previous element's. Returns the count (0 on error). */
+static int split_list(const char *arg, char elems[][ODS2_PATH_MAX + 16], int max)
+{
+    int n = 0, depth = 0;
+    const char *s = arg, *start = arg;
+    char prev_dir[ODS2_PATH_MAX] = "";
+    for (;; s++) {
+        if (*s == '[' || *s == '<') depth++;
+        else if (*s == ']' || *s == '>') { if (depth > 0) depth--; }
+        if ((*s == ',' && depth == 0) || *s == '\0') {
+            size_t len = (size_t) (s - start);
+            char one[ODS2_PATH_MAX + 16];
+            if (n >= max || len == 0 || len >= sizeof(one)) return 0;
+            memcpy(one, start, len);
+            one[len] = '\0';
+            if (strchr(one, '[') == NULL && strchr(one, '<') == NULL && strchr(one, ':') == NULL && prev_dir[0] != '\0') {
+                snprintf(elems[n], ODS2_PATH_MAX + 16, "%s%s", prev_dir, one);
+            } else {
+                snprintf(elems[n], ODS2_PATH_MAX + 16, "%s", one);
+                {
+                    const char *close = strchr(one, ']');
+                    if (close != NULL) { size_t dl = (size_t) (close - one) + 1; memcpy(prev_dir, one, dl); prev_dir[dl] = '\0'; }
+                }
+            }
+            n++;
+            start = s + 1;
+            if (*s == '\0') break;
+        }
+    }
+    return n;
+}
+
+/* TYPE of a wildcard or a list. Returns true when it handled the argument (false: a plain single file, the old TYPE). */
+static bool cmd_type_list(ods2_volume_t *vol, const char *arg, bool raw, bool lines)
+{
+    static char elems[64][ODS2_PATH_MAX + 16];
+    int n, i;
+    bool any_wild = false, listed;
+    ods2_parsed_path_t ps[64];
+    char missing[64][ODS2_PATH_MAX + 32];
+    bool dnf[64];
+    int nmissing = 0;
+
+    n = split_list(arg, elems, 64);
+    if (n == 0) return false;                   /* not a list we can read: the plain parser reports it */
+    for (i = 0; i < n; i++) {
+        if (!ods2_parse_path(elems[i], &ps[i])) { report_error("%%ODS2-E-BADPATH, could not parse %s\n", elems[i]); return true; }
+        if (refuse_wild_dir(&ps[i], "TYPE", elems[i])) return true;
+        if (spec_has_wildcard(&ps[i])) any_wild = true;
+    }
+    if (n == 1 && !any_wild) return false;
+    listed = n > 1;
+    for (i = 0; i < n; i++) {
+        bool wild = spec_has_wildcard(&ps[i]);
+        typewild_ctx_t x;
+        ods2_parsed_path_t wp;
+        bool start_ok;
+        int werrs;
+        memset(&x, 0, sizeof(x));
+        x.raw = raw;
+        x.lines = lines;
+        x.header = wild || (listed && i > 0);
+        if (ps[i].filename[0] == '\0') { report_error("%%ODS2-E-BADPATH, no filename given\n"); return true; }
+        walk_path_for(&ps[i], false, &wp);
+        werrs = walk_matches(vol, &wp, typewild_entry, &x, &start_ok);
+        if (!start_ok && nmissing < 64) {
+            echo_spec(&ps[i], missing[nmissing], sizeof(missing[nmissing]));
+            dnf[nmissing++] = true;
+        } else if (x.found == 0 && werrs == 0 && nmissing < 64) {
+            echo_spec(&ps[i], missing[nmissing], sizeof(missing[nmissing]));
+            dnf[nmissing++] = false;
+        }
+    }
+    for (i = 0; i < nmissing; i++) search_failed("TYPE", missing[i], dnf[i]);
+    return true;
+}
+
+/* ---- SET FILE/PROTECTION=(...) and SET FILE/OWNER_UIC=[g,m] (CORPUS 49.4, 49.7, 49.8) ---- */
+
+/* A protection specification: the fields named, each with its four denial bits. mask/value are the whole FH2$W_FILEPROT word's parts. */
+static bool parse_protection_spec(const char *text, uint16_t *mask, uint16_t *value, char *bad, size_t badcap)
+{
+    char buf[128];
+    char *tok, *save = NULL;
+    size_t n = strlen(text);
+    *mask = 0;
+    *value = 0;
+    if (n >= 2 && text[0] == '(' && text[n - 1] == ')') { memcpy(buf, text + 1, n - 2); buf[n - 2] = '\0'; }
+    else if (n < sizeof(buf)) snprintf(buf, sizeof(buf), "%s", text);
+    else { snprintf(bad, badcap, "%s", text); return false; }
+    if (buf[0] == '\0') { snprintf(bad, badcap, "%s", text); return false; }
+    for (tok = strtok_r(buf, ",", &save); tok != NULL; tok = strtok_r(NULL, ",", &save)) {
+        char *colon = strchr(tok, ':'), *letters;
+        char field[32];
+        int shift, k;
+        size_t fl = colon ? (size_t) (colon - tok) : strlen(tok);
+        uint16_t deny = 0xF;
+        if (fl == 0 || fl >= sizeof(field)) { snprintf(bad, badcap, "%s", tok); return false; }
+        memcpy(field, tok, fl);
+        field[fl] = '\0';
+        for (k = 0; field[k]; k++) field[k] = (char) toupper((unsigned char) field[k]);
+        if (strncmp("SYSTEM", field, fl) == 0) shift = 0;
+        else if (strncmp("OWNER", field, fl) == 0) shift = 4;
+        else if (strncmp("GROUP", field, fl) == 0) shift = 8;
+        else if (strncmp("WORLD", field, fl) == 0) shift = 12;
+        else { snprintf(bad, badcap, "%s", field); return false; }
+        if (colon != NULL) {
+            letters = colon + 1;
+            if (*letters == '\0') { snprintf(bad, badcap, "%s", "VALREQ"); return false; }
+            for (k = 0; letters[k]; k++) {
+                switch (toupper((unsigned char) letters[k])) {
+                case 'R': deny &= (uint16_t) ~1u; break;
+                case 'W': deny &= (uint16_t) ~2u; break;
+                case 'E': deny &= (uint16_t) ~4u; break;
+                case 'D': deny &= (uint16_t) ~8u; break;
+                default: snprintf(bad, badcap, "%s", letters); return false;
+                }
+            }
+        }
+        *mask = (uint16_t) (*mask | (0xFu << shift));
+        *value = (uint16_t) ((*value & ~(0xFu << shift)) | (deny << shift));      /* a repeated field takes the last */
+    }
+    return *mask != 0;
+}
+
+static void protection_word_text(uint16_t word, char *out, size_t cap)
+{
+    static const char *names[4] = { "S", "O", "G", "W" };
+    size_t n = 0;
+    int f, b;
+    out[0] = '\0';
+    for (f = 0; f < 4; f++) {
+        n += (size_t) snprintf(out + n, cap - n, "%s%s:", f ? "," : "", names[f]);
+        for (b = 0; b < 4; b++) {
+            if (!((word >> (f * 4)) & (1u << b)) && n + 2 < cap) { out[n++] = "RWED"[b]; out[n] = '\0'; }
+        }
+    }
+}
+
+/* [g,m] in octal (up to 11 digits each, as DCL prints a numeric UIC) or [SYSTEM]; names that need the rights database are refused. */
+static bool parse_uic_spec(const char *text, uint16_t *group, uint16_t *member, char *msg, size_t msgcap)
+{
+    size_t n = strlen(text);
+    char buf[64], *comma;
+    char *end;
+    unsigned long g, m;
+    if (n < 3 || n >= sizeof(buf) || text[0] != '[' || text[n - 1] != ']') { snprintf(msg, msgcap, "%%SET-E-SYNTAX, error parsing '%s'", text); return false; }
+    memcpy(buf, text + 1, n - 2);
+    buf[n - 2] = '\0';
+    comma = strchr(buf, ',');
+    if (comma == NULL) {
+        if (strcasecmp(buf, "SYSTEM") == 0) { *group = 1; *member = 4; return true; }
+        snprintf(msg, msgcap, "%%SET-E-SYNTAX, error parsing '[%s]'\n-ODS2-W-NORIGHTS, an identifier name needs the rights database, which ods2v2 does not have: give [group,member] in octal (or [SYSTEM])", buf);
+        return false;
+    }
+    *comma = '\0';
+    if (buf[0] == '\0' || comma[1] == '\0' || strspn(buf, "01234567") != strlen(buf) || strspn(comma + 1, "01234567") != strlen(comma + 1)) {
+        if (isalpha((unsigned char) buf[0]) || isalpha((unsigned char) comma[1])) {
+            snprintf(msg, msgcap, "%%SET-E-SYNTAX, error parsing '%s'\n-ODS2-W-NORIGHTS, an identifier name needs the rights database, which ods2v2 does not have: give [group,member] in octal (or [SYSTEM])",
+                     isalpha((unsigned char) buf[0]) ? buf : comma + 1);
+        } else {
+            snprintf(msg, msgcap, "%%SET-E-SYNTAX, error parsing '[%s,%s]'", buf, comma + 1);
+        }
+        return false;
+    }
+    g = strtoul(buf, &end, 8);
+    m = strtoul(comma + 1, &end, 8);
+    if (strlen(buf) > 11 || strlen(comma + 1) > 11 || g > 0xFFFFu || m > 0xFFFFu) { snprintf(msg, msgcap, "%%SET-E-SYNTAX, error parsing '[%s,%s]'", buf, comma + 1); return false; }
+    *group = (uint16_t) g;
+    *member = (uint16_t) m;
+    return true;
+}
+
+typedef struct {
+    unsigned what;
+    uint16_t mask, value, group, member;
+    bool log;
+    unsigned found;
+    int errors;
+} setsec_ctx_t;
+
+static void setsec_entry(void *ctx_, ods2_volume_t *vol, const char *dir_spelling, const ods2_dir_entry_t *e)
+{
+    setsec_ctx_t *x = (setsec_ctx_t *) ctx_;
+    char what[ODS2_PATH_MAX * 2 + 16];
+    uint8_t h[512];
+    uint16_t prot = 0;
+    ods2_result_t r;
+
+    x->found++;
+    spec_entry_text(dir_spelling, e->name, e->version, what, sizeof(what));
+    if (x->what & ODS2_SETSEC_PROT) {
+        r = ods2_read_header_fid(vol, e->fid, h);
+        if (!r.ok) { report_error("%%SET-E-READERR, error reading %s\n-ODS2-E-READERR, %s\n", what, r.problem); x->errors++; return; }
+        prot = (uint16_t) ((((const ods2_head_core_t *) h)->fileprot & ~x->mask) | x->value);
+    }
+    r = ods2_set_file_security(vol, e->fid, x->what, prot, x->group, x->member);
+    if (!r.ok) {
+        report_error("%%SET-E-NOTSET, error modifying %s\n-ODS2-E-SETERR, %s\n", what, r.problem);
+        x->errors++;
+        return;
+    }
+    if (x->log) {
+        if (x->what & ODS2_SETSEC_PROT) {
+            char t[64];
+            protection_word_text(prot, t, sizeof(t));
+            printf("%%SET-I-PROTECTED, %s file protection changed to %s\n", what, t);
+        } else {
+            printf("%%SET-I-MODIFIED, %s modified\n", what);
+        }
+    }
+}
+
+/* tokens[1] is "FILE/PROTECTION=(...)" or "FILE/OWNER_UIC=[g,m]", with /LOG anywhere among the qualifiers; a parenthesis list may have been split at its spaces. */
+static void cmd_set_file_security(ods2_volume_t *vol, const char *quals, const char *spec)
+{
+    setsec_ctx_t x;
+    ods2_parsed_path_t p, wp;
+    char msg[400], bad[128];
+    bool have_prot = false, have_owner = false, start_ok;
+    char protv[192] = "", ownv[192] = "";
+    const char *q = quals;
+    int werrs;
+
+    memset(&x, 0, sizeof(x));
+    while (*q != '\0') {
+        const char *eq, *end;
+        size_t ql;
+        int depth = 0;
+        if (*q == '/') q++;
+        end = q;
+        while (*end != '\0' && !(*end == '/' && depth == 0)) {
+            if (*end == '(' || *end == '[') depth++;
+            else if (*end == ')' || *end == ']') { if (depth > 0) depth--; }
+            end++;
+        }
+        ql = (size_t) (end - q);
+        eq = memchr(q, '=', ql);
+        {
+            char name[32], val[160];
+            size_t nl = eq ? (size_t) (eq - q) : ql;
+            size_t vl = eq ? ql - nl - 1 : 0;
+            if (nl >= sizeof(name) || vl >= sizeof(val)) { report_error("%%ODS2-E-IVQUAL, a qualifier is too long\n"); return; }
+            memcpy(name, q, nl); name[nl] = '\0';
+            if (vl) memcpy(val, eq + 1, vl);
+            val[vl] = '\0';
+            if (nl > 0 && strncasecmp("PROTECTION", name, nl) == 0 && nl >= 3) { have_prot = true; snprintf(protv, sizeof(protv), "%s", val); }
+            else if (nl > 0 && strncasecmp("OWNER_UIC", name, nl) == 0 && nl >= 3) { have_owner = true; snprintf(ownv, sizeof(ownv), "%s", val); }
+            else if (nl > 0 && strncasecmp("LOG", name, nl) == 0 && vl == 0) x.log = true;
+            else if (nl > 0 && strncasecmp("NOLOG", name, nl) == 0 && nl >= 3 && vl == 0) x.log = false;
+            else { report_error("%%SET-F-IVQUAL, unrecognized qualifier - /%s\n", name); return; }
+        }
+        q = end;
+    }
+    if (have_prot == have_owner) {
+        report_error("%%ODS2-E-NOPARM, usage: SET FILE/PROTECTION=(S:RWED,O:RWED,G:RE,W) <spec>  or  SET FILE/OWNER_UIC=[group,member] <spec>   (one of them per command: both at "
+                     "once was not measured on VMS)\n");
+        return;
+    }
+    if (have_prot) {
+        x.what = ODS2_SETSEC_PROT;
+        if (!parse_protection_spec(protv, &x.mask, &x.value, bad, sizeof(bad))) {
+            if (strcmp(bad, "VALREQ") == 0) report_error("%%DCL-W-VALREQ, missing qualifier or keyword value\n");
+            else report_error("%%SET-F-SYNTAX, error parsing '%s'\n", bad);
+            return;
+        }
+    } else {
+        x.what = ODS2_SETSEC_OWNER;
+        if (!parse_uic_spec(ownv, &x.group, &x.member, msg, sizeof(msg))) { report_error("%s\n", msg); return; }
+    }
+    if (!ods2_parse_path(spec, &p)) { report_error("%%ODS2-E-BADPATH, could not parse %s\n", spec); return; }
+    walk_path_for(&p, false, &wp);
+    werrs = walk_matches(vol, &wp, setsec_entry, &x, &start_ok);
+    if (x.found == 0 && werrs == 0) {
+        char echo[ODS2_PATH_MAX + 32];
+        echo_spec(&p, echo, sizeof(echo));
+        search_failed("SET", echo, false);
+    } else if (!start_ok) {
+        char echo[ODS2_PATH_MAX + 32];
+        echo_spec(&p, echo, sizeof(echo));
+        search_failed("SET", echo, true);
+    }
+}
+
 static void print_help(void)
 {
     printf("Commands (VMS bracket-notation paths, e.g. [DECUS.NETLIB020]FILE.TXT):\n"
@@ -3356,8 +3895,15 @@ static void print_help(void)
            "                             records (VAR, VFC, FIX, STM*; carriage control applied:\n"
            "                             none = records run together); /LINES: always one line\n"
            "                             per record; /RAW: the stored bytes\n"
+           "  TYPE [dir]wild[;ver] or a,b  wildcards and comma lists as VMS TYPE: a header (a space line, the\n"
+           "                             name, a space line) before each file, none for the first file of a\n"
+           "                             list named without a wildcard; no match: %%TYPE-W-SEARCHFAIL\n"
            "  DELETE path                delete a file (one version) or empty directory\n"
            "  DELETE [dir]wild[;ver]     every match: F*.COM (highest), *.*;* (all versions)\n"
+           "  PURGE[/KEEP=n][/LOG] [spec]  keep the n highest versions (default 1) of each name, delete the rest\n"
+           "                             (wildcards; no spec: the default directory); /LOG lists what went\n"
+           "  SET FILE/PROTECTION=(S:RWED,O:RWED,G:RE,W) spec   only the fields named change; /LOG prints them\n"
+           "  SET FILE/OWNER_UIC=[group,member] spec   octal numbers or [SYSTEM]; revision +1 for each change\n"
            "  SET DEFAULT path           set the current default directory\n"
            "  SHOW DEFAULT               show the current default directory\n"
            "  SET VOLUME/LABEL=name      relabel the volume (all home block copies)\n"
@@ -3688,6 +4234,67 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
         cmd_set_record_sizes(vol, &p);
         return true;
     }
+    if (matches(tokens[0], "SET") && n > 1 && (strncasecmp(tokens[1], "FILE/PROTECTION", 15) == 0 || strncasecmp(tokens[1], "FILE/OWNER_UIC", 14) == 0 ||
+                                               strncasecmp(tokens[1], "FILE/LOG/PROTECTION", 19) == 0 || strncasecmp(tokens[1], "FILE/LOG/OWNER_UIC", 18) == 0)) {
+        /* SET FILE/PROTECTION=(S:RWED,O:RWED,G:RE,W) <spec>, SET FILE/OWNER_UIC=[g,m] <spec>; the parenthesis list may have been split at its spaces */
+        char quals_buf[256];
+        int k = 2;
+        size_t used = (size_t) snprintf(quals_buf, sizeof(quals_buf), "%s", tokens[1] + 4);
+        while (k < n - 1 && strchr(quals_buf, '(') != NULL && strrchr(quals_buf, ')') == NULL) {
+            used += (size_t) snprintf(quals_buf + used, sizeof(quals_buf) - used, "%s", tokens[k]);
+            k++;
+        }
+        while (k < n - 1 && tokens[k][0] == '/') {          /* "SET FILE/PROTECTION=(...) /LOG spec" */
+            used += (size_t) snprintf(quals_buf + used, sizeof(quals_buf) - used, "%s", tokens[k]);
+            k++;
+        }
+        if (k >= n) {
+            report_error("%%ODS2-E-NOPARM, usage: SET FILE/PROTECTION=(S:RWED,O:RWED,G:RE,W) <spec>  or  SET FILE/OWNER_UIC=[group,member] <spec>\n");
+            return true;
+        }
+        cmd_set_file_security(vol, quals_buf, tokens[k]);
+        return true;
+    }
+    if (matches(verb, "PURGE")) {
+        /* PURGE[/KEEP=n][/LOG] [spec]: the default keep is 1, the default spec every file of the default directory */
+        long keep = 1;
+        bool log = false;
+        const char *qs = quals;
+        ods2_parsed_path_t p;
+        while (qs != NULL && *qs == '/') {
+            char q[64];
+            size_t ql = strcspn(qs + 1, "/");
+            if (ql >= sizeof(q)) ql = sizeof(q) - 1;
+            memcpy(q, qs + 1, ql);
+            q[ql] = '\0';
+            if (strncasecmp(q, "KEEP=", 5) == 0) {
+                char *end;
+                keep = strtol(q + 5, &end, 10);
+                if (q[5] == '\0' || *end != '\0' || keep < 1) {
+                    report_error("%%PURGE-F-BADVALUE, '%s' is an invalid keyword value\n", q + 5);
+                    return true;
+                }
+            } else if (matches(q, "LOG")) {
+                log = true;
+            } else if (matches(q, "NOLOG")) {
+                log = false;
+            } else {
+                report_error("%%PURGE-F-IVQUAL, unrecognized qualifier - /%s\n", q);
+                return true;
+            }
+            qs += 1 + strcspn(qs + 1, "/");
+        }
+        if (!ods2_parse_path(n > 1 ? tokens[1] : "*.*", &p)) {
+            report_error("%%ODS2-E-BADPATH, could not parse %s\n", n > 1 ? tokens[1] : "*.*");
+            return true;
+        }
+        if (p.has_version) {
+            report_error("%%ODS2-E-BADVER, %s: PURGE takes no version (what VMS does with one was not measured)\n", tokens[1]);
+            return true;
+        }
+        cmd_purge(vol, &p, keep, log);
+        return true;
+    }
     if (matches(verb, "LINK") || (matches(tokens[0], "SET") && n > 1 && strncmp(tokens[1], "FILE/ENTER=", 11) == 0)) {
         /* LINK <new-path> <existing-path>; SET FILE/ENTER=<new-path> <existing-path> */
         ods2_parsed_path_t np, ep;
@@ -3779,7 +4386,7 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
                 }
                 s += 1 + strcspn(s + 1, "/");
             }
-            cmd_type(vol, &p, raw, lines);
+            if (!cmd_type_list(vol, tokens[1], raw, lines)) cmd_type(vol, &p, raw, lines);
         }
         return true;
     }

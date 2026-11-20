@@ -273,6 +273,11 @@ def setup(level, hardlinks, fill_for=None, cluster=None):
     assert ods2(img, 'SET FILE/VERSION_LIMIT=2 [000000]V.TXT')[0] == 0
     for v in (1, 9):
         assert ods2(img, 'COPY %s [000000]W.TXT;%d' % (small, v))[0] == 0
+    # PURGE: [PG]P.TXT;1 to ;4 and Q.TXT;1 ;2 (PLAN_WRITE_OPS item 2)
+    assert ods2(img, 'CREATE/DIRECTORY [PG]')[0] == 0
+    for nm, count in (('P.TXT', 4), ('Q.TXT', 2)):
+        for _ in range(count):
+            assert ods2(img, 'COPY %s [PG]%s' % (small, nm))[0] == 0
     # one file with another directory entry
     assert ods2(img, 'LINK [SUB]LNKA.TXT [000000]L.TXT')[0] == 0
     if level == 5:
@@ -362,11 +367,22 @@ OPS = {
     # intact or gone at every interruption, never changed (review 40 F1)
     'newver_limit3_big': ('COPY %(newbig)s [BIG]A.BIN', ['BIG/A.BIN;1', 'BIG/A.BIN;4'], False, False, 'limit3big'),
     'newver_limit1_big': ('COPY %(newbig)s [BIG]A.BIN', ['BIG/A.BIN;1', 'BIG/A.BIN;2'], False, False, 'limit1big'),
+    # PURGE (item 2): each version goes in a change of its own, so every state in between is a purge that has gone part of the way: the versions that
+    # may be gone are the targets, none may be changed; SET FILE (item 4) rewrites one header block: whatever state results must pass the checker
+    # (the header checksum included)
+    'purge_names': ('PURGE/KEEP=1 [PG]*.TXT', ['PG/P.TXT;1', 'PG/P.TXT;2', 'PG/P.TXT;3', 'PG/Q.TXT;1'], False, False, None),
+    'purge_keep2': ('PURGE/KEEP=2 [PG]P.TXT', ['PG/P.TXT;1', 'PG/P.TXT;2'], False, False, None),
+    'setfile_prot': ('SET FILE/PROTECTION=(W:R) [000000]A1.TXT', [], False, False, None),
+    'setfile_owner': ('SET FILE/OWNER_UIC=[200,3] [SUB]D.TXT', [], False, False, None),
+    'setfile_dir': ('SET FILE/PROTECTION=(G,W) [000000]SUB.DIR;1', [], False, False, None),
+    'setfile_reserved': ('SET FILE/PROTECTION=(W:R) [000000]BITMAP.SYS;1', [], False, False, None),
+    'setfile_wild': ('SET FILE/PROTECTION=(G:R,W) [000000]*.TXT;*', [], False, False, None),
 }
 # the operations that are also run with an I/O error at the k-th write of the commit (the process goes on and says so), not only killed
-ERROR_MODE_OPS = ['newver_limit', 'newver_limit3_big', 'newver_limit1_big', 'newver_front']
+ERROR_MODE_OPS = ['newver_limit', 'newver_limit3_big', 'newver_limit1_big', 'newver_front', 'purge_names', 'setfile_prot', 'setfile_wild']
 QUICK = ['index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
-         'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split', 'newver_limit3_big', 'newver_limit1_big']
+         'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split', 'newver_limit3_big', 'newver_limit1_big',
+         'purge_names', 'purge_keep2', 'setfile_prot', 'setfile_owner', 'setfile_dir', 'setfile_reserved', 'setfile_wild']
 
 
 def main():
