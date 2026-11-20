@@ -158,13 +158,18 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
     core->fileowner_uic[1] = 1;
     core->fileprot = 0xfa00;
     core->recprot = 0xfe00;
+    if (spec->filechar & 0x2000u) {
+        /* A directory made by CREATE/DIRECTORY, at both levels (the step 0 containers of VAX V7.3 and V8.4, ODS-2 and ODS-5; CORPUS 49 and 53): not deletable by group or
+           world (S:RWE,O:RWE,G:RE,W:E = 0xBA88) and no record protection. ods2v2 wrote 0xFA00 and 0xFE00 for a directory on ODS-2 (follow-up c). */
+        core->fileprot = 0xba88;
+        core->recprot = 0;
+    }
     if (level5) {
         /* What VMS V8.4 writes for a file made on a level 5 volume
            (headers dumped from the ODS5T corpus image): the record
            protection word is zero, a directory is not deletable by
            group or world (S:RWE,O:RWE,G:RE,W:E); the link count (the word at
            byte 74) is 1 on a volume with HARDLINKS and 0 on one without. */
-        if (spec->filechar & 0x2000u) core->fileprot = 0xba88;
         core->recprot = 0;
         header_out[ODS5_FH2_LINKCOUNT] = (uint8_t) (spec->link_count & 0xff);
         header_out[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (spec->link_count >> 8);
@@ -244,7 +249,7 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
         /* FI2$W_REVISION: binary revision count. 1, matching every
            real freshly-created file examined - not 0 (this file has
            been "revised" once, by being written). */
-        ident[20] = 1;
+        ident[20] = (spec->seg_num == 0 && !(spec->filechar & 0x2000u)) ? 1 : 0;      /* a directory made by CREATE/DIRECTORY has revision 0 (CORPUS 53), as at level 5 */
         ident[21] = 0;
 
         /* FI2$Q_CREDATE / FI2$Q_REVDATE: binary 64-bit VMS timestamp -

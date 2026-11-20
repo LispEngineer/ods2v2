@@ -728,11 +728,12 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
     that is the one real difference, on ODS-2 only. A field of 0 does not make VMS return zeros (its checksums of such files equal the contents); what it
     could matter for is old data showing through in blocks that a *later* VMS extend leaves unwritten, which is not measured. It applies to every file ods2v2
     makes, not only new versions. Writing a value VMS writes on ODS-2 is a separate item, after its own VMS check (a mark set too low could hide data).
-  * **Protection of a new directory on ODS-2**: ods2v2 gives (S:RWED,O:RWED,G:RE,W:), as for a file (header word 0xFA00); VMS itself gives (S:RWE,O:RWE,G:RE,W:E)
-    (0xBA88) on ODS-2 as on ODS-5: in every directory `CREATE/DIRECTORY` made on the VMS-made ODS-2 volumes of V8.4-2L2, V7.3-2 and VAX V7.3 (under a master
-    directory of 0xBA00) and in the step 0 volumes of V8.4 and VAX V7.3. So ods2v2's ODS-2 value is the one that differs (its ODS-5 value, 0xBA88, is VMS's). On an ODS-2
-    volume an unprivileged user who is not the owner therefore cannot search a directory ods2v2 made, and the owner may delete it. Not measured: a new directory in a
-    parent that has another protection. Changing the ODS-2 value is a separate item.
+  * **The header of a new directory** is VMS's own at both levels since follow-up c (CREATE/DIRECTORY on the step 0 containers of VAX V7.3 and V8.4, ODS-2 and ODS-5; CORPUS 49 and
+    53): protection (S:RWE,O:RWE,G:RE,W:E) = 0xBA88, record protection 0, revision number 0, "Highest block written" = HIBLK + 1, the rest of the header equal field by field
+    (`tests/dirhdr_vms_compare.py`). Before it, a directory made on an **ODS-2** volume had 0xFA00, 0xFE00, revision 1 and no highest block written (an unprivileged user who is not
+    the owner could not search it, and the owner could delete it); directories made by older ods2v2 volumes keep that header (`SET FILE/PROTECTION=(S:RWE,O:RWE,G:RE,W:E)` on each
+    puts the protection right). The owner is `[1,4]` (VMS: the process's UIC), by design. A file's header on ODS-2 still differs from a file VMS made (RECPROT 0xFE00 against 0, CONTIG
+    against none, highest block written 0 against 2: `phvs2-copy-2.img` and `asim5-copy-2.img` of ods5-vms3's step 0): open, with "Highest block written" above.
 - A version of a name whose record is full (58 versions of a 34-character name) starts a new record, as VMS does; an explicit version that belongs inside a full record
   is refused. The version limit of an explicit version below all the kept ones is refused (VMS's behaviour there is not measured).
 - `TYPE` takes no wildcards (VMS's does): a wildcard in the directory is refused (`%ODS2-E-WILDDIR`), and `*` in the file name is taken as an ordinary character and finds nothing (`%ODS2-E-FNF`; measured 18-NOV-2026 on f7a13f9). `DELETE` takes

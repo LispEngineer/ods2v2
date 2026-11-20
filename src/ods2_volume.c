@@ -2886,7 +2886,7 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
     spec.extents = &extent;
     spec.extent_count = 1;
     spec.hiblk = content_blocks;
-    if (vol->ods5) spec.highwater = content_blocks + 1; /* the whole allocation is written, below */
+    spec.highwater = content_blocks + 1; /* the whole allocation is written, below: HIBLK + 1, as VMS makes a directory at both levels (CORPUS 53) */
     /* every directory VMS made has FFBYTE 0 and EFBLK one past its last block in use: ODS-5 (V8.4,
        ODS5_FORMAT_NOTES.md 11) and ODS-2 (the ODS2T corpus volumes on V8.4, V7.3-2 and VAX V7.3: EFBLK 2,
        FFBYTE 0 for a one-block directory). ods2v2 used to write EFBLK 1 / FFBYTE 2 ("the sentinel only")
