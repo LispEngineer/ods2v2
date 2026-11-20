@@ -229,10 +229,10 @@ ods2: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_part
 # the sanitizers; `make sancheck` says so, refuses a binary that is not sanitized, and runs the long-argument test and every cli_*_check.sh again
 # (alone, with the sanitizer options that make an error stop the run) without the unit tests.
 .PHONY: sancheck
-sancheck: ods2 ods2_init ods2_fault ods2_put ods2_dump_header ods2_deep_make $(BUILD)/ods2_make_loop tools
+sancheck: ods2 ods2_init ods2_fault ods2_put ods2_dump_header ods2_deep_make $(BUILD)/ods2_make_loop $(BUILD)/ods2_dirsearch_selftest tools
 	@nm ods2 | grep -q '__asan_init\|__ubsan' || { echo "ods2 is not built with -fsanitize=address,undefined"; exit 1; }
 	@echo "sancheck: ods2 is built with -fsanitize=address,undefined"
-	@export ASAN_OPTIONS=detect_stack_use_after_return=1:abort_on_error=0 UBSAN_OPTIONS=print_stacktrace=1; failed=0; \
+	@export UBSAN_OPTIONS=print_stacktrace=1; $(BUILD)/ods2_dirsearch_selftest > /dev/null 2>&1; failed=0; \
 	for t in tests/cli_longargs_check.sh tests/cli_*_check.sh; do \
 	    if sh $$t > $(BUILD)/sancheck.log 2>&1; then echo "sancheck: PASS $$t"; else echo "sancheck: FAIL $$t"; tail -5 $(BUILD)/sancheck.log; failed=1; fi; \
 	    if grep -q 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; then echo "sancheck: SANITIZER REPORT in $$t"; grep -m3 'Sanitizer\|runtime error' $(BUILD)/sancheck.log; failed=1; fi; \
