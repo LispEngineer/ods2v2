@@ -172,6 +172,23 @@ for level in 2 5; do
     check "ODS-$level 49.9: a COPY onto a highest version that nothing can write is NOT refused (privileged), and takes its owner and protection" "[1,7]|(S:,O:,G:,W:)" "$pa6"
     check "ODS-$level 49.9: ods5check is clean after the owner and protection tests" "0 error(s), 0 warning(s)" "$(clean "$img")"
 
+    # --- review 42: when the list of blocks freed in a change cannot grow, the change is refused (fail closed), nothing written (the test build's
+    # ODS2_FAULT_NOTE_FAIL makes the list refuse to grow) ---------------------------------------------------------------------------------------------
+    if [ -x ./ods2_fault ]; then
+        $ODS2 "$img" "CREATE/DIRECTORY [S]" >/dev/null 2>&1
+        for n in 1 2 3; do $ODS2 "$img" "COPY $TMP/src.txt [S]L.TXT" >/dev/null 2>&1; done
+        $ODS2 "$img" "SET FILE/VERSION_LIMIT=3 [S]L.TXT" >/dev/null 2>&1
+        st() { echo "$(vers "$img" '[S]L.TXT;*') $(free_blocks "$img") $(clean "$img") $(for v in 1 2 3; do $ODS2 "$img" "TYPE [S]L.TXT;$v" 2>&1 | md5sum | cut -c1-8; done | tr '\n' ' ')"; }
+        st0=$(st)
+        o=$(ODS2_FAULT_NOTE_FAIL=1 ./ods2_fault "$img" "COPY $TMP/src.txt [S]L.TXT" 2>&1)
+        check "ODS-$level: the list of freed blocks cannot grow: the COPY at the limit is refused; versions, free blocks and contents are as before, ods5check clean" "1 $st0" \
+            "$(echo "$o" | grep -c 'out of memory remembering') $(st)"
+        o=$(ODS2_FAULT_NOTE_FAIL=1 ./ods2_fault "$img" "DELETE [S]L.TXT;1" 2>&1)
+        check "ODS-$level: ... and a DELETE is refused the same way, nothing changes" "1 $st0" "$(echo "$o" | grep -c 'out of memory remembering') $(st)"
+        $ODS2 "$img" "COPY $TMP/src.txt [S]L.TXT" >/dev/null 2>&1
+        check "ODS-$level: ... and without the failure the same COPY works (;4 ;3 ;2)" "4 3 2" "$(vers "$img" '[S]L.TXT;*')"
+    fi
+
     # --- C6: ;32767 is the last version ------------------------------------------------------------------------------------------------------------
     $ODS2 "$img" "CREATE/DIRECTORY [N]" >/dev/null 2>&1
     $ODS2 "$img" "COPY $TMP/src.txt [N]Z.TXT;32766" >/dev/null 2>&1

@@ -442,7 +442,7 @@ static void txn_note_alloc(struct ods2_txn *t, uint32_t lbn, unsigned count)
 /* Blocks given back inside the open change: the part that was allocated inside this change itself is taken off the allocated list (it was never
    owned on the disk); the rest (blocks that a file owned on the disk before the change) is remembered, so that file content is never written onto
    it before the commit (see struct ods2_txn). */
-static void txn_note_free(struct ods2_txn *t, uint32_t lbn, unsigned count)
+static bool txn_note_free(struct ods2_txn *t, uint32_t lbn, unsigned count)
 {
     uint64_t lo = lbn, hi = (uint64_t) lbn + count;       /* the part still to place, [lo, hi) */
     size_t i;
@@ -466,16 +466,19 @@ static void txn_note_free(struct ods2_txn *t, uint32_t lbn, unsigned count)
             /* what is left of the freed range: below and above the overlap */
             if (olo > lo) {
                 /* the lower part is old (or overlaps other records: handled by a recursive note) */
-                txn_note_free(t, (uint32_t) lo, (unsigned) (olo - lo));
+                if (!txn_note_free(t, (uint32_t) lo, (unsigned) (olo - lo))) return false;
             }
             lo = ohi;
         }
     }
     if (lo < hi) {
+#ifdef ODS2_FAULT_INJECTION
+        if (getenv("ODS2_FAULT_NOTE_FAIL") != NULL) return false;      /* test: the list cannot grow */
+#endif
         if (t->nfreed == t->freed_cap) {
             size_t ncap = t->freed_cap ? t->freed_cap * 2 : 16;
             ods2_extent_t *nf = realloc(t->freed, ncap * sizeof(*nf));
-            if (nf == NULL) return;
+            if (nf == NULL) return false;
             t->freed = nf;
             t->freed_cap = ncap;
         }
@@ -483,6 +486,7 @@ static void txn_note_free(struct ods2_txn *t, uint32_t lbn, unsigned count)
         t->freed[t->nfreed].block_count = (unsigned) (hi - lo);
         t->nfreed++;
     }
+    return true;
 }
 
 static size_t txn_slot(const struct ods2_txn *t, uint32_t lbn)
@@ -4757,7 +4761,11 @@ ods2_result_t ods2_free_blocks(ods2_volume_t *vol, uint32_t lbn, unsigned block_
         return fail("lbn/block_count must be cluster-aligned (exactly what "
                     "ods2_allocate_blocks() returned)");
     }
-    if (vol->txn != NULL) txn_note_free(vol->txn, lbn, block_count);   /* remembered for write_extents(): see struct ods2_txn */
+    /* remembered for write_extents(): see struct ods2_txn. The guard must never silently stop remembering: when the list cannot grow the change
+       is refused here, before anything is freed (review 42: fail closed) */
+    if (vol->txn != NULL && !txn_note_free(vol->txn, lbn, block_count)) {
+        return fail("out of memory remembering the blocks freed in this change: the change is refused, nothing is written");
+    }
 
     r = ods2_read_header(vol, 2, bitmap_header); /* BITMAP.SYS is always file 2 */
     if (!r.ok) return r;

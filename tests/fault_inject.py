@@ -16,14 +16,15 @@ volume for k = 1..n and checks what is left:
 Usage: fault_inject.py [--quick] [--level 2|5] [--op NAME ...] [--keep]   (run from the project root)
 Exit status 1 if any check failed; the report names the operation, level and k.
 """
-import argparse, hashlib, os, random, re, shutil, subprocess, sys
+import argparse, hashlib, os, random, re, shutil, subprocess, sys, tempfile
 
 os.environ['ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT'] = '1'   # the index_* operations make INDEXF.SYS extension headers on purpose
 ODS2 = os.environ.get('FAULT_ODS2', './ods2_fault')
 INIT = './ods2_init'
 CHECK = ['python3', '-I', 'tests/ods5check.py']
 NEXT = {}   # base image -> the name whose insert grows the directory
-WORK = os.path.join(os.environ.get('TMPDIR', 'samples'), 'fault_inject_work')
+WORK = None   # a directory of this run's own (mkdtemp under TMPDIR): two runs at once never meet (review 42); removed at the end unless --keep
+KEEP = False
 
 ALLOWED = [
     r'is in no directory \(lost file\)',
@@ -378,8 +379,11 @@ def main():
     args = ap.parse_args()
     levels = args.level or [2, 5]
     names = args.op or (QUICK if args.quick else list(OPS))
-    shutil.rmtree(WORK, ignore_errors=True)
-    os.makedirs(WORK)
+    global WORK, KEEP
+    KEEP = args.keep
+    base = os.environ.get('TMPDIR', 'samples')
+    os.makedirs(base, exist_ok=True)
+    WORK = tempfile.mkdtemp(prefix='fault_inject_', dir=base)
     ctx = {'small': put_host('small.txt', b'one block of text\n'), 'empty': put_host('empty.txt', b''),
            'newbig': put_host('newbig.bin', blob(int(2.2 * 1024 * 1024), 99)),
            'frag2': put_host('frag2.dat', blob(900 * 512, 5))}
@@ -491,8 +495,6 @@ def main():
                 counts['clean'], counts['leak'], bad_here))
     if SEEN:
         print('fault_inject: interrupted-growth messages seen: ' + '; '.join('%s x%d' % (k, v) for k, v in sorted(SEEN.items())))
-    if not args.keep:
-        shutil.rmtree(WORK, ignore_errors=True)
     if failures:
         print('fault_inject: %d bad states' % failures)
         return 1
@@ -501,4 +503,9 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        rc = main()
+    finally:
+        if WORK and not KEEP:
+            shutil.rmtree(WORK, ignore_errors=True)
+    sys.exit(rc)
