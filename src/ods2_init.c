@@ -303,7 +303,7 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
             ((ods2_head_core_t *) hdr)->fileprot = files[n - 1].fileprot;
             if (n == 4) {
                 /* Review 52 F1: the builder gives a directory RECPROT 0 and revision 0 (what CREATE/DIRECTORY makes), but INITIALIZE writes the master file directory as a
-                   reserved file: RECPROT 0xFE00 and revision 1, at both levels (measured on the six VMS-made volumes of the corpus: V7.3 VAX, V7.3-2, V8.4, V8.4-2L2) */
+                   reserved file: RECPROT 0xFE00 and revision 1, at both levels (measured on the seven VMS-made volumes of the corpus (tests/cli_mfd_check.sh): V7.3 VAX, V7.3-2, V8.4, V8.4-2L2) */
                 ((ods2_head_core_t *) hdr)->recprot = 0xfe00;
                 put16(hdr + ((ods2_head_core_t *) hdr)->idoffset * 2 + 20, 1);
             }
