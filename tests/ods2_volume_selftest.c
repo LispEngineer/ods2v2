@@ -610,7 +610,7 @@ int main(void)
             word0 = big_header[core->mpoffset * 2] | (big_header[core->mpoffset * 2 + 1] << 8);
             assert((word0 >> 14) == 2);      /* Format 2 */
             assert(core->map_inuse == 3);    /* 6 bytes */
-            assert(core->filechar & 0x0080); /* FH2$M_CONTIG: one piece */
+            assert(!(core->filechar & 0x0080)); /* no FH2$M_CONTIG on a file, even in one piece (follow-up b) */
             assert(core->ext_fid.fid_num == 0 && core->seg_num == 0);
             printf("PASS: file is one contiguous extent of %u blocks, described by a "
                    "single Format 2 retrieval pointer\n", (unsigned) extents[0].block_count);

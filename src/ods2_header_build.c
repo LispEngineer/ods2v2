@@ -157,12 +157,11 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
     core->fileowner_uic[0] = 4;
     core->fileowner_uic[1] = 1;
     core->fileprot = 0xfa00;
-    core->recprot = 0xfe00;
+    core->recprot = 0;            /* every file and directory VMS makes (follow-up b); the reserved files are marked below */
     if (spec->filechar & 0x2000u) {
         /* A directory made by CREATE/DIRECTORY, at both levels (the step 0 containers of VAX V7.3 and V8.4, ODS-2 and ODS-5; CORPUS 49 and 53): not deletable by group or
            world (S:RWE,O:RWE,G:RE,W:E = 0xBA88) and no record protection. ods2v2 wrote 0xFA00 and 0xFE00 for a directory on ODS-2 (follow-up c). */
         core->fileprot = 0xba88;
-        core->recprot = 0;
     }
     if (level5) {
         /* What VMS V8.4 writes for a file made on a level 5 volume
@@ -174,6 +173,7 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
         header_out[ODS5_FH2_LINKCOUNT] = (uint8_t) (spec->link_count & 0xff);
         header_out[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (spec->link_count >> 8);
     }
+    if (spec->reserved_recprot) core->recprot = 0xfe00;      /* INITIALIZE's reserved files, at either level (they are level 2 headers on an ODS-5 volume) */
     if (spec->use_owner_prot) {
         /* a new version takes the owner and protection of the highest version before it (CORPUS 49.9) */
         core->fileowner_uic[0] = spec->owner_uic[0];

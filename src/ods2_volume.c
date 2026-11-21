@@ -2347,6 +2347,7 @@ static ods2_result_t extend_indexf(ods2_volume_t *vol, uint8_t *indexf_header, u
             spec.efblk = ods2_word_swap32(core->recattr.efblk);
             spec.ffbyte = core->recattr.ffbyte;
             spec.highwater = core->highwater;
+            spec.reserved_recprot = !vol->ods5;                /* as before follow-up b: 0xFE00 at level 2, 0 at level 5 */
             spec.link_count = (uint16_t) (indexf_header[ODS5_FH2_LINKCOUNT] | (indexf_header[ODS5_FH2_LINKCOUNT + 1] << 8));
             spec.ident_name = ident;
             if (!ods2_build_file_header(ext, &spec)) {
@@ -3859,9 +3860,10 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
     /* Records the whole file's size in every header, as the record
        attributes are copied into extension headers too. */
     spec.hiblk = (uint32_t) total_allocated;
-    /* every allocated block is written (zero-filled past the data), which is what
-       VMS V8.4 records on a level 5 volume: HIGHWATER = HIBLK + 1 */
-    if (vol->ods5) spec.highwater = (uint32_t) total_allocated + 1;
+    /* every allocated block is written (zero-filled past the data, write_extents), and the stored HIGHWATER is HIBLK + 1, as the files VMS's DCL makes have it
+       at both levels (follow-up b; CORPUS 49 to 56: all 2,644 user files of the VMS-made ODS-2 volumes; DUMP/HEADER prints the stored value minus 1). ods2v2 wrote 0 at
+       level 2 before. */
+    spec.highwater = (uint32_t) total_allocated + 1;
     /* End-of-file mark per spec 6.1.5/6.1.6, in the preferred form
        VMS itself writes: EFBLK is the VBN holding the EOF position,
        FFBYTE the bytes in use there. Content ending exactly on a
@@ -3871,9 +3873,10 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
        than the real content, and an empty file as 512 bytes.) */
     spec.efblk = (uint32_t) (content_len / 512) + 1;
     spec.ffbyte = (uint16_t) (content_len % 512);
-    /* FH2$M_CONTIG only when truly one piece - and on an ODS-5 volume not at all: the
-       files VMS V8.4 makes there (ODS5T corpus) have no characteristics */
-    spec.filechar = (extent_count == 1 && !vol->ods5) ? 0x0080 : 0;
+    /* No characteristics on a file at either level: the files VMS makes (DCL, COPY of a file that does not have it) never carry FH2$M_CONTIG, even those in one piece
+       (the VMS-made ODS-2 volumes; CORPUS 56.4: a CONTIG file makes VMS's COPY and BACKUP fail or warn (%COPY-W-CBT, %BACKUP-E-NONCONTIG) where free space is
+       fragmented, and APPEND clears the flag). ods2v2 set it on a file of one piece at level 2 before (follow-up b). */
+    spec.filechar = 0;
     snprintf(ident, sizeof(ident), "%s;%u", name, new_version);
     spec.ident_name = ident;
 
