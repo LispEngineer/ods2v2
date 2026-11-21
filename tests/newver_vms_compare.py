@@ -19,6 +19,9 @@ versions of one name between two neighbours, CORPUS 49 C7: VMS keeps 58 in the o
 for the next, 32 in the newest) is compared like the others.
 """
 import os
+import atexit
+import shutil
+import tempfile
 import re
 import subprocess
 import sys
@@ -27,7 +30,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 import ods5check as O   # noqa: E402
 
 ODS2, INIT = './ods2', './ods2_init'
-TMP = os.environ.get('TMPDIR', 'samples') + '/newver_vms_compare'
+_TMPBASE = os.environ.get('TMPDIR', 'samples')
+os.makedirs(_TMPBASE, exist_ok=True)
+TMP = tempfile.mkdtemp(prefix='newver_vms_compare_', dir=_TMPBASE)      # a directory of this run's own: two runs at once (parallel gates sharing a TMPDIR) never meet
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 fails = 0
 
 

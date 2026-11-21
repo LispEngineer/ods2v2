@@ -13,6 +13,5 @@ run_one() { # run_one <level> <image>
 run_one 2 "$D/a5/img/asim5-copy-2.img"
 run_one 5 "$D/a5/img/asim5-copy-5.img"
 run_one 2 "$D/img/phvs2-copy-2.img"
-rm -rf "${TMPDIR:-samples}/newver_vms_compare"
 if [ $fails -ne 0 ]; then echo "cli_newver_vms_check: $fails FAILED"; exit 1; fi
 echo "cli_newver_vms_check: done"

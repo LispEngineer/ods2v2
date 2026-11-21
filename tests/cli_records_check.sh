@@ -7,7 +7,7 @@
 # into the headers). Expected text is written by that script from the record layouts.
 ODS2=${ODS2:-./ods2}
 INIT=${INIT:-./ods2_init}
-TMP=${TMPDIR:-/tmp}/rec_check.$$
+TMP=${TMPDIR:-samples}/rec_check.$$
 mkdir -p "$TMP" || exit 1
 trap 'rm -rf "$TMP"' EXIT
 fail=0

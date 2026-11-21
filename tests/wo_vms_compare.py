@@ -20,13 +20,18 @@ LOG is ods5-vms3's log of the VMS run (corpus/manifests/write-ops-step0-*/WO_<TE
 Allowed to differ, by design: dates, file ids, the device name, ods2v2's extra explanation lines.
 """
 import os
+import atexit
+import tempfile
 import re
 import shutil
 import subprocess
 import sys
 
 ODS2, INIT = './ods2', './ods2_init'
-TMP = os.environ.get('TMPDIR', 'samples') + '/wo_vms_compare'
+_TMPBASE = os.environ.get('TMPDIR', 'samples')
+os.makedirs(_TMPBASE, exist_ok=True)
+TMP = tempfile.mkdtemp(prefix='wo_vms_compare_', dir=_TMPBASE)      # a directory of this run's own: two runs at once (parallel gates sharing a TMPDIR) never meet
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 fails = 0
 
 

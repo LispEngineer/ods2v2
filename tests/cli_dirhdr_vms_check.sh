@@ -9,6 +9,5 @@ for img in "$D/img/phvs2-copy-2.img" "$D/a5/img/asim5-copy-2.img"; do
     if [ ! -f "$img" ]; then echo "SKIP: $img not found (the VMS containers of PLAN_WRITE_OPS step 0)"; continue; fi
     python3 -I tests/dirhdr_vms_compare.py "$img" || fails=$((fails + 1))
 done
-rm -rf "${TMPDIR:-samples}/dirhdr_vms_compare"
 if [ $fails -ne 0 ]; then echo "cli_dirhdr_vms_check: $fails FAILED"; exit 1; fi
 echo "cli_dirhdr_vms_check: done"
