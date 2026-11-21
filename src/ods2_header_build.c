@@ -93,8 +93,11 @@ size_t ods2_header_map_offset(const ods2_header_spec_t *spec)
     size_t len, ident;
     unsigned type;
 
+    /* An extension header (seg_num != 0) as VMS makes it (CORPUS 58.6, follow-up d; the VMS-made ones of asim5-frag-sf and phvs2: 24 of 24): the "ident area" is the first 20 bytes
+       only (at level 2 the file name, at level 5 the FI5 prefix) and the map starts at byte 100 (word 50). The INDEXF.SYS extension header at level 2 (spec flag
+       reserved_recprot) keeps the old layout: ods5check and ods2_indexf_ext_looks_ods2v2 key on its map at word 100 and no VMS-made one has been seen. */
+    if (spec->seg_num != 0 && (spec->level == ODS5_LEVEL_5 || !spec->reserved_recprot)) return ODS2_HEADER_IDOFFSET_BYTES + 20;
     if (spec->level != ODS5_LEVEL_5) return ODS2_HEADER_MPOFFSET_BYTES;
-    if (spec->seg_num != 0) return ODS2_HEADER_IDOFFSET_BYTES + 20;
     if (spec->ident_name == NULL ||
         !level5_name(spec->ident_name, name, sizeof(name), &len, &type) ||
         len > 255) {
@@ -246,6 +249,7 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
             memcpy(ident, spec->ident_name, name_len);
         }
 
+        if (spec->seg_num == 0 || spec->reserved_recprot) {      /* an extension header of a user file has the name only: no revision, dates or FILENAMEXT (follow-up d) */
         /* FI2$W_REVISION: binary revision count. 1, matching every
            real freshly-created file examined - not 0 (this file has
            been "revised" once, by being written). */
@@ -274,6 +278,7 @@ bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec)
             size_t ext_len = strlen(spec->ident_name) - 20;
             if (ext_len > 66) ext_len = 66;
             memcpy(ident + 54, spec->ident_name + 20, ext_len);
+        }
         }
     }
 

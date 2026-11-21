@@ -43,7 +43,7 @@ def script(img, cmds, work):
     return errs
 
 
-def build(level, work):
+def build(level, work, fixed_b=False, odd_a=False):
     """a volume with two files in about 400 pieces each (primary header and 3 extension headers each): A.DAT and B.DAT in [F]"""
     img = os.path.join(work, 'ext%d.img' % level)
     p = subprocess.run(['./ods2_init', img, '8192', '--structure=%d' % level, '--label=EXTSET', '--cluster=1', '--maxfiles=2600'], capture_output=True, text=True)
@@ -69,8 +69,8 @@ def build(level, work):
     for nm, seed in (('A.DAT', 1), ('B.DAT', 2)):
         p = os.path.join(work, nm + str(level))
         with open(p, 'wb') as f:
-            f.write(bytes((i * 7 + seed + (i >> 8)) & 0xFF for i in range(pieces * 3 * 512)))
-        assert not script(img, ['COPY %s [F]%s' % (p, nm)], work)
+            f.write(bytes((i * 7 + seed + (i >> 8)) & 0xFF for i in range(pieces * 3 * 512 - (100 if (odd_a and nm == 'A.DAT') else 0))))
+        assert not script(img, ['COPY%s %s [F]%s' % ('/FORMAT=FIX512' if (fixed_b and nm == 'B.DAT') else '', p, nm)], work)
     assert not script(img, ['DELETE [000000]FILLER.BIN;1'], work)
     return img
 

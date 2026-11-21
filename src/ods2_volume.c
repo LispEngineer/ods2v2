@@ -3904,10 +3904,21 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
        every header written only ever points at headers already on
        disk. Each extension header has its own FID, its segment
        number, and a back link to the primary header (spec 3.5.2.16). */
+    {
+    /* The record attributes of an extension header (follow-up d item 6; CORPUS 61: ods5-vms3's COPY into mixed-size holes, V8.4 and VAX V7.3, ODS-2 and ODS-5, byte-identical, and the
+       APPEND that grows only the last extension header): the primary's RTYPE, RATTRIB, RSIZE and MAXREC, and HIBLK 0, EFBLK 1, FFBYTE 0, stored HIGHWATER 1; the primary header alone
+       holds the file's size. (The extension headers of a file VMS GREW by one-block extends hold RSIZE 0 and the blocks the primary maps as HIBLK: ods2v2 makes its headers in one go,
+       as COPY does.) ods2v2 wrote the whole file's size in every header before. */
+    const uint32_t file_hiblk = spec.hiblk, file_efblk = spec.efblk, file_highwater = spec.highwater;
+    const uint16_t file_ffbyte = spec.ffbyte;
     for (seg = segments - 1; seg >= 0; seg--) {
         ods2_fid_set_number(&spec.fid, sc->seg_file_number[seg]);
         spec.fid.fid_seq = sc->seg_seq[seg];
         spec.seg_num = (uint16_t) seg;
+        spec.hiblk = seg != 0 ? 0 : file_hiblk;
+        spec.efblk = seg != 0 ? 1 : file_efblk;
+        spec.ffbyte = seg != 0 ? 0 : file_ffbyte;
+        spec.highwater = seg != 0 ? 1 : file_highwater;
         memset(&spec.ext_fid, 0, sizeof(spec.ext_fid));
         if (seg + 1 < segments) {
             ods2_fid_set_number(&spec.ext_fid, sc->seg_file_number[seg + 1]);
@@ -3929,6 +3940,7 @@ static ods2_result_t create_file_impl(ods2_volume_t *vol, const uint8_t *parent_
         r = ods2_write_header(vol, sc->seg_file_number[seg], new_header);
         if (!r.ok) goto undo;
         lowest_written = seg;
+    }
     }
     /* spec.fid is now the primary header's, for the directory entry. */
 

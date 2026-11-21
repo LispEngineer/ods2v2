@@ -27,6 +27,8 @@
 #include <assert.h>
 #include "ods2_header_build.h"
 #include "ods2_validate.h"
+#include "ods2_checksum.h"
+#include "ods5_ondisk.h"
 
 int main(void)
 {
@@ -183,6 +185,51 @@ int main(void)
         assert(core->recprot == 0);
         assert(ident[20] == 0 && ident[21] == 0);
         printf("PASS: a level 2 directory header has protection 0xBA88, record protection 0 and revision 0\n");
+    }
+
+    /* Extension headers at level 2 as VMS makes them (follow-up d; CORPUS 58.6 and the VMS-made extension headers of asim5-frag-sf-2.img and phvs2-ods2v: 12 of 12): IDOFFSET 40,
+       MPOFFSET 50 words (byte 100), ACOFFSET and RSOFFSET 255, the "ident area" the 20-byte file name only (no revision, no dates, no FILENAMEXT), the map straight after and up to
+       204 words (102 Format 1 pointers). The INDEXF.SYS extension header (the spec flag reserved_recprot, which ods2_volume.c sets for it) and the level 5 one are unchanged. */
+    {
+        ods2_header_spec_t xs;
+        ods2_extent_t many[130];
+        uint8_t xh[512];
+        int i, fit;
+        const uint8_t *map;
+
+        for (i = 0; i < 130; i++) { many[i].lbn = 5000 + 4 * (uint32_t) i; many[i].block_count = 1; }
+        memset(&xs, 0, sizeof(xs));
+        xs.level = ODS5_LEVEL_2;
+        xs.fid.fid_num = 40; xs.fid.fid_seq = 1;
+        xs.backlink.fid_num = 12; xs.backlink.fid_seq = 1;
+        xs.seg_num = 2;
+        xs.ident_name = "A.DAT;1";
+        xs.hiblk = 78; xs.efblk = 1; xs.highwater = 79;
+        xs.extents = many;
+        fit = ods2_header_extents_that_fit_at(many, 130, ods2_header_map_offset(&xs));
+        assert(ods2_header_map_offset(&xs) == 100);         /* the map starts at byte 100 (word 50) */
+        assert(fit == 102);                                  /* 102 pointers of 4 bytes: 204 words, as the VMS-made ones hold */
+        xs.extent_count = fit;
+        assert(ods2_build_file_header(xh, &xs));
+        core = (ods2_head_core_t *) xh;
+        assert(core->idoffset == 40 && core->mpoffset == 50 && core->acoffset == 255 && core->rsoffset == 255);
+        assert(core->seg_num == 2 && core->map_inuse == 204);
+        assert(memcmp(xh + 80, "A.DAT;1             ", 20) == 0);        /* the name, space padded to 20 bytes */
+        map = xh + 100;
+        assert((map[1] >> 6) == 1 && map[2] == (5000 & 0xff));     /* the first pointer is right at byte 100 */
+        for (i = 100 + 4 * fit; i < 510; i++) assert(xh[i] == 0);   /* nothing (no revision, no dates, no FILENAMEXT) beyond the pointers */
+        assert(ods2_checksum(xh, 255) == (uint16_t) (xh[510] | (xh[511] << 8)));
+        printf("PASS: a level 2 extension header has MPOFFSET 50, a 20-byte name-only ident area, 102 pointers and nothing else, as VMS makes it\n");
+
+        xs.reserved_recprot = true;         /* the INDEXF.SYS extension header: the old layout, MPOFFSET 100 words */
+        xs.extent_count = 1;
+        assert(ods2_header_map_offset(&xs) == 200);
+        assert(ods2_build_file_header(xh, &xs));
+        assert(((ods2_head_core_t *) xh)->mpoffset == 100);
+        xs.reserved_recprot = false;
+        xs.level = ODS5_LEVEL_5;            /* level 5: already VMS's layout (20 bytes of FI5, MPOFFSET 50) */
+        assert(ods2_header_map_offset(&xs) == 100);
+        printf("PASS: the INDEXF.SYS extension header (MPOFFSET 100) and the level 5 one (MPOFFSET 50) are unchanged\n");
     }
 
     printf("\nods2_header_build_selftest: all checks passed\n");

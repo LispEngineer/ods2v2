@@ -108,9 +108,12 @@ typedef struct {
 bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec);
 
 /* How many of the `count` extents, taken in order from the first,
- * fit in one header's Map Area as built by ods2_build_file_header()
- * (310 bytes: from the fixed map offset at byte 200 up to the
- * checksum word). Returns -1 if one of them can't be represented by
+ * fit in a PRIMARY header's Map Area at level 2 as built by
+ * ods2_build_file_header() (310 bytes: from the map offset at byte 200
+ * up to the checksum word; an extension header of a user file holds
+ * 410 bytes, from byte 100, and a level 5 primary header's depends on
+ * its name: use ods2_header_extents_that_fit_at() with
+ * ods2_header_map_offset()). Returns -1 if one of them can't be represented by
  * any retrieval pointer format. A file whose extents don't all fit
  * continues in extension headers. */
 int ods2_header_extents_that_fit(const ods2_extent_t *extents, int count);
@@ -121,10 +124,13 @@ int ods2_header_extents_that_fit_at(const ods2_extent_t *extents, int count,
                                     size_t map_offset_bytes);
 
 /* Where the Map Area of the header ods2_build_file_header() makes from
- * `spec` starts, in bytes: 200 at level 2; at level 5 80 plus the FI5
- * ident area (at least 120 bytes, more for a long name) in the primary
- * header (spec->seg_num 0), and 100 in an extension header, whose ident
- * area is only the first 20 bytes of FI5, as VMS makes it. */
+ * `spec` starts, in bytes: 200 in a level 2 primary header; at level 5
+ * 80 plus the FI5 ident area (at least 120 bytes, more for a long name)
+ * in a primary header (spec->seg_num 0); and 100 in an extension header
+ * at either level (follow-up d), whose ident area is only its first 20
+ * bytes (the file name at level 2, the FI5 prefix at level 5), as VMS
+ * makes it. The INDEXF.SYS extension header at level 2 (spec flag
+ * reserved_recprot) keeps 200. */
 size_t ods2_header_map_offset(const ods2_header_spec_t *spec);
 
 #endif /* ODS2_HEADER_BUILD_H */

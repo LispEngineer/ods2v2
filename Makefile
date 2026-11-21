@@ -356,6 +356,10 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_setfile_check.sh
 	@echo "--- cli_setfile_ext_check (SET FILE/OWNER_UIC reaches every extension header: CORPUS 56.2) ---"
 	@sh tests/cli_setfile_ext_check.sh
+	@echo "--- cli_exthdr_vms_check (the extension headers ods2v2 makes have the layout of the VMS-made ones: follow-up d) ---"
+	@sh tests/cli_exthdr_vms_check.sh
+	@echo "--- cli_exthdr_attr_check (the record-attribute fields of the extension headers: follow-up d item 6, CORPUS 61) ---"
+	@sh tests/cli_exthdr_attr_check.sh
 	@echo "--- cli_extseq_check (an extension header's back link must carry the primary header's sequence number: review 54) ---"
 	@sh tests/cli_extseq_check.sh
 	@echo "--- cli_wo_vms_check (TYPE, PURGE, SET FILE against what VMS did) ---"
