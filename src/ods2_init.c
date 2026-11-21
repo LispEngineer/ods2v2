@@ -39,29 +39,30 @@
 static ods2_result_t ok(void) { ods2_result_t r; r.ok = true; r.problem = NULL; return r; }
 static ods2_result_t fail(const char *why) { ods2_result_t r; r.ok = false; r.problem = why; return r; }
 
+static unsigned default_cluster(uint64_t N);
+
 uint32_t ods2_init_max_files_limit(uint64_t blocks, unsigned cluster)
 {
     uint64_t c = cluster, limit;
-    if (c == 0) {
-        c = (blocks >= (1u << 20)) ? 16 : (blocks >= (1u << 18)) ? 8 : (blocks >= (1u << 16)) ? 4 : 1;     /* the default cluster for the size, as ods2_initialize chooses it */
-        if (c < ods2_init_min_cluster(blocks)) c = ods2_init_min_cluster(blocks);
-    }
+    if (c == 0) c = default_cluster(blocks);
     limit = blocks / (c + 1);
     return limit > 16711679u ? 16711679u : (uint32_t) limit;
 }
 
+/* The default cluster factor for a volume of this size, as ods2_initialize chooses it (before the explicit --cluster) */
+static unsigned default_cluster(uint64_t N)
+{
+    unsigned c = (N >= (1u << 20)) ? 16 : (N >= (1u << 18)) ? 8 : (N >= (1u << 16)) ? 4 : 1;
+    return c < ods2_init_min_cluster(N) ? ods2_init_min_cluster(N) : c;
+}
+
 uint32_t ods2_init_max_files_written(const ods2_init_options_t *opt)
 {
-    uint64_t N = opt->blocks, c = opt->cluster;
-    uint32_t maxfiles;
-    if (c == 0) {
-        c = (N >= (1u << 20)) ? 16 : (N >= (1u << 18)) ? 8 : (N >= (1u << 16)) ? 4 : 1;
-        if (c < ods2_init_min_cluster(N)) c = ods2_init_min_cluster(N);
-    }
-    maxfiles = opt->maxfiles != 0 ? opt->maxfiles : (uint32_t) (N / (2 * c + 2));
-    if (opt->maxfiles != 0 && !opt->maxfiles_over_limit && maxfiles > N) maxfiles = (uint32_t) N;
-    if (maxfiles < 64) maxfiles = 64;
-    if (maxfiles > 16711679u) maxfiles = 16711679u;
+    uint64_t N = opt->blocks, c = opt->cluster != 0 ? opt->cluster : default_cluster(N);
+    uint32_t maxfiles = opt->maxfiles != 0 ? opt->maxfiles : (uint32_t) (N / (2 * c + 2));
+    if (opt->maxfiles != 0 && !opt->maxfiles_over_limit && maxfiles > N) maxfiles = (uint32_t) N;      /* a volume cannot have more files than blocks */
+    if (maxfiles < 64) maxfiles = 64;                                                                   /* the floor */
+    if (maxfiles > 16711679u) maxfiles = 16711679u;                                                     /* the most a file number allows: no option lifts it */
     return maxfiles;
 }
 
@@ -130,11 +131,7 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
     if (level == ODS5_LEVEL_2 && (opt->volchar & (ODS5_VC_ACCESSTIMES | ODS5_VC_HARDLINKS | ODS5_VC_NO_SPECIAL_FILES))) {
         return fail("ACCESS_DATES, HARDLINKS and NO_SPECIAL_FILES are ODS-5 characteristics");
     }
-    c = opt->cluster;
-    if (c == 0) {
-        c = (N >= (1u << 20)) ? 16 : (N >= (1u << 18)) ? 8 : (N >= (1u << 16)) ? 4 : 1;
-        if (c < ods2_init_min_cluster(N)) c = ods2_init_min_cluster(N);        /* above 4,294,901,760 blocks: 17 */
-    }
+    c = opt->cluster != 0 ? opt->cluster : default_cluster(N);        /* above 4,294,901,760 blocks: 17 */
     /* VMS: HM2$W_CLUSTER and SCB$W_CLUSTER are words, and HM2$W_IBMAPVBN = 4c + 1 must fit a word too, so a volume can have a
        cluster factor of at most 16,383, and V8.4 and V7.3-2 mount and write one (CORPUS 36.1, 39). But INITIALIZE/CLUSTER_SIZE
        takes 1 to 16,380 and refuses 16,381 and above with %INIT-F-BADCLUSTER on both (CORPUS 36.2, 39). VAX V7.3 INITIALIZE took 16,381
@@ -164,10 +161,7 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
                  "ods2_init --cluster-over-limit makes one", ods2_init_min_cluster(N), (unsigned long long) N);
         return fail(min_msg);
     }
-    maxfiles = opt->maxfiles != 0 ? opt->maxfiles : (uint32_t) (N / (2 * (uint64_t) c + 2));
-    if (opt->maxfiles != 0 && !opt->maxfiles_over_limit && maxfiles > N) maxfiles = (uint32_t) N;     /* a volume cannot have more files than blocks */
-    if (maxfiles < 64) maxfiles = 64;
-    if (maxfiles > 16711679u) maxfiles = 16711679u;
+    maxfiles = ods2_init_max_files_written(opt);       /* the one place that works the count out (the tool's note asks it too) */
     m = (maxfiles + 4095) / 4096;                         /* index file bitmap blocks */
     nclusters = N / c;
     bm_blocks = (unsigned) ((nclusters + 4095) / 4096);   /* storage bitmap blocks (without the SCB) */

@@ -146,8 +146,11 @@ int main(int argc, char **argv)
     if (opt.maxfiles != 0) {
         uint32_t written = ods2_init_max_files_written(&opt), vms = ods2_init_max_files_limit(opt.blocks, opt.cluster);
         if (written < opt.maxfiles) {
-            fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (a volume cannot have more files than blocks%s); --maxfiles-over-limit keeps it\n", (unsigned) opt.maxfiles, (unsigned) written,
-                    written == 16711679u ? ": the most a file number allows" : "");
+            if (written == 16711679u && (opt.maxfiles_over_limit || opt.maxfiles <= opt.blocks)) {
+                fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (the most a file number allows: --maxfiles-over-limit does not lift this)\n", (unsigned) opt.maxfiles, (unsigned) written);
+            } else {
+                fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (a volume cannot have more files than blocks); --maxfiles-over-limit keeps it\n", (unsigned) opt.maxfiles, (unsigned) written);
+            }
         } else if (written > opt.maxfiles) {
             fprintf(stderr, "ods2_init: --maxfiles=%u raised to %u (the minimum)\n", (unsigned) opt.maxfiles, (unsigned) written);
         }

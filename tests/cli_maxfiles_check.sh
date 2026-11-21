@@ -33,6 +33,8 @@ for level in 2 5; do
     check "ODS-$level --maxfiles-over-limit keeps 20000 on 8192 blocks (and ods5check says so: an error)" "20000 1" "$(maxfiles "$img") $(clean "$img" | grep -c '^1 error')"
     img="$TMP/g$level.img"; $INIT "$img" 8192 --structure=$level >/dev/null 2>&1
     check "ODS-$level the default (blocks / (2 * cluster + 2)) is not touched: 2048" "2048" "$(maxfiles "$img")"
+    img="$TMP/j$level.img"; out=$($INIT "$img" 40000000 --structure=$level --cluster=2048 --maxfiles=20000000 --maxfiles-over-limit 2>&1)
+    check "ODS-$level --maxfiles=20000000 --maxfiles-over-limit: still clipped to 16711679 (the most a file number allows), and the note does not say the option keeps it" "16711679 1 0" "$(maxfiles "$img") $(echo "$out" | grep -c 'does not lift this') $(echo "$out" | grep -c 'over-limit keeps it')"
     img="$TMP/h$level.img"; out=$($INIT "$img" 8192 --structure=$level --maxfiles=10 2>&1)
     check "ODS-$level --maxfiles=10: raised to the floor, 64, and the note names the number written" "64 1" "$(maxfiles "$img") $(echo "$out" | grep -c 'raised to 64')"
     img="$TMP/i$level.img"; out=$($INIT "$img" 8192 --structure=$level --cluster=512 --maxfiles=100 2>&1)
