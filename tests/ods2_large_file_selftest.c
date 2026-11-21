@@ -219,7 +219,7 @@ int main(void)
         assert(n == 1);
         assert(core->map_inuse == 4);     /* one Format 3 pointer */
         assert(core->ext_fid.fid_num == 0);
-        assert(core->filechar & 0x0080);  /* FH2$M_CONTIG */
+        assert(!(core->filechar & 0x0080)); /* no FH2$M_CONTIG on a file, even in one piece (follow-up b) */
         assert(ext[0].block_count == (blocks + cluster - 1) / cluster * cluster);
         assert(before - free_clusters(&vol) == ext[0].block_count / cluster);
         read_back_and_compare(&vol, fid.fid_num, content, len);

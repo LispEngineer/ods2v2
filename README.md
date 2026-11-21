@@ -724,19 +724,22 @@ A write the host cannot hold (disk full, a file size limit) fails the command an
   preallocation); VMS mounts and analyses it cleanly on the versions listed under "Tested on".
 - **File header fields that differ from what VMS writes** (measured on VAX V7.3, V8.4 ODS-2 and ODS-5: CORPUS 52 point 4 and 5, review 44). Neither
   stops VMS from reading, checking (ANALYZE) or copying the files, and ods5check accepts both:
-  * **Highest block written** (`FH2$L_HIGHWATER`, "Highest block written" in `DUMP/HEADER`): VMS writes the highest block it wrote: the **end-of-file
-    block** in the versions its `COPY` made (CORPUS 52 point 4), the **whole allocation** (HIBLK + 1) in files written through DCL (`VMS_MEASURED_BEHAVIOUR.md`
-    R-8, ods5-cli). ods2v2's **ODS-5 value (allocated blocks + 1) is the second of these**, and it is true: ods2v2 writes or zero-fills every block it allocates,
-    so no block of its files holds another file's old data. Its **ODS-2 value, 0, is one no VMS-made file has** in any image measured (V8.4-2L2, V7.3-2, VAX V7.3):
-    that is the one real difference, on ODS-2 only. A field of 0 does not make VMS return zeros (its checksums of such files equal the contents); what it
-    could matter for is old data showing through in blocks that a *later* VMS extend leaves unwritten, which is not measured. It applies to every file ods2v2
-    makes, not only new versions. Writing a value VMS writes on ODS-2 is a separate item, after its own VMS check (a mark set too low could hide data).
+  * **The header of a new file is VMS's own on ODS-2 since follow-up b** (at ODS-5 it already was; both levels now write the same): **record protection 0**
+    (`FH2$W_RECPROT`; VMS writes 0xFE00 only in the reserved files and the master directory, which `ods2_init` still writes so), **no `CONTIG` characteristic** (`FH2$M_CONTIG`
+    0x80: none of the 2,644 user files of the VMS-made ODS-2 volumes has it, 225 of them in one piece), and **highest block written = HIBLK + 1**. *Highest block written is the
+    **stored** value of `FH2$L_HIGHWATER`; `DUMP/HEADER` prints it minus 1* (a file of 8 blocks with stored 9 shows 8). ods2v2 writes or zero-fills every block it allocates, so
+    the value is true and no block of its files holds another file's old data. What VMS does with these fields later (ods5-vms3, ASIM5 V8.4, CORPUS 56.4): a file with `CONTIG`
+    copied by `COPY` gives `%COPY-W-CBT` and by `BACKUP` `%BACKUP-E-NONCONTIG` where free space is fragmented (the copies are made, in pieces, without the flag), and `APPEND` or
+    `OPEN/APPEND` extends a CONTIG file non-contiguously and clears the flag, which is why ods2v2 no longer sets it; `RECPROT` 0xFE00 behaves exactly as 0 (no difference in reading,
+    writing or appending as a user who is not the owner); an `APPEND` inside the allocation sets the stored highest block written to HIBLK + 1 (from 0) or to the end-of-file block + 1 (from the
+    end-of-file block + 1 of a file `COPY` made), and past the allocation to EFBLK + 1. **VMS does not zero the blocks an `APPEND` adds or those past the new end of file** (CORPUS 58.7, VAX V7.3, on an image whose unwritten blocks and free blocks were filled with 0xAA: after an `APPEND` inside the allocation blocks 4 to 8 were still all 0xAA, and after one past the allocation the last block of the new allocation was still all 0xAA), and it sets the stored highest block written to the allocation + 1 even over such blocks (0 to 9 over blocks holding 0xAA): the stored value is a mark "everything is written", not a promise that VMS wrote it. **So HIBLK + 1 is true for ods2v2 only because ods2v2 writes or zero-fills every block it allocates** (write_extents), and that is what keeps old data of a deleted file from showing through the unwritten tail of a file's allocation when a later VMS `APPEND` extends the end of file into it. The older ods2v2 wrote 0xFE00, `CONTIG` on a file of one piece and stored 0 at ODS-2; files and volumes it made keep those headers (nothing
+    rewrites them). `tests/cli_filehdr_check.sh` (both levels, cluster 1 and 8, COPY, IMPORT, a fragmented volume) and `tests/cli_filehdr_vms_check.sh` (the VMS-made volumes of
+    the corpus follow the same rule) hold it.
   * **The header of a new directory** is VMS's own at both levels since follow-up c (CREATE/DIRECTORY on the step 0 containers of VAX V7.3 and V8.4, ODS-2 and ODS-5; CORPUS 49 and
     53): protection (S:RWE,O:RWE,G:RE,W:E) = 0xBA88, record protection 0, revision number 0, "Highest block written" = HIBLK + 1, the rest of the header equal field by field
     (`tests/dirhdr_vms_compare.py`). Before it, a directory made on an **ODS-2** volume had 0xFA00, 0xFE00, revision 1 and no highest block written (an unprivileged user who is not
     the owner could not search it, and the owner could delete it); directories made by older ods2v2 volumes keep that header (`SET FILE/PROTECTION=(S:RWE,O:RWE,G:RE,W:E)` on each
-    puts the protection right). The owner is `[1,4]` (VMS: the process's UIC), by design. A file's header on ODS-2 still differs from a file VMS made (RECPROT 0xFE00 against 0, CONTIG
-    against none, highest block written 0 against 2: `phvs2-copy-2.img` and `asim5-copy-2.img` of ods5-vms3's step 0): open, with "Highest block written" above.
+    puts the protection right). The owner is `[1,4]` (VMS: the process's UIC), by design.
 - **Directory revision count on VAX V7.3 (open, not changed):** a directory that grows adds 2 to its revision number for each block it gains here (measured on V8.4 and V7.3-2: ODS5_FORMAT_NOTES 15.4), but a directory VMS grew on a VAX adds 1 per block: `G.DIR` of ods5-vms3's `phvs2-copy-2.img` (VAX V7.3) is 42 blocks with revision 40, the same directory of `asim5-copy-2.img` (V8.4) revision 80. ANALYZE does not check the count and ods2v2 cannot know which VMS will read a volume, so there is no rule per version.
 - A version of a name whose record is full (58 versions of a 34-character name) starts a new record, as VMS does; an explicit version that belongs inside a full record
   is refused. The version limit of an explicit version below all the kept ones is refused (VMS's behaviour there is not measured).

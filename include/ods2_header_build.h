@@ -79,14 +79,17 @@ typedef struct {
                                    ("Read Me.txt;1"), stored in the
                                    FI5 ident area as ISO Latin-1 or
                                    UCS-2 (see ods5_names.h). */
-    uint32_t       highwater;  /* FH2$L_HIGHWATER: 0 = not set (the ODS-2 convention here);
-                                   at level 5 VMS writes HIBLK + 1 when every allocated
-                                   block has been written */
+    uint32_t       highwater;  /* FH2$L_HIGHWATER, the STORED value (VMS's DUMP/HEADER prints it minus 1): HIBLK + 1
+                                   when every allocated block has been written, as ods2v2 does for
+                                   a file at both levels (follow-up b); 0 = not set */
     uint16_t       link_count; /* level 5: FH2$W_LINKCOUNT. VMS V8.4 writes 1 on a volume with
                                    HM2$M_HARDLINKS and 0 on one without (measured, ODS5_FORMAT_NOTES.md 12.1) */
     bool           use_owner_prot; /* a new version of an existing name: the owner and protection of the version before it (CORPUS 49.9) */
     uint8_t        owner_uic[2];   /* FH2$L_FILEOWNER as stored (member, group), when use_owner_prot */
     uint16_t       fileprot;       /* FH2$W_FILEPROT, when use_owner_prot */
+    bool           reserved_recprot; /* a reserved file (INDEXF.SYS ... SECURITY.SYS, the master directory, an INDEXF.SYS extension header made at level 2):
+                                   FH2$W_RECPROT 0xFE00, as INITIALIZE writes it. Every other file or directory has RECPROT 0, as VMS makes it at
+                                   both levels (follow-up b; 2,644 user files of the VMS-made ODS-2 volumes, CORPUS 49 to 56) */
     bool           no_access_date; /* level 5: leave FI5$Q_ACCDATE zero, as VMS
                                    does for a symbolic link */
     unsigned       level;      /* 0 or 2: a level 2 header with an FI2

@@ -298,6 +298,7 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
             default:
                 break;
             }
+            spec.reserved_recprot = true;
             if (!ods2_build_file_header(hdr, &spec)) { fclose(img.f); remove(path); return fail("could not build a reserved file header"); }
             ((ods2_head_core_t *) hdr)->fileprot = files[n - 1].fileprot;
             if (n == 4) {

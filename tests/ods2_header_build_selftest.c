@@ -162,9 +162,11 @@ int main(void)
         assert(core->fileowner_uic[0] == 4);
         assert(core->fileowner_uic[1] == 1);
         assert(core->fileprot == 0xfa00);
-        assert(core->recprot == 0xfe00);
+        /* RECPROT of a user file: VMS writes 0 (all 2,644 user files of the VMS-made ODS-2 images on VAX V7.3, V7.3-2 and V8.4; only the reserved files carry
+           0xFE00): follow-up b. ods2v2 wrote 0xFE00 for every file at ODS-2. */
+        assert(core->recprot == 0);
         assert(ident[20] == 1 && ident[21] == 0);
-        printf("PASS: a file's fileowner_uic/fileprot/recprot/revision match real VMS-written values\n");
+        printf("PASS: a file's fileowner_uic/fileprot/recprot/revision match real VMS-written values (RECPROT 0)\n");
     }
 
     /* A directory header at level 2 as VMS's CREATE/DIRECTORY makes it (CORPUS 49 and 53: the directories of the VAX V7.3 and V8.4 ODS-2 step 0 containers): protection
