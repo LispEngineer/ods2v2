@@ -17,6 +17,7 @@ Usage: fault_inject.py [--quick] [--level 2|5] [--op NAME ...] [--keep]   (run f
 Exit status 1 if any check failed; the report names the operation, level and k.
 """
 import argparse, hashlib, os, random, re, shutil, subprocess, sys, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # tests/ext_headers.py and tests/setfile_ext_check.py (the interpreter may run with -I)
 
 os.environ['ODS5CHECK_ALLOW_ODS2V2_INDEXF_EXT'] = '1'   # the index_* operations make INDEXF.SYS extension headers on purpose
 ODS2 = os.environ.get('FAULT_ODS2', './ods2_fault')
@@ -235,6 +236,9 @@ def setup(level, hardlinks, fill_for=None, cluster=None):
         return setup_index(level, fill_for)
     if fill_for in ('limit3big', 'limit1big'):
         return setup_limit(level, fill_for)
+    if fill_for == 'sfext':
+        import setfile_ext_check      # two files of about 400 pieces each: a primary header and several extension headers (A.DAT is the one SET FILE changes)
+        return setfile_ext_check.build(level, WORK)
     img = os.path.join(WORK, 'base_%d%s%s%s.img' % (level, 'h' if hardlinks else '', fill_for or '', cluster or ''))
     if os.path.exists(img):
         os.remove(img)
@@ -377,12 +381,13 @@ OPS = {
     'setfile_dir': ('SET FILE/PROTECTION=(G,W) [000000]SUB.DIR;1', [], False, False, None),
     'setfile_reserved': ('SET FILE/PROTECTION=(W:R) [000000]BITMAP.SYS;1', [], False, False, None),
     'setfile_wild': ('SET FILE/PROTECTION=(G:R,W) [000000]*.TXT;*', [], False, False, None),
+    'setfile_owner_ext': ('SET FILE/OWNER_UIC=[200,3] [F]A.DAT', [], False, False, 'sfext'),
 }
 # the operations that are also run with an I/O error at the k-th write of the commit (the process goes on and says so), not only killed
-ERROR_MODE_OPS = ['newver_limit', 'newver_limit3_big', 'newver_limit1_big', 'newver_front', 'purge_names', 'setfile_prot', 'setfile_wild']
+ERROR_MODE_OPS = ['newver_limit', 'newver_limit3_big', 'newver_limit1_big', 'newver_front', 'purge_names', 'setfile_prot', 'setfile_wild', 'setfile_owner_ext']
 QUICK = ['index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
          'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split', 'newver_limit3_big', 'newver_limit1_big',
-         'purge_names', 'purge_keep2', 'setfile_prot', 'setfile_owner', 'setfile_dir', 'setfile_reserved', 'setfile_wild']
+         'purge_names', 'purge_keep2', 'setfile_prot', 'setfile_owner', 'setfile_dir', 'setfile_reserved', 'setfile_wild', 'setfile_owner_ext']
 
 
 def main():
@@ -463,6 +468,20 @@ def main():
                     if rcl != 0:
                         prob.append('SET VOLUME/LABEL after the fault failed: ' + outl.strip()[:120])
                     prob += ['after SET VOLUME/LABEL, checker: ' + b for b in badl]
+                if name == 'setfile_owner_ext':
+                    # an owner change on a file with extension headers writes the extension headers first and the primary header last (CORPUS 56.2: VMS changes
+                    # the owner in every header): whatever write was the last one done, a primary header that shows the new owner means every extension header
+                    # shows it too, and every header's checksum is right
+                    import ext_headers
+                    hs = [ext_headers.describe(nn, hh) for nn, hh in ext_headers.chain(trial, '[F]A.DAT')]
+                    if len(hs) < 4:
+                        prob.append('the file has %d headers, the case needs a primary header and 3 extension headers' % len(hs))
+                    if any(x['checksum'] != 'ok' for x in hs):
+                        prob.append('a header checksum is wrong')
+                    if hs and hs[0]['owner'] == '[200,3]' and any(x['owner'] != '[200,3]' for x in hs[1:]):
+                        prob.append('the primary header shows the new owner but an extension header has the old one')
+                    if hs and mode == 'crash' and k == n and any(x['owner'] != '[200,3]' for x in hs):
+                        prob.append('the completed change left an old owner in a header')
                 # one more COPY, then both checks again
                 rc3, out3 = ods2(trial, 'COPY %s [000000]ZZ.DAT' % followup, openv)
                 if rc3 != 0:
