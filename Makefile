@@ -358,6 +358,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_setfile_ext_check.sh
 	@echo "--- cli_exthdr_vms_check (the extension headers ods2v2 makes have the layout of the VMS-made ones: follow-up d) ---"
 	@sh tests/cli_exthdr_vms_check.sh
+	@echo "--- cli_extseq_check (an extension header's back link must carry the primary header's sequence number: review 54) ---"
+	@sh tests/cli_extseq_check.sh
 	@echo "--- cli_wo_vms_check (TYPE, PURGE, SET FILE against what VMS did) ---"
 	@sh tests/cli_wo_vms_check.sh
 	@echo "--- cli_longargs_check (the sanitizer gate for command parsing: long arguments) ---"
@@ -374,6 +376,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_mfd_check.sh
 	@echo "--- cli_zerofill_check (a new directory or file shows no old data of the free blocks it was given: review 56 F1) ---"
 	@sh tests/cli_zerofill_check.sh
+	@echo "--- cli_scbcheck_check (ods5check checks the storage control block against the home block: review 57) ---"
+	@sh tests/cli_scbcheck_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
 	@echo "--- CLI directory loop checks ---"

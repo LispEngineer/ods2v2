@@ -111,9 +111,11 @@ static bool contains_wildcard(const char *name)
 
 /* Is `h` the extension header it should be: a valid header (checksum), at level 2 or 5,
    with the file number the chain said, the next segment number, and the primary header's
-   file number as back link? A damaged or crafted EXT_FID otherwise makes the file continue
-   in another file's blocks. */
-static bool extension_header_ok(const uint8_t *h, ods2_fid_t expect, unsigned primary_num,
+   file number AND sequence number as back link? A damaged or crafted EXT_FID otherwise makes
+   the file continue in another file's blocks; a back link with the right number and another
+   sequence names a file that had the number before (review 54: every VMS-made extension header
+   of the corpus, 248 of them, carries the primary's sequence number). */
+static bool extension_header_ok(const uint8_t *h, ods2_fid_t expect, unsigned primary_num, uint16_t primary_seq,
                                 unsigned segment)
 {
     const ods2_head_core_t *core = (const ods2_head_core_t *) h;
@@ -122,7 +124,7 @@ static bool extension_header_ok(const uint8_t *h, ods2_fid_t expect, unsigned pr
            ods2_validate_head(h).ok &&
            ods2_fid_number(core->fid) == ods2_fid_number(expect) && core->fid.fid_seq == expect.fid_seq &&
            core->seg_num == segment &&
-           ods2_fid_number(core->backlink) == primary_num;
+           ods2_fid_number(core->backlink) == primary_num && core->backlink.fid_seq == primary_seq;
 }
 
 static int decode_header_extents(const uint8_t *header, ods2_extent_t *extents_out, size_t max)
@@ -210,7 +212,7 @@ static bool indexf_extents_load(ods2_volume_t *vol, const uint8_t *primary, bool
         uint8_t next[512];
         if (ods2_fid_number(core->ext_fid) == 0) break;
         if (!ods2_read_header(vol, ods2_fid_number(core->ext_fid), next).ok ||
-            !extension_header_ok(next, core->ext_fid, 1, segment + 1)) {
+            !extension_header_ok(next, core->ext_fid, 1, ((const ods2_head_core_t *) primary)->fid.fid_seq, segment + 1)) {
             if (strict) { if (why) *why = "an INDEXF.SYS extension header cannot be read"; return false; }
             break;
         }
@@ -1233,6 +1235,7 @@ ods2_result_t ods2_decode_all_extents_alloc(ods2_volume_t *vol, const uint8_t *h
             if (!r.ok) { free(list); return r; }
             if (!extension_header_ok(current, expect,
                                      ods2_fid_number(((const ods2_head_core_t *) header)->fid),
+                                     ((const ods2_head_core_t *) header)->fid.fid_seq,
                                      segment + 1)) {
                 free(list);
                 return fail("an extension header is not the next segment of this file "
@@ -2144,7 +2147,7 @@ static ods2_result_t indexf_tail(ods2_volume_t *vol, const uint8_t *primary, uin
         r = ods2_read_header(vol, next, tail);
         if (!r.ok) return r;
         /* each header must be the next segment of file 1, as at mount (review 27 N1): a wrong header is never written */
-        if (!extension_header_ok(tail, link, 1, count + 1)) return fail("an INDEXF.SYS extension header is not the next segment of the index file");
+        if (!extension_header_ok(tail, link, 1, ((const ods2_head_core_t *) primary)->fid.fid_seq, count + 1)) return fail("an INDEXF.SYS extension header is not the next segment of the index file");
         *tail_num = next;
         count++;
     }
@@ -4643,7 +4646,7 @@ static ods2_result_t set_file_security_impl(ods2_volume_t *vol, ods2_fid_t fid, 
             if (segment >= ODS2_SEGMENT_LIMIT) return fail("the extension header chain does not end: nothing is changed");
             r = ods2_read_header(vol, xnum, x);
             if (!r.ok) return r;
-            if (!extension_header_ok(x, link, number, segment)) {
+            if (!extension_header_ok(x, link, number, fid.fid_seq, segment)) {
                 return fail("an extension header is not the next segment of this file (wrong file number, segment number, back link or checksum): damaged, nothing is changed");
             }
             xcore->fileowner_uic[0] = member;
