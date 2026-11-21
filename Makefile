@@ -356,6 +356,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_setfile_check.sh
 	@echo "--- cli_setfile_ext_check (SET FILE/OWNER_UIC reaches every extension header: CORPUS 56.2) ---"
 	@sh tests/cli_setfile_ext_check.sh
+	@echo "--- cli_extseq_check (an extension header's back link must carry the primary header's sequence number: review 54) ---"
+	@sh tests/cli_extseq_check.sh
 	@echo "--- cli_wo_vms_check (TYPE, PURGE, SET FILE against what VMS did) ---"
 	@sh tests/cli_wo_vms_check.sh
 	@echo "--- cli_longargs_check (the sanitizer gate for command parsing: long arguments) ---"
