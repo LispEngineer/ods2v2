@@ -95,8 +95,8 @@ int main(void)
         for (i = 96; i < 100; i++) {
             assert(header[i] == ' ');
         }
-        /* bytes 100-101: FI2$W_REVISION, binary 1 - NOT a space. */
-        assert(header[100] == 1 && header[101] == 0);
+        /* bytes 100-101: FI2$W_REVISION, binary - NOT a space: 0 for a directory made by CREATE/DIRECTORY (CORPUS 53; follow-up c), 1 for a file. */
+        assert(header[100] == 0 && header[101] == 0);
         /* bytes 102-117: FI2$Q_CREDATE/REVDATE, binary timestamps -
            just confirm they're plausible non-zero values (an actual
            timestamp), not literally checking the exact value since
@@ -149,15 +149,38 @@ int main(void)
     /* Explicit check: fileowner_uic/fileprot/recprot must match real
        VMS-written values (confirmed via ods2_dump_header against a
        real INDEXF.SYS header) - not zero, which an earlier version
-       of this code left them at, and which real VMS never does. */
+       of this code left them at, and which real VMS never does.
+       A FILE's: a directory's are VMS's own, below (follow-up c). */
     {
-        assert(ods2_build_file_header(header, &spec));
-        core = (ods2_head_core_t *) header;
+        ods2_header_spec_t fspec = spec;
+        uint8_t fh[512];
+        const uint8_t *ident;
+        fspec.filechar = 0;
+        assert(ods2_build_file_header(fh, &fspec));
+        core = (ods2_head_core_t *) fh;
+        ident = fh + (size_t) core->idoffset * 2;
         assert(core->fileowner_uic[0] == 4);
         assert(core->fileowner_uic[1] == 1);
         assert(core->fileprot == 0xfa00);
         assert(core->recprot == 0xfe00);
-        printf("PASS: fileowner_uic/fileprot/recprot match real VMS-written values\n");
+        assert(ident[20] == 1 && ident[21] == 0);
+        printf("PASS: a file's fileowner_uic/fileprot/recprot/revision match real VMS-written values\n");
+    }
+
+    /* A directory header at level 2 as VMS's CREATE/DIRECTORY makes it (CORPUS 49 and 53: the directories of the VAX V7.3 and V8.4 ODS-2 step 0 containers): protection
+       0xBA88 (S:RWE,O:RWE,G:RE,W:E), record protection 0, revision 0 (a file's is 1). Follow-up c. */
+    {
+        uint8_t dh[512];
+        const uint8_t *ident;
+        assert(spec.filechar == 0x2080u);
+        assert(ods2_build_file_header(dh, &spec));
+        core = (ods2_head_core_t *) dh;
+        ident = dh + (size_t) core->idoffset * 2;
+        assert(core->fileowner_uic[0] == 4 && core->fileowner_uic[1] == 1);
+        assert(core->fileprot == 0xba88);
+        assert(core->recprot == 0);
+        assert(ident[20] == 0 && ident[21] == 0);
+        printf("PASS: a level 2 directory header has protection 0xBA88, record protection 0 and revision 0\n");
     }
 
     printf("\nods2_header_build_selftest: all checks passed\n");
