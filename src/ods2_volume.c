@@ -4664,7 +4664,11 @@ static ods2_result_t set_file_security_impl(ods2_volume_t *vol, ods2_fid_t fid, 
             if (!r.ok) return r;
             {
                 const char *why = extension_header_why(x, link, number, fid.fid_seq, segment);
-                if (why != NULL) return fail(why);          /* nothing is written: the change is only in memory until it ends */
+                if (why != NULL) {
+                    static char msg[300];
+                    snprintf(msg, sizeof(msg), "%s: damaged, nothing is changed", why);          /* nothing is written: the change is only in memory until it ends */
+                    return fail(msg);
+                }
             }
             xcore->fileowner_uic[0] = member;
             xcore->fileowner_uic[1] = group;
