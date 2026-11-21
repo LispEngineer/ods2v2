@@ -18,6 +18,5 @@ for k in type purge setf; do
     one $k 2 "$LG/write-ops-step0-asim5/WO_${K}_2.LOG" "$D/a5/img/asim5-$k-2.img"
     one $k 5 "$LG/write-ops-step0-asim5/WO_${K}_5.LOG" "$D/a5/img/asim5-$k-5.img"
 done
-rm -rf "${TMPDIR:-samples}/wo_vms_compare"
 if [ $fails -ne 0 ]; then echo "cli_wo_vms_check: $fails FAILED"; exit 1; fi
 echo "cli_wo_vms_check: done"

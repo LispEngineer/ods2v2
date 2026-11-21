@@ -435,7 +435,7 @@ CORPUS 49.8 C9). Also:
 * `ods2_init <new-image> <size> [--structure=2|5] [--label=NAME]
   [--hardlinks] [--access-dates] ...` makes an empty ODS-2 or ODS-5 volume
   of any size from 8192 blocks, laid out as VMS V8.4's INITIALIZE does; the
-  image file must not exist. `--geometry=SECTORS,TRACKS` sets the disk geometry
+  image file must not exist. `--maxfiles=N` is clipped to the number of blocks with a note (a volume cannot have more files than blocks: ods5check refuses an SCB volume size smaller than the file count) and raised to 64 if less; a count between blocks / (cluster + 1) and the blocks is kept, with a note that VMS INITIALIZE may not allow it (VMS INITIALIZE clips /MAXIMUM_FILES to floor(blocks / (cluster + 1)): 2,048 for 4,096 blocks at cluster 1, CORPUS 38, and measured on VAX V7.3 and Alpha V8.4, ODS-2 and ODS-5, at clusters 1 to 16, CORPUS 62 and 64; but VMS still reads and writes volumes above it, as with the battery's `a6-cluBIG`, cluster 2048, 2,000 files, on five versions); `--maxfiles-over-limit` keeps even a count above the blocks. `--geometry=SECTORS,TRACKS` sets the disk geometry
   the storage control block records (cylinders = ceil(blocks / (sectors x
   tracks)), as VMS writes them; the default is 32 x 16, and 63 x 255 above
   16 GiB so that the cylinder count stays below 65,536). VMS writes the geometry

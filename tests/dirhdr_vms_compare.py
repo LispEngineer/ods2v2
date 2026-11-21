@@ -8,6 +8,8 @@ Equal, byte for byte: the offsets, the segment number, the structure level, the 
 record, version limit), the characteristics, RECPROT, MAP_INUSE, ACC_MODE, FILEPROT, the back link, HIGHWATER, the file name area, the revision number and the ACL area.
 Allowed to differ, by design: the owner (VMS: the process UIC; ods2v2: [1,4]), the dates, the retrieval pointer's LBN, the checksum."""
 import os
+import atexit
+import tempfile
 import re
 import shutil
 import struct
@@ -19,7 +21,10 @@ import ods5check as O   # noqa: E402
 from dirhdr_fields import header, fnum   # noqa: E402
 
 ODS2, INIT = './ods2', './ods2_init'
-TMP = os.environ.get('TMPDIR', 'samples') + '/dirhdr_vms_compare'
+_TMPBASE = os.environ.get('TMPDIR', 'samples')
+os.makedirs(_TMPBASE, exist_ok=True)
+TMP = tempfile.mkdtemp(prefix='dirhdr_vms_compare_', dir=_TMPBASE)      # a directory of this run's own: two runs at once (parallel gates sharing a TMPDIR) never meet
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 fails = 0
 
 

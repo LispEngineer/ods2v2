@@ -49,7 +49,8 @@ typedef struct {
                                 0x80 NO_SPECIAL_FILES are valid at level 5 only), NOHIGHWATER ... */
     unsigned    cluster;     /* cluster factor; 0 = the default for the size; at most 16,380 (what Alpha V8.4 and V7.3-2 INITIALIZE accept; the VAX takes 16,382) */
     bool        cluster_over_limit; /* allow 16,381 to 16,383 too (VMS reads and writes such a volume, Alpha INITIALIZE does not make it) */
-    uint32_t    maxfiles;    /* 0 = the default, blocks / (2 * cluster + 2) */
+    uint32_t    maxfiles;    /* 0 = the default, blocks / (2 * cluster + 2); a count above the number of BLOCKS is clipped to it unless maxfiles_over_limit (the floor is 64) */
+    bool        maxfiles_over_limit; /* keep a maxfiles above the number of blocks (ods5check calls a volume with more files than blocks an error) */
     bool        security_lw1_given;  /* longword 1 of the security record: security_lw1 instead of 0x220 */
     uint32_t    security_lw1;
     uint32_t    sectors, tracks;  /* the SCB geometry (SCB$L_SECTORS, _TRACKS); cylinders = ceil(blocks / (sectors * tracks)),
@@ -65,6 +66,17 @@ void ods2_init_geometry(uint64_t blocks, uint32_t *sectors, uint32_t *tracks);
  * file is made sparse: only the blocks that hold structures are written.
  * On failure no file is left behind. */
 ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt);
+
+/* The most files VMS INITIALIZE allows on a volume of this many blocks and this cluster factor (0 = the default for the size): floor(blocks / (cluster + 1)), at most 16,711,679.
+   Measured: at cluster 1 (blocks / 2: 2,048 for 4,096 blocks, 4,096 for 8,192: CORPUS 38) and on VAX V7.3 and Alpha V8.4, ODS-2 and ODS-5, at clusters 1, 3, 8 and 16 on 8,192 and
+   16,384 blocks, with /MAXIMUM_FILES=16000000 and no message (CORPUS 62 and 64); the same family as the default count, blocks / (2 * cluster + 2). But VMS still reads and writes a volume above it (the
+   battery's a6-cluBIG, cluster 2048, 262,144 blocks, 2,000 files, on five versions), so ods2_initialize does not clip to it: it clips at the blocks, and the tool says that VMS
+   INITIALIZE would not allow the count. */
+uint32_t ods2_init_max_files_limit(uint64_t blocks, unsigned cluster);
+
+/* The maximum file count ods2_initialize writes for these options: the default or the asked-for count, clipped to the number of blocks (a volume cannot have more files than
+   blocks) unless maxfiles_over_limit, raised to 64, at most 16,711,679. */
+uint32_t ods2_init_max_files_written(const ods2_init_options_t *opt);
 
 /* The smallest cluster factor VMS INITIALIZE takes for a volume of this many blocks: ceil(blocks / (65535 x 4096)), so that the
    storage bitmap (one bit per cluster, 4096 per block, not counting the SCB block in front of it in BITMAP.SYS) is at most

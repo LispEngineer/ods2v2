@@ -376,6 +376,10 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_zerofill_check.sh
 	@echo "--- cli_scbcheck_check (ods5check checks the storage control block against the home block: review 57) ---"
 	@sh tests/cli_scbcheck_check.sh
+	@echo "--- cli_maxfiles_check (ods2_init clips --maxfiles as VMS INITIALIZE clips /MAXIMUM_FILES: review 61 F1) ---"
+	@sh tests/cli_maxfiles_check.sh
+	@echo "--- cli_notmp_check (no C source names /tmp: review 61 F2) ---"
+	@sh tests/cli_notmp_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
 	@echo "--- CLI directory loop checks ---"

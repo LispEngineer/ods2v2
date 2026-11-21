@@ -40,7 +40,7 @@
  *                             storage bitmap, one bit per cluster, is limited to 65,535 blocks; V8.4, V7.3-2 and VAX V7.3 refuse
  *                             to mount such a volume, %MOUNT-F-FILESTRUCT, CORPUS 41, 43; the same size with the minimum cluster
  *                             mounts, 41.1, 43)
- *     --maxfiles=N            maximum number of files
+ *     --maxfiles=N            maximum number of files (clipped to the number of blocks with a note; a count above blocks / (cluster + 1) is kept, with a note that VMS INITIALIZE may not allow it; --maxfiles-over-limit keeps even a count above the blocks)
  *     --geometry=SECTORS,TRACKS       the disk geometry the storage control block records (default 32,16; 63,255 above 16 GiB)
  *     --security=profile|empty|zero   what SECURITY.SYS holds (default: the profile record VMS writes)
  *
@@ -71,7 +71,7 @@ int main(int argc, char **argv)
 
     if (argc < 3) {
         fprintf(stderr, "usage: %s <new-image> <size> [--label=NAME] [--structure=2|5] [--hardlinks] "
-                        "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N] [--geometry=SECTORS,TRACKS | --target=ld|ra|scsi|axpbox|rz]\n"
+                        "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N] [--maxfiles-over-limit] [--geometry=SECTORS,TRACKS | --target=ld|ra|scsi|axpbox|rz]\n"
                         "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 16380 and at least blocks / 268,431,360 (rounded up)\n", argv[0]);
         return 2;
     }
@@ -129,6 +129,7 @@ int main(int argc, char **argv)
         }
         else if (starts(argv[i], "--cluster=")) opt.cluster = (unsigned) atoi(argv[i] + 10);
         else if (strcmp(argv[i], "--cluster-over-limit") == 0) opt.cluster_over_limit = true;
+        else if (strcmp(argv[i], "--maxfiles-over-limit") == 0) opt.maxfiles_over_limit = true;
         else if (strcmp(argv[i], "--security=profile") == 0) opt.security = ODS2_INIT_SECURITY_PROFILE;
         else if (strcmp(argv[i], "--security=empty") == 0) opt.security = ODS2_INIT_SECURITY_EMPTY;
         else if (strcmp(argv[i], "--security=zero") == 0) opt.security = ODS2_INIT_SECURITY_ZERO;
@@ -142,6 +143,22 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("%%ODS2-I-INITIALIZED, %s: %llu blocks, ODS-%u, label %s\n", argv[1], size, opt.level, opt.label);
+    if (opt.maxfiles != 0) {
+        uint32_t written = ods2_init_max_files_written(&opt), vms = ods2_init_max_files_limit(opt.blocks, opt.cluster);
+        if (written < opt.maxfiles) {
+            if (written == 16711679u && (opt.maxfiles_over_limit || opt.maxfiles <= opt.blocks)) {
+                fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (the most a file number allows: --maxfiles-over-limit does not lift this)\n", (unsigned) opt.maxfiles, (unsigned) written);
+            } else {
+                fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (a volume cannot have more files than blocks); --maxfiles-over-limit keeps it\n", (unsigned) opt.maxfiles, (unsigned) written);
+            }
+        } else if (written > opt.maxfiles) {
+            fprintf(stderr, "ods2_init: --maxfiles=%u raised to %u (the minimum)\n", (unsigned) opt.maxfiles, (unsigned) written);
+        }
+        if (written > vms) {
+            fprintf(stderr, "ods2_init: %u maximum files written; VMS INITIALIZE would allow at most %u here (floor(blocks / (cluster + 1)): measured on VAX V7.3 and Alpha V8.4, ODS-2 and ODS-5, clusters 1 to 16, CORPUS 62 and 64; VMS still reads and writes volumes above it)\n",
+                    (unsigned) written, (unsigned) vms);
+        }
+    }
     /* warnings: only for a volume that was made (a refused command prints none) */
     if (opt.cluster > 16380 && opt.cluster <= 16383 && opt.cluster_over_limit) {
         fprintf(stderr, "ods2_init: cluster factor %u: Alpha V8.4 and V7.3-2 INITIALIZE take 16,380 at most (%%INIT-F-BADCLUSTER above; "
