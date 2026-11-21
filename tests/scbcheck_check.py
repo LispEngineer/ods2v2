@@ -77,7 +77,10 @@ def main():
                          ('cluster factor 9', lambda b: struct.pack_into('<H', b, 2, 9), True, 'cluster factor'),
                          ('block-size field 0', lambda b: struct.pack_into('<I', b, 8, 0), True, 'block-size'),
                          ('volume size past the end of the image', lambda b: struct.pack_into('<I', b, 4, 16384 + 1000), True, 'volume size'),
-                         ('a wrong checksum word', lambda b: struct.pack_into('<H', b, 510, struct.unpack_from('<H', b, 510)[0] ^ 0x00ff), False, 'checksum'))
+                         ('a wrong checksum word', lambda b: struct.pack_into('<H', b, 510, struct.unpack_from('<H', b, 510)[0] ^ 0x00ff), False, 'checksum'),
+                         # review 59 S0: a volume size that is implausibly small (an SCB that says the volume is smaller than the data on it, or than its own file count)
+                         ('volume size 0', lambda b: struct.pack_into('<I', b, 4, 0), True, 'volume size'),
+                         ('volume size 100 (smaller than the data on the volume)', lambda b: struct.pack_into('<I', b, 4, 100), True, 'volume size'))
                 for what, fn, keep, word in cases:
                     img = os.path.join(work, 'w%d-%d.img' % (level, cluster))
                     shutil.copyfile(base, img)

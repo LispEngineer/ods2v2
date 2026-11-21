@@ -73,6 +73,16 @@ def main():
                     f.seek(lbn * 512)
                     f.write(b)
                 rc, o, md2 = export_md5(img, '[F]A.DAT', work, 'a_' + which)
+                # review 59 S2: the refusal names the one cause and both file IDs (the primary's number and sequence as they are, and the sequence the back link carries)
+                prim = ch[0][0]
+                pseq = struct.unpack_from('<H', ch[0][1], 10)[0]
+                rcx, ox = ods2(img, 'TYPE [F]A.DAT')
+                check('%s: the refusal (%s extension header) names the cause: the back link\'s sequence, with both sequence numbers and the file number' % (tag, which),
+                      True, 'back link' in ox and 'sequence' in ox and ('file %d' % prim) in ox and ('sequence %d' % pseq) in ox and ('sequence %d' % (pseq + 1)) in ox)
+                # review 59 S1: ods5check reports it too, as ods2 refuses it
+                pr = subprocess.run(['python3', '-I', 'tests/ods5check.py', img], capture_output=True, text=True)
+                errs = [ln for ln in pr.stdout.split('\n') if ln.startswith('ERROR') and 'back link' in ln and 'sequence' in ln]
+                check('%s: ods5check reports the wrong back-link sequence of the %s extension header as an error' % (tag, which), (1, True), (pr.returncode, bool(errs)))
                 check('%s: the back-link sequence of the %s extension header is wrong: the file is NOT read (EXPORT fails or gives nothing)' % (tag, which), True, rc != 0 or md2 is None)
                 chain_before = [E.describe(n, h) for n, h in ch]
                 rc, o = ods2(img, 'SET FILE/OWNER_UIC=[5,5] [F]A.DAT')
