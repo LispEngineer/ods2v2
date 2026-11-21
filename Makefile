@@ -372,6 +372,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_mfd_check.sh
 	@echo "--- cli_zerofill_check (a new directory or file shows no old data of the free blocks it was given: review 56 F1) ---"
 	@sh tests/cli_zerofill_check.sh
+	@echo "--- cli_scbcheck_check (ods5check checks the storage control block against the home block: review 57) ---"
+	@sh tests/cli_scbcheck_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
 	@echo "--- CLI directory loop checks ---"
