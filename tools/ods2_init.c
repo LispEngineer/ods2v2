@@ -152,7 +152,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "ods2_init: --maxfiles=%u raised to %u (the minimum)\n", (unsigned) opt.maxfiles, (unsigned) written);
         }
         if (written > vms) {
-            fprintf(stderr, "ods2_init: %u maximum files written; VMS INITIALIZE would allow at most %u here (blocks / (cluster + 1): measured at cluster 1, CORPUS 38; not measured at a larger cluster)\n",
+            fprintf(stderr, "ods2_init: %u maximum files written; VMS INITIALIZE would allow at most %u here (floor(blocks / (cluster + 1)): measured on VAX V7.3 at clusters 1, 3, 8 and 16, CORPUS 62; VMS still reads and writes volumes above it)\n",
                     (unsigned) written, (unsigned) vms);
         }
     }

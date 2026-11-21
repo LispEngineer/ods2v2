@@ -67,10 +67,11 @@ void ods2_init_geometry(uint64_t blocks, uint32_t *sectors, uint32_t *tracks);
  * On failure no file is left behind. */
 ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt);
 
-/* The most files VMS INITIALIZE is KNOWN to allow on a volume of this many blocks and this cluster factor (0 = the default for the size): blocks / (cluster + 1), at most
-   16,711,679. Measured only at cluster 1 (it clips /MAXIMUM_FILES to blocks / 2: 2,048 for 4,096 blocks, 4,096 for 8,192: CORPUS 38); the same family as the default count,
-   blocks / (2 * cluster + 2). At a larger cluster it is NOT measured, and VMS ran the battery's a6-cluBIG (cluster 2048, 262,144 blocks) with 2,000 files, more than this gives:
-   so ods2_initialize does not clip to it, it only lets the tool say that VMS may not allow the count. */
+/* The most files VMS INITIALIZE allows on a volume of this many blocks and this cluster factor (0 = the default for the size): floor(blocks / (cluster + 1)), at most 16,711,679.
+   Measured: at cluster 1 (blocks / 2: 2,048 for 4,096 blocks, 4,096 for 8,192: CORPUS 38) and on VAX V7.3 at clusters 1, 3, 8 and 16 on 8,192 and 16,384 blocks, with
+   /MAXIMUM_FILES=16000000 and no message (CORPUS 62); the same family as the default count, blocks / (2 * cluster + 2). But VMS still reads and writes a volume above it (the
+   battery's a6-cluBIG, cluster 2048, 262,144 blocks, 2,000 files, on five versions), so ods2_initialize does not clip to it: it clips at the blocks, and the tool says that VMS
+   INITIALIZE would not allow the count. */
 uint32_t ods2_init_max_files_limit(uint64_t blocks, unsigned cluster);
 
 /* The maximum file count ods2_initialize writes for these options: the default or the asked-for count, clipped to the number of blocks (a volume cannot have more files than

@@ -4,7 +4,7 @@
 # cli_maxfiles_check.sh - ods2_init clips --maxfiles the way VMS INITIALIZE clips /MAXIMUM_FILES (review 61 F1): to blocks / (cluster + 1) (CORPUS 38: "INITIALIZE clips
 # /MAXIMUM_FILES to blocks/2: 2,048 for 4,096 blocks, 4,096 for 8,192" at cluster 1; the same family as the default, blocks / (2 * cluster + 2)), with a note, so that a volume of
 # ods2v2's own making never has more files than blocks (ods5check refuses an SCB volume size smaller than the home block's maximum file count: review 59 S0). Only the blocks bound is
-# enforced (review 61 recheck: VMS ran the battery's a6-cluBIG, cluster 2048, with 2,000 files on five versions); between blocks / (cluster + 1) and blocks the count is kept and a
+# enforced (review 61 recheck: VMS ran the battery's a6-cluBIG, cluster 2048, with 2,000 files on five versions, though INITIALIZE itself clips to blocks / (cluster + 1): CORPUS 62); between blocks / (cluster + 1) and blocks the count is kept and a
 # note says what VMS INITIALIZE would allow; the floor of 64 is noted with the number written. --maxfiles-over-limit keeps even a count above the blocks. Called by `make test`; run from the project root.
 INIT=./ods2_init
 TMP=${TMPDIR:-samples}/maxfiles_check.$$
