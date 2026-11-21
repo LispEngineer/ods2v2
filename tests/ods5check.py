@@ -500,6 +500,22 @@ def main():
         data = b''.join(v.blk(l, c) for l, c in bx)
         scb = data[:512]
         bits = data[512:]
+        # the storage control block against the home block (review 57 item 4): VMS V7.3 answers a wrong one with %ANALDISK-W-CHKSCB and nothing here looked at these fields. The
+        # structure level and the cluster factor are the home block's, the volume size does not lie past the end of the image, the checksum word (the word sum of words 0 to 254)
+        # is right, and the block-size field is 1 as INITIALIZE writes it (every VMS-made SCB of the corpus; 219 images). The starter volume's placeholder (volume size all ones)
+        # is not judged.
+        if u32(scb, 4) != 0xFFFFFFFF:
+            if u16(scb, 0) != v.struclev:
+                fnd.err('SCB structure level 0x%04x is not the home block\'s 0x%04x' % (u16(scb, 0), v.struclev))
+            if u16(scb, 2) != v.cluster:
+                fnd.err('SCB cluster factor %d is not the home block\'s %d' % (u16(scb, 2), v.cluster))
+            if u32(scb, 4) > v.size_blocks:
+                fnd.err('SCB volume size %d is past the end of the image (%d blocks)' % (u32(scb, 4), v.size_blocks))
+            wsum = sum(struct.unpack_from('<255H', scb, 0)) & 0xffff
+            if wsum != u16(scb, 510):
+                fnd.err('SCB checksum word is wrong (0x%04x; the words sum to 0x%04x)' % (u16(scb, 510), wsum))
+            if u32(scb, 8) != 1:
+                fnd.err('SCB block-size field is %d, not 1 as INITIALIZE writes it' % u32(scb, 8))
         volsize = u32(scb, 4)
         if volsize == 0 or volsize > v.size_blocks:
             volsize = v.size_blocks  # the starter volume's SCB is all ones: go by the image size
