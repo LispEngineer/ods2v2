@@ -89,6 +89,24 @@ def main():
                 after = [E.describe(n, h) for n, h in E.chain(img, '[F]A.DAT')]
                 check('%s: SET FILE/OWNER_UIC refuses it (%s extension header) and writes nothing' % (tag, which), True, rc != 0 and [x['owner'] for x in after] == [x['owner'] for x in chain_before])
                 rcb2, ob2, mdb2 = export_md5(img, '[F]B.DAT', work, 'b_' + which)
+                if which == 'first':
+                    # review 61 S3: the primary header's EXT_FID names the extension header by number and SEQUENCE; one whose sequence differs from the header's own (EXT_FID says
+                    # N+1, the header has N) is refused by ods2 and reported by ods5check
+                    img3 = os.path.join(work, 'f%d.img' % level)
+                    shutil.copyfile(img0, img3)
+                    lbn3 = E.D.lbn(E.O.Vol(img3), ch[0][0])
+                    with open(img3, 'r+b') as f:
+                        f.seek(lbn3 * 512)
+                        b3 = bytearray(f.read(512))
+                        struct.pack_into('<H', b3, 16, (struct.unpack_from('<H', b3, 16)[0] + 1) & 0xffff)      # EXT_FID's sequence number
+                        struct.pack_into('<H', b3, 510, sum(struct.unpack_from('<255H', b3, 0)) & 0xffff)
+                        f.seek(lbn3 * 512)
+                        f.write(b3)
+                    rc3, o3, md3 = export_md5(img3, '[F]A.DAT', work, 'ef_' + str(level))
+                    check('%s: an EXT_FID whose sequence differs from the extension header\'s: the file is NOT read' % tag, True, rc3 != 0 or md3 is None)
+                    pr3 = subprocess.run(['python3', '-I', 'tests/ods5check.py', img3], capture_output=True, text=True)
+                    errs3 = [ln for ln in pr3.stdout.split('\n') if ln.startswith('ERROR') and 'EXT_FID' in ln and 'sequence' in ln]
+                    check('%s: ods5check reports the EXT_FID sequence that does not match the extension header as an error' % tag, (1, True), (pr3.returncode, bool(errs3)))
                 check('%s: the other file is read as before' % tag, (0, mdb), (rcb2, mdb2))
     finally:
         shutil.rmtree(work, ignore_errors=True)
