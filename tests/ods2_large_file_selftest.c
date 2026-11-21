@@ -233,7 +233,7 @@ int main(void)
         /* Lay out runs of alternating sizes back to back, then take
            every other one back, leaving many separate holes; the rest
            of the free space is swallowed so only the holes remain. */
-        enum { RUNS = 520 };
+        enum { RUNS = 760 };         /* was 520: with VMS's extension headers (102 pointers each, follow-up d) the file needs fewer headers, and 520 runs no longer left the volume without room for them */
         static uint32_t run_lbn[RUNS];
         static unsigned run_len[RUNS];
         uint32_t big_lbn[64];
