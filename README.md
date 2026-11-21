@@ -435,7 +435,7 @@ CORPUS 49.8 C9). Also:
 * `ods2_init <new-image> <size> [--structure=2|5] [--label=NAME]
   [--hardlinks] [--access-dates] ...` makes an empty ODS-2 or ODS-5 volume
   of any size from 8192 blocks, laid out as VMS V8.4's INITIALIZE does; the
-  image file must not exist. `--geometry=SECTORS,TRACKS` sets the disk geometry
+  image file must not exist. `--maxfiles=N` is clipped to blocks / (cluster + 1) with a note, as VMS INITIALIZE clips /MAXIMUM_FILES (measured at cluster 1: 2,048 for 4,096 blocks, 4,096 for 8,192, CORPUS 38; other clusters are the same family, not measured), so that no volume has more files than blocks; `--maxfiles-over-limit` keeps it. `--geometry=SECTORS,TRACKS` sets the disk geometry
   the storage control block records (cylinders = ceil(blocks / (sectors x
   tracks)), as VMS writes them; the default is 32 x 16, and 63 x 255 above
   16 GiB so that the cylinder count stays below 65,536). VMS writes the geometry

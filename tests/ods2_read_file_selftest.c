@@ -22,8 +22,11 @@
  * SOFTWARE.
  */
 
+#define _POSIX_C_SOURCE 200809L        /* mkstemp */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <assert.h>
 #include "ods2_volume.h"
 
@@ -59,7 +62,8 @@ static void build_synthetic_header(uint8_t *header, uint32_t content_lbn,
 
 int main(void)
 {
-    const char *tmp_path = "/tmp/ods2_read_file_test.img";
+    char tmp_buf[512];
+    const char *tmp_path = tmp_buf;
     FILE *f;
     ods2_volume_t vol;
     uint8_t header[512];
@@ -67,6 +71,20 @@ int main(void)
     size_t bytes_read = 0;
     ods2_result_t r;
 
+    /* The scratch file: mkstemp in $TMPDIR, else in the build directory, never a fixed path in /tmp (review 61 F2: a RAM disk on many hosts). */
+    {
+        const char *dir = getenv("TMPDIR");
+        int fd;
+        if (dir == NULL || dir[0] == '\0') dir = "build";
+        snprintf(tmp_buf, sizeof(tmp_buf), "%s/ods2_read_file_test.XXXXXX", dir);
+        fd = mkstemp(tmp_buf);
+        if (fd < 0) {
+            snprintf(tmp_buf, sizeof(tmp_buf), "build/ods2_read_file_test.XXXXXX");
+            fd = mkstemp(tmp_buf);
+        }
+        assert(fd >= 0);
+        close(fd);
+    }
     /* Build a tiny 4-block file: write known content at blocks 0-3,
        then a header (built separately, not part of this file) that
        claims blocks 0-3 are this "file"'s content, with efblk=3 and

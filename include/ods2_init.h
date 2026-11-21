@@ -49,7 +49,8 @@ typedef struct {
                                 0x80 NO_SPECIAL_FILES are valid at level 5 only), NOHIGHWATER ... */
     unsigned    cluster;     /* cluster factor; 0 = the default for the size; at most 16,380 (what Alpha V8.4 and V7.3-2 INITIALIZE accept; the VAX takes 16,382) */
     bool        cluster_over_limit; /* allow 16,381 to 16,383 too (VMS reads and writes such a volume, Alpha INITIALIZE does not make it) */
-    uint32_t    maxfiles;    /* 0 = the default, blocks / (2 * cluster + 2) */
+    uint32_t    maxfiles;    /* 0 = the default, blocks / (2 * cluster + 2); more than ods2_init_max_files_limit() is clipped to it unless maxfiles_over_limit */
+    bool        maxfiles_over_limit; /* keep a maxfiles above blocks / (cluster + 1) (VMS INITIALIZE clips it: CORPUS 38) */
     bool        security_lw1_given;  /* longword 1 of the security record: security_lw1 instead of 0x220 */
     uint32_t    security_lw1;
     uint32_t    sectors, tracks;  /* the SCB geometry (SCB$L_SECTORS, _TRACKS); cylinders = ceil(blocks / (sectors * tracks)),
@@ -65,6 +66,12 @@ void ods2_init_geometry(uint64_t blocks, uint32_t *sectors, uint32_t *tracks);
  * file is made sparse: only the blocks that hold structures are written.
  * On failure no file is left behind. */
 ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt);
+
+/* The most files a volume of this many blocks and this cluster factor (0 = the default for the size) can be asked to hold: blocks / (cluster + 1), at most 16,711,679.
+   VMS INITIALIZE clips /MAXIMUM_FILES to it: measured at cluster 1 (blocks / 2: 2,048 for 4,096 blocks, 4,096 for 8,192: CORPUS 38); the same family as the default
+   count, blocks / (2 * cluster + 2); other clusters are not measured. ods2_initialize clips a larger maxfiles to it (unless maxfiles_over_limit), so that no volume has more
+   files than blocks (ods5check refuses an SCB volume size smaller than the maximum file count). */
+uint32_t ods2_init_max_files_limit(uint64_t blocks, unsigned cluster);
 
 /* The smallest cluster factor VMS INITIALIZE takes for a volume of this many blocks: ceil(blocks / (65535 x 4096)), so that the
    storage bitmap (one bit per cluster, 4096 per block, not counting the SCB block in front of it in BITMAP.SYS) is at most

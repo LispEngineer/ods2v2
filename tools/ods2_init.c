@@ -40,7 +40,7 @@
  *                             storage bitmap, one bit per cluster, is limited to 65,535 blocks; V8.4, V7.3-2 and VAX V7.3 refuse
  *                             to mount such a volume, %MOUNT-F-FILESTRUCT, CORPUS 41, 43; the same size with the minimum cluster
  *                             mounts, 41.1, 43)
- *     --maxfiles=N            maximum number of files
+ *     --maxfiles=N            maximum number of files (clipped to blocks / (cluster + 1) with a note, as VMS INITIALIZE clips /MAXIMUM_FILES; --maxfiles-over-limit keeps it)
  *     --geometry=SECTORS,TRACKS       the disk geometry the storage control block records (default 32,16; 63,255 above 16 GiB)
  *     --security=profile|empty|zero   what SECURITY.SYS holds (default: the profile record VMS writes)
  *
@@ -71,7 +71,7 @@ int main(int argc, char **argv)
 
     if (argc < 3) {
         fprintf(stderr, "usage: %s <new-image> <size> [--label=NAME] [--structure=2|5] [--hardlinks] "
-                        "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N] [--geometry=SECTORS,TRACKS | --target=ld|ra|scsi|axpbox|rz]\n"
+                        "[--access-dates] [--no-special-files] [--nohighwater] [--cluster=N] [--maxfiles=N] [--maxfiles-over-limit] [--geometry=SECTORS,TRACKS | --target=ld|ra|scsi|axpbox|rz]\n"
                         "       <size> is blocks, or a number with K, M or G (KiB, MiB, GiB); 8192 to 2^32-16 blocks, cluster factor at most 16380 and at least blocks / 268,431,360 (rounded up)\n", argv[0]);
         return 2;
     }
@@ -129,6 +129,7 @@ int main(int argc, char **argv)
         }
         else if (starts(argv[i], "--cluster=")) opt.cluster = (unsigned) atoi(argv[i] + 10);
         else if (strcmp(argv[i], "--cluster-over-limit") == 0) opt.cluster_over_limit = true;
+        else if (strcmp(argv[i], "--maxfiles-over-limit") == 0) opt.maxfiles_over_limit = true;
         else if (strcmp(argv[i], "--security=profile") == 0) opt.security = ODS2_INIT_SECURITY_PROFILE;
         else if (strcmp(argv[i], "--security=empty") == 0) opt.security = ODS2_INIT_SECURITY_EMPTY;
         else if (strcmp(argv[i], "--security=zero") == 0) opt.security = ODS2_INIT_SECURITY_ZERO;
@@ -142,6 +143,10 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("%%ODS2-I-INITIALIZED, %s: %llu blocks, ODS-%u, label %s\n", argv[1], size, opt.level, opt.label);
+    if (opt.maxfiles != 0 && !opt.maxfiles_over_limit && opt.maxfiles > ods2_init_max_files_limit(opt.blocks, opt.cluster)) {
+        fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (blocks / (cluster + 1): VMS INITIALIZE clips /MAXIMUM_FILES the same way, measured at cluster 1: 2,048 for 4,096 blocks, "
+                "CORPUS 38); --maxfiles-over-limit keeps it\n", (unsigned) opt.maxfiles, (unsigned) ods2_init_max_files_limit(opt.blocks, opt.cluster));
+    }
     /* warnings: only for a volume that was made (a refused command prints none) */
     if (opt.cluster > 16380 && opt.cluster <= 16383 && opt.cluster_over_limit) {
         fprintf(stderr, "ods2_init: cluster factor %u: Alpha V8.4 and V7.3-2 INITIALIZE take 16,380 at most (%%INIT-F-BADCLUSTER above; "

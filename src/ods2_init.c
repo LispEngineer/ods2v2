@@ -39,6 +39,17 @@
 static ods2_result_t ok(void) { ods2_result_t r; r.ok = true; r.problem = NULL; return r; }
 static ods2_result_t fail(const char *why) { ods2_result_t r; r.ok = false; r.problem = why; return r; }
 
+uint32_t ods2_init_max_files_limit(uint64_t blocks, unsigned cluster)
+{
+    uint64_t c = cluster, limit;
+    if (c == 0) {
+        c = (blocks >= (1u << 20)) ? 16 : (blocks >= (1u << 18)) ? 8 : (blocks >= (1u << 16)) ? 4 : 1;     /* the default cluster for the size, as ods2_initialize chooses it */
+        if (c < ods2_init_min_cluster(blocks)) c = ods2_init_min_cluster(blocks);
+    }
+    limit = blocks / (c + 1);
+    return limit > 16711679u ? 16711679u : (uint32_t) limit;
+}
+
 unsigned ods2_init_min_cluster(uint64_t blocks)
 {
     const uint64_t per = 65535ULL * 4096ULL;
@@ -139,6 +150,7 @@ ods2_result_t ods2_initialize(const char *path, const ods2_init_options_t *opt)
         return fail(min_msg);
     }
     maxfiles = opt->maxfiles != 0 ? opt->maxfiles : (uint32_t) (N / (2 * (uint64_t) c + 2));
+    if (opt->maxfiles != 0 && !opt->maxfiles_over_limit && maxfiles > ods2_init_max_files_limit(N, c)) maxfiles = ods2_init_max_files_limit(N, c);     /* as VMS INITIALIZE clips /MAXIMUM_FILES */
     if (maxfiles < 64) maxfiles = 64;
     if (maxfiles > 16711679u) maxfiles = 16711679u;
     m = (maxfiles + 4095) / 4096;                         /* index file bitmap blocks */

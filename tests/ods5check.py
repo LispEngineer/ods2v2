@@ -444,6 +444,9 @@ def main():
                         'mount it on VMS only with /NOWRITE (ANALYZE gives OPENINDEX, files behind the first extension header '
                         'are "no such file"). This may be wrong: it is a guess at what VMS does not write, and no VMS-made '
                         'extension header of INDEXF.SYS has been seen' % (where, efn))
+            # review 61 S3: EXT_FID names the extension header by number AND sequence; the header's own file id must carry that sequence (every VMS-made chain of the corpus does)
+            if u16(cur, 16) != u16(nb, 10):
+                fnd.err('%s: EXT_FID names extension header %d with sequence %d, but that header is sequence %d (ods2 refuses to read the file through it)' % (where, efn, u16(cur, 16), u16(nb, 10)))
             if u16(nb, 4) != len(segs):
                 fnd.err('%s: extension header %d has segment number %d, expected %d' % (where, efn, u16(nb, 4), len(segs)))
             if u16(nb, 66) | (nb[71] << 16) != n:
