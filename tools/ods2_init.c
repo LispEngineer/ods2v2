@@ -40,7 +40,7 @@
  *                             storage bitmap, one bit per cluster, is limited to 65,535 blocks; V8.4, V7.3-2 and VAX V7.3 refuse
  *                             to mount such a volume, %MOUNT-F-FILESTRUCT, CORPUS 41, 43; the same size with the minimum cluster
  *                             mounts, 41.1, 43)
- *     --maxfiles=N            maximum number of files (clipped to blocks / (cluster + 1) with a note, as VMS INITIALIZE clips /MAXIMUM_FILES; --maxfiles-over-limit keeps it)
+ *     --maxfiles=N            maximum number of files (clipped to the number of blocks with a note; a count above blocks / (cluster + 1) is kept, with a note that VMS INITIALIZE may not allow it; --maxfiles-over-limit keeps even a count above the blocks)
  *     --geometry=SECTORS,TRACKS       the disk geometry the storage control block records (default 32,16; 63,255 above 16 GiB)
  *     --security=profile|empty|zero   what SECURITY.SYS holds (default: the profile record VMS writes)
  *
@@ -143,9 +143,18 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("%%ODS2-I-INITIALIZED, %s: %llu blocks, ODS-%u, label %s\n", argv[1], size, opt.level, opt.label);
-    if (opt.maxfiles != 0 && !opt.maxfiles_over_limit && opt.maxfiles > ods2_init_max_files_limit(opt.blocks, opt.cluster)) {
-        fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (blocks / (cluster + 1): VMS INITIALIZE clips /MAXIMUM_FILES the same way, measured at cluster 1: 2,048 for 4,096 blocks, "
-                "CORPUS 38); --maxfiles-over-limit keeps it\n", (unsigned) opt.maxfiles, (unsigned) ods2_init_max_files_limit(opt.blocks, opt.cluster));
+    if (opt.maxfiles != 0) {
+        uint32_t written = ods2_init_max_files_written(&opt), vms = ods2_init_max_files_limit(opt.blocks, opt.cluster);
+        if (written < opt.maxfiles) {
+            fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (a volume cannot have more files than blocks%s); --maxfiles-over-limit keeps it\n", (unsigned) opt.maxfiles, (unsigned) written,
+                    written == 16711679u ? ": the most a file number allows" : "");
+        } else if (written > opt.maxfiles) {
+            fprintf(stderr, "ods2_init: --maxfiles=%u raised to %u (the minimum)\n", (unsigned) opt.maxfiles, (unsigned) written);
+        }
+        if (written > vms) {
+            fprintf(stderr, "ods2_init: %u maximum files written; VMS INITIALIZE would allow at most %u here (blocks / (cluster + 1): measured at cluster 1, CORPUS 38; not measured at a larger cluster)\n",
+                    (unsigned) written, (unsigned) vms);
+        }
     }
     /* warnings: only for a volume that was made (a refused command prints none) */
     if (opt.cluster > 16380 && opt.cluster <= 16383 && opt.cluster_over_limit) {

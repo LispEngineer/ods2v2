@@ -112,7 +112,7 @@ static void run(unsigned level)
     int count = 0;
 
     memset(&opt, 0, sizeof(opt));
-    opt.blocks = 80000; opt.label = "DSEARCH"; opt.level = level; opt.cluster = 1; opt.maxfiles = 40000;     /* 80,000 blocks: 40,000 files is the most (blocks / (cluster + 1)) that ods2_initialize keeps, as VMS INITIALIZE clips /MAXIMUM_FILES (review 61 F1) */
+    opt.blocks = 80000; opt.label = "DSEARCH"; opt.level = level; opt.cluster = 1; opt.maxfiles = 40000;     /* 80,000 blocks: ods2_initialize clips a file count above the number of blocks (review 61 F1) */
     remove(DISK_PATH);
     assert(ods2_initialize(DISK_PATH, &opt).ok);
     assert(ods2_mount_write(DISK_PATH, &vol).ok);
