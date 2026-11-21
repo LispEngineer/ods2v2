@@ -109,22 +109,38 @@ static bool contains_wildcard(const char *name)
     return strchr(name, '*') != NULL || strchr(name, '%') != NULL;
 }
 
-/* Is `h` the extension header it should be: a valid header (checksum), at level 2 or 5,
-   with the file number the chain said, the next segment number, and the primary header's
-   file number AND sequence number as back link? A damaged or crafted EXT_FID otherwise makes
-   the file continue in another file's blocks; a back link with the right number and another
-   sequence names a file that had the number before (review 54: every VMS-made extension header
-   of the corpus, 248 of them, carries the primary's sequence number). */
-static bool extension_header_ok(const uint8_t *h, ods2_fid_t expect, unsigned primary_num, uint16_t primary_seq,
-                                unsigned segment)
+/* Why `h` is not the extension header it should be, or NULL if it is: a valid header (checksum), at level 2 or 5, with the file number and sequence the chain said, the next
+   segment number, and the primary header's file number AND sequence number as back link. A damaged or crafted EXT_FID otherwise makes the file continue in another file's blocks; a
+   back link with the right number and another sequence names a file that had the number before (review 54: every VMS-made extension header of the corpus, 248 of them, carries the
+   primary's sequence number). The text names the one cause with the file numbers and sequences involved (review 59 S2); it lives in a static buffer until the next call. */
+static const char *extension_header_why(const uint8_t *h, ods2_fid_t expect, unsigned primary_num, uint16_t primary_seq, unsigned segment)
 {
+    static char why[240];
     const ods2_head_core_t *core = (const ods2_head_core_t *) h;
     unsigned level = core->struclev >> 8;
-    return (level == ODS5_LEVEL_2 || level == ODS5_LEVEL_5) &&
-           ods2_validate_head(h).ok &&
-           ods2_fid_number(core->fid) == ods2_fid_number(expect) && core->fid.fid_seq == expect.fid_seq &&
-           core->seg_num == segment &&
-           ods2_fid_number(core->backlink) == primary_num && core->backlink.fid_seq == primary_seq;
+    if (level != ODS5_LEVEL_2 && level != ODS5_LEVEL_5) {
+        snprintf(why, sizeof(why), "extension header %u of file %u is not a level 2 or level 5 header (structure level 0x%04x)", ods2_fid_number(expect), primary_num, core->struclev);
+    } else if (!ods2_validate_head(h).ok) {
+        snprintf(why, sizeof(why), "extension header %u of file %u is not a valid header (its checksum or structure is wrong)", ods2_fid_number(expect), primary_num);
+    } else if (ods2_fid_number(core->fid) != ods2_fid_number(expect) || core->fid.fid_seq != expect.fid_seq) {
+        snprintf(why, sizeof(why), "the extension header of file %u read as file %u sequence %u, but the chain said file %u sequence %u", primary_num,
+                 ods2_fid_number(core->fid), core->fid.fid_seq, ods2_fid_number(expect), expect.fid_seq);
+    } else if (core->seg_num != segment) {
+        snprintf(why, sizeof(why), "extension header %u of file %u has segment number %u, expected %u", ods2_fid_number(expect), primary_num, core->seg_num, segment);
+    } else if (ods2_fid_number(core->backlink) != primary_num) {
+        snprintf(why, sizeof(why), "extension header %u: its back link names file %u, not file %u", ods2_fid_number(expect), ods2_fid_number(core->backlink), primary_num);
+    } else if (core->backlink.fid_seq != primary_seq) {
+        snprintf(why, sizeof(why), "extension header %u of file %u: its back link names sequence %u, not the primary header's sequence %u", ods2_fid_number(expect), primary_num,
+                 core->backlink.fid_seq, primary_seq);
+    } else {
+        return NULL;
+    }
+    return why;
+}
+
+static bool extension_header_ok(const uint8_t *h, ods2_fid_t expect, unsigned primary_num, uint16_t primary_seq, unsigned segment)
+{
+    return extension_header_why(h, expect, primary_num, primary_seq, segment) == NULL;
 }
 
 static int decode_header_extents(const uint8_t *header, ods2_extent_t *extents_out, size_t max)
@@ -1233,13 +1249,13 @@ ods2_result_t ods2_decode_all_extents_alloc(ods2_volume_t *vol, const uint8_t *h
             ods2_fid_t expect = core->ext_fid;
             ods2_result_t r = ods2_read_header(vol, ods2_fid_number(expect), current);
             if (!r.ok) { free(list); return r; }
-            if (!extension_header_ok(current, expect,
-                                     ods2_fid_number(((const ods2_head_core_t *) header)->fid),
-                                     ((const ods2_head_core_t *) header)->fid.fid_seq,
-                                     segment + 1)) {
-                free(list);
-                return fail("an extension header is not the next segment of this file "
-                            "(wrong file number, segment number, back link or checksum): damaged");
+            {
+                const char *why = extension_header_why(current, expect, ods2_fid_number(((const ods2_head_core_t *) header)->fid),
+                                                       ((const ods2_head_core_t *) header)->fid.fid_seq, segment + 1);
+                if (why != NULL) {
+                    free(list);
+                    return fail(why);
+                }
             }
         }
     }
@@ -4646,8 +4662,9 @@ static ods2_result_t set_file_security_impl(ods2_volume_t *vol, ods2_fid_t fid, 
             if (segment >= ODS2_SEGMENT_LIMIT) return fail("the extension header chain does not end: nothing is changed");
             r = ods2_read_header(vol, xnum, x);
             if (!r.ok) return r;
-            if (!extension_header_ok(x, link, number, fid.fid_seq, segment)) {
-                return fail("an extension header is not the next segment of this file (wrong file number, segment number, back link or checksum): damaged, nothing is changed");
+            {
+                const char *why = extension_header_why(x, link, number, fid.fid_seq, segment);
+                if (why != NULL) return fail(why);          /* nothing is written: the change is only in memory until it ends */
             }
             xcore->fileowner_uic[0] = member;
             xcore->fileowner_uic[1] = group;

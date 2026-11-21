@@ -448,6 +448,9 @@ def main():
                 fnd.err('%s: extension header %d has segment number %d, expected %d' % (where, efn, u16(nb, 4), len(segs)))
             if u16(nb, 66) | (nb[71] << 16) != n:
                 fnd.err('%s: extension header %d back link is %d' % (where, efn, u16(nb, 66)))
+            elif u16(nb, 68) != u16(b, 10):
+                # review 59 S1: the back link names the primary header by number AND sequence; every VMS-made extension header of the corpus (248) carries the primary's sequence
+                fnd.err('%s: extension header %d back link sequence is %d, not the primary header\'s %d (ods2 refuses to read the file through it)' % (where, efn, u16(nb, 68), u16(b, 10)))
             exts += decode_map(nb, fnd, '%s ext %d' % (where, efn))
             segs.append(efn)
             cur = nb
@@ -511,6 +514,16 @@ def main():
                 fnd.err('SCB cluster factor %d is not the home block\'s %d' % (u16(scb, 2), v.cluster))
             if u32(scb, 4) > v.size_blocks:
                 fnd.err('SCB volume size %d is past the end of the image (%d blocks)' % (u32(scb, 4), v.size_blocks))
+            # review 59 S0: a volume size that is implausibly small. 0 is no size; and the volume cannot be smaller than the data on it (the last block any file owns, less the one
+            # partial cluster VMS gives BADBLK.SYS past the last whole cluster) or than its own file count (every file has a header block). 143 corpus SCBs: none breaks either.
+            if u32(scb, 4) == 0:
+                fnd.err('SCB volume size 0 is not a size')
+            else:
+                last_end = max((l0 + c0 for ex in file_extents.values() for l0, c0 in ex), default=0)
+                if u32(scb, 4) + v.cluster <= last_end:
+                    fnd.err('SCB volume size %d is smaller than the data on the volume (a file owns blocks up to LBN %d)' % (u32(scb, 4), last_end - 1))
+                elif u32(scb, 4) < v.maxfiles:
+                    fnd.err('SCB volume size %d is smaller than the home block\'s maximum file count %d (every file has a header block)' % (u32(scb, 4), v.maxfiles))
             wsum = sum(struct.unpack_from('<255H', scb, 0)) & 0xffff
             if wsum != u16(scb, 510):
                 fnd.err('SCB checksum word is wrong (0x%04x; the words sum to 0x%04x)' % (u16(scb, 510), wsum))
