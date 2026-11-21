@@ -38,7 +38,7 @@ def swap(x):
 
 
 def attrs(h):
-    return {'rtype': h[20], 'rattrib': h[21], 'rsize': struct.unpack_from('<H', h, 22)[0], 'maxrec': struct.unpack_from('<H', h, 34)[0], 'hiblk': swap(struct.unpack_from('<I', h, 24)[0]),
+    return {'rtype': h[20], 'rattrib': h[21], 'rsize': struct.unpack_from('<H', h, 22)[0], 'maxrec': struct.unpack_from('<H', h, 36)[0], 'hiblk': swap(struct.unpack_from('<I', h, 24)[0]),
             'efblk': swap(struct.unpack_from('<I', h, 28)[0]), 'ffbyte': struct.unpack_from('<H', h, 32)[0], 'highwater': struct.unpack_from('<I', h, 76)[0]}
 
 
@@ -68,6 +68,8 @@ def main():
         for p, spec in refs:
             ch = E.chain(p, spec)
             check('the VMS-made %s (%d headers) has the rule' % (os.path.basename(p), len(ch)), [], rule(ch) if len(ch) >= 3 else ['no extension headers'])
+            # MAXREC (byte 36) is 512 in the primary header and in every extension header of the VMS-made files (review 62 F1: byte 34 read BKTSIZE/VFCSIZE, 0)
+            check('the VMS-made %s: MAXREC 512 in every header' % os.path.basename(p), [512] * len(ch), [attrs(h)['maxrec'] for n, h in ch])
         for level in (2, 5):
             img = S.build(level, work, fixed_b=True, odd_a=True)       # A.DAT 100 bytes short of a block: FFBYTE of its primary header is not 0
             for spec in ('[F]A.DAT', '[F]B.DAT'):
@@ -76,6 +78,17 @@ def main():
             pa = attrs(E.chain(img, '[F]A.DAT')[0][1])
             check('ODS-%d: A.DAT has a nonzero FFBYTE in its primary header (so the extension headers writing 0 is a rule, not a coincidence): %d' % (level, pa['ffbyte']), True, pa['ffbyte'] != 0)
             check('ODS-%d: the primary header of A.DAT holds the file: HIBLK, EFBLK and stored HIGHWATER = HIBLK + 1' % level, True, pa['hiblk'] > 0 and pa['highwater'] == pa['hiblk'] + 1 and pa['efblk'] >= pa['hiblk'])
+            # a MAXREC that differs in one extension header must be caught (review 62 F1: the test guards MAXREC)
+            ch = E.chain(img, '[F]A.DAT')
+            lbn = E.D.lbn(E.O.Vol(img), ch[2][0])
+            with open(img, 'r+b') as f:
+                f.seek(lbn * 512)
+                hb = bytearray(f.read(512))
+                struct.pack_into('<H', hb, 36, struct.unpack_from('<H', hb, 36)[0] ^ 0x0100)
+                struct.pack_into('<H', hb, 510, sum(struct.unpack_from('<255H', hb, 0)) & 0xffff)
+                f.seek(lbn * 512)
+                f.write(hb)
+            check('ODS-%d: a MAXREC changed in one extension header is caught by the rule' % level, True, any('maxrec' in x for x in rule(E.chain(img, '[F]A.DAT'))))
             ca, cb = attrs(E.chain(img, '[F]A.DAT')[0][1]), attrs(E.chain(img, '[F]B.DAT')[0][1])
             check('ODS-%d: B.DAT (COPY/FORMAT=FIX512) has RSIZE 512 in its primary header and so in every extension header' % level, (512, 1), (cb['rsize'], cb['rtype']))
     finally:

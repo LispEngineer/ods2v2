@@ -4,7 +4,7 @@
 (asim5-frag-sf-2.img and -5.img of ods5-vms3's stage B: V8.4, two files of 4 headers each; phvs2-ods2v-20261108.img of the corpus: VAX V7.3, nine extension headers per file):
 IDOFFSET 40, MPOFFSET 50 words, ACOFFSET 255, RSOFFSET 255, the structure level of the volume's files, the "ident area" = the 20-byte file name at ODS-2 (nothing after it: the map
 starts at byte 100) or the 20-byte FI5 prefix at ODS-5 (control, name length, revision 0), the back link naming the primary header (number and sequence), the segment number, MAP_INUSE
-at most 204 words (a full header holds 204), and nothing set after the map. ods2v2's extension headers are read from a many-piece file on a fresh volume of each level
+at most 205 words (a full header of four-byte pointers holds 204), and nothing set after the map. ods2v2's extension headers are read from a many-piece file on a fresh volume of each level
 (tests/setfile_ext_check.py's build: about 400 pieces). Run from the project root; the VMS-made images are skipped where absent. Exit 1 on any FAIL. Written before the change (tests
 first): on ods5 a2ac9be the ODS-2 extension headers had MPOFFSET 100 and a 120-byte ident area."""
 import os
@@ -34,7 +34,7 @@ def check(desc, expected, got):
 def layout(h, level):
     """the layout facts of an extension header (seg_num > 0), as a dict"""
     o = {'idoffset': h[0], 'mpoffset': h[1], 'acoffset': h[2], 'rsoffset': h[3], 'level': struct.unpack_from('<H', h, 6)[0] >> 8,
-         'map_inuse_ok': h[58] <= 204 and h[58] > 0}
+         'map_inuse_ok': h[58] <= 205 and h[58] > 0}
     mp = h[1] * 2
     # nothing after the pointers up to the checksum word
     end = mp + h[58] * 2
