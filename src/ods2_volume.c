@@ -4594,8 +4594,8 @@ static ods2_result_t set_stream_record_sizes_impl(ods2_volume_t *vol, ods2_fid_t
     return r;
 }
 
-/* SET FILE/PROTECTION and /OWNER_UIC (PLAN_WRITE_OPS item 4; CORPUS 49.4, 49.7, 49.8 on VAX V7.3 and V8.4 ODS-2 and ODS-5): only the primary header
-   is changed, in one block write. FH2$W_FILEPROT and FH2$L_FILEOWNER (member, group) are the named fields only. Every successful change adds 1 to the
+/* SET FILE/PROTECTION and /OWNER_UIC (PLAN_WRITE_OPS item 4; CORPUS 49.4, 49.7, 49.8 on VAX V7.3 and V8.4 ODS-2 and ODS-5): the primary header is
+   changed, in one block write, and an owner change also goes into every extension header (CORPUS 56.2; see set_file_security_impl). FH2$W_FILEPROT and FH2$L_FILEOWNER (member, group) are the named fields only. Every successful change adds 1 to the
    revision number, even when the value is the one the file had; the date that moves is the revision date in a level 2 header (also the reserved files'
    on an ODS-5 volume) and the attribute change date in a level 5 header (its revision date, the data modification date, stays); the access date
    is not touched. The header's checksum is made again. The reserved files take a protection change (measured: INDEXF.SYS, BITMAP.SYS and the master
@@ -4621,6 +4621,36 @@ static ods2_result_t set_file_security_impl(ods2_volume_t *vol, ods2_fid_t fid, 
     if ((what & ODS2_SETSEC_OWNER) && number >= 1 && number <= 10 && fid.fid_nmx == 0) {
         return fail("the owner of a reserved file (INDEXF.SYS, BITMAP.SYS, ... SECURITY.SYS) is not changed: not measured on VMS except for "
                     "INDEXF.SYS, where it is refused (the file is open)");
+    }
+    if (what & ODS2_SETSEC_OWNER) {
+        /* CORPUS 56.2 (OpenVMS Alpha V8.4, ODS-2 and ODS-5): VMS writes the new owner into EVERY extension header of the file too, and leaves their FILEPROT alone
+           (a protection change touches the primary header only). Each is checked as the next segment of this file (number, sequence, segment number, back link,
+           checksum) before it is changed, and a chain that cannot be followed refuses the whole change: nothing is written (the writes are held in memory until the
+           change ends). The extension headers go first and the primary header, written last, is the one the owner is read from: an interrupted change shows the old
+           owner or the new one in the primary header, and an extension header never lags behind a primary header that shows the new owner. Their revision and
+           dates are not touched (not measured). */
+        ods2_fid_t link = core->ext_fid;
+        unsigned segment;
+        for (segment = 1; ods2_fid_number(link) != 0; segment++) {
+            uint8_t x[512];
+            ods2_head_core_t *xcore = (ods2_head_core_t *) x;
+            unsigned xnum = ods2_fid_number(link);
+            uint16_t xsum;
+            if (segment >= ODS2_SEGMENT_LIMIT) return fail("the extension header chain does not end: nothing is changed");
+            r = ods2_read_header(vol, xnum, x);
+            if (!r.ok) return r;
+            if (!extension_header_ok(x, link, number, segment)) {
+                return fail("an extension header is not the next segment of this file (wrong file number, segment number, back link or checksum): damaged, nothing is changed");
+            }
+            xcore->fileowner_uic[0] = member;
+            xcore->fileowner_uic[1] = group;
+            xsum = ods2_checksum(x, 255);
+            x[510] = (uint8_t) (xsum & 0xff);
+            x[511] = (uint8_t) (xsum >> 8);
+            r = ods2_write_header(vol, xnum, x);
+            if (!r.ok) return r;
+            link = xcore->ext_fid;
+        }
     }
     if (what & ODS2_SETSEC_PROT) core->fileprot = prot;
     if (what & ODS2_SETSEC_OWNER) {

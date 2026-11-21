@@ -128,6 +128,21 @@ def main():
             check('%s: every header checksum is right after both commands' % tag, ['ok'] * len(b2), [x['checksum'] for x in b2])
             r = subprocess.run(['python3', '-I', 'tests/ods5check.py', img], capture_output=True, text=True).stdout.strip().split('\n')[-1]
             check('%s: ods5check is clean after both' % tag, '0 error(s), 0 warning(s)', r)
+            # 4. a chain that cannot be followed (the checksum of the second extension header is wrong): the whole change is refused, nothing is written
+            bad = os.path.join(work, 'bad%d.img' % level)
+            shutil.copyfile(img, bad)
+            ods2(bad, 'SET FILE/OWNER_UIC=[1,4] [F]B.DAT')
+            v = E.O.Vol(bad)
+            ch = E.chain(bad, '[F]B.DAT', v)
+            target = E.D.lbn(v, ch[2][0])
+            with open(bad, 'r+b') as f:
+                f.seek(target * 512 + 510)
+                f.write(bytes([ch[2][1][510] ^ 0xFF]))
+            snap = [E.describe(n, h) for n, h in E.chain(bad, '[F]B.DAT')]
+            rc, out = ods2(bad, 'SET FILE/OWNER_UIC=[5,5] [F]B.DAT')
+            after = [E.describe(n, h) for n, h in E.chain(bad, '[F]B.DAT')]
+            check('%s: an extension header that is not the next segment of the file (a wrong checksum) refuses the change' % tag, True, rc != 0 and 'nothing is changed' in out)
+            check('%s: and nothing was written to any header of the file' % tag, snap, after)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print('setfile_ext_check: %s' % ('all checks passed' if not fails else '%d FAILED' % fails))

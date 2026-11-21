@@ -22,16 +22,20 @@ class D:   # the two helpers of tests/dirhdr_fields.py (ods5-dirhdr), kept here 
         return int(m.group(1)) if m else None
 
     @staticmethod
-    def header(v, num):
+    def lbn(v, num):
         if not hasattr(v, 'ix'):
             h1 = v.blk(v.ibmaplbn + v.ibmapsize)
             v.ix = O.decode_map(h1, O.Findings(False), 'indexf')
         left = O.u16(v.home, 22) + O.u16(v.home, 32) + num - 2
         for lbn, cnt in v.ix:
             if left < cnt:
-                return v.blk(lbn + left)
+                return lbn + left
             left -= cnt
         raise ValueError('header %d is past the index file map' % num)
+
+    @staticmethod
+    def header(v, num):
+        return v.blk(D.lbn(v, num))
 
 
 def chain(img, spec, v=None):
