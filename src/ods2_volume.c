@@ -2924,9 +2924,10 @@ static ods2_result_t create_directory_impl(ods2_volume_t *vol, const uint8_t *pa
     content_block[1] = 0xff;
     r = ods2_write_file_block(vol, new_header, 1, content_block);
     if (!r.ok) goto undo;
-    if (vol->ods5) {
-        /* the rest of the allocation as zeros, so that HIGHWATER = HIBLK + 1
-           (as VMS V8.4 makes a directory) tells the truth */
+    {
+        /* the rest of the allocation as zeros at BOTH levels, so that HIGHWATER = HIBLK + 1 (as VMS makes a directory) tells the truth: with a cluster over 1 the
+           blocks after the first hold whatever a deleted file left there, and a stored HIGHWATER over them says "written" (review 56 F1: this was under
+           `if (vol->ods5)` while the HIGHWATER already was HIBLK + 1 at ODS-2) */
         unsigned v;
         memset(content_block, 0, sizeof(content_block));
         for (v = 2; v <= content_blocks; v++) {
