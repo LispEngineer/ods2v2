@@ -3667,6 +3667,10 @@ static int split_list(const char *arg, char elems[][ODS2_PATH_MAX + 16], int max
     const char *s = arg, *start = arg;
     char prev_dir[ODS2_PATH_MAX] = "";
     for (;; s++) {
+        /* a ^ escapes the character after it (^, is a comma in a name, ^^ a caret, ^[ and ^] brackets): it is a character of the name, never a separator or a bracket (review 66: TYPE
+           [D]sp^,c.txt was split at the escaped comma and typed [D]c.txt). The tokenizer drops quotes, so a comma that is not escaped is a separator even
+           inside quotes: VMS wants ^, for a comma in an ODS-5 name. */
+        if (*s == '^' && s[1] != '\0') { s++; continue; }
         if (*s == '[' || *s == '<') depth++;
         else if (*s == ']' || *s == '>') { if (depth > 0) depth--; }
         if ((*s == ',' && depth == 0) || *s == '\0') {
@@ -3675,12 +3679,12 @@ static int split_list(const char *arg, char elems[][ODS2_PATH_MAX + 16], int max
             if (n >= max || len == 0 || len >= sizeof(one)) return 0;
             memcpy(one, start, len);
             one[len] = '\0';
-            if (strchr(one, '[') == NULL && strchr(one, '<') == NULL && strchr(one, ':') == NULL && prev_dir[0] != '\0') {
+            if (ods5_find_unescaped(one, '[') == NULL && ods5_find_unescaped(one, '<') == NULL && ods5_find_unescaped(one, ':') == NULL && prev_dir[0] != '\0') {
                 snprintf(elems[n], ODS2_PATH_MAX + 16, "%s%s", prev_dir, one);
             } else {
                 snprintf(elems[n], ODS2_PATH_MAX + 16, "%s", one);
                 {
-                    const char *close = strchr(one, ']');
+                    const char *close = ods5_find_unescaped(one, ']');
                     if (close != NULL) { size_t dl = (size_t) (close - one) + 1; if (dl >= sizeof(prev_dir)) return 0; memcpy(prev_dir, one, dl); prev_dir[dl] = '\0'; }
                 }
             }

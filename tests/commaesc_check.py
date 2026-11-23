@@ -58,7 +58,7 @@ def main():
         rc, out = run([INIT, img, '8192', '--structure=5', '--label=COMMAESC'])
         assert rc == 0, out
         assert ods2(img, 'CREATE/DIRECTORY [D]')[0] == 0
-        for dst, text in (('[D]c.txt', 'DECOY'), ('[D]sp^,c.txt', 'COMMA'), ('[D]y^^', 'CARET'), ('[D]b^[1^].txt', 'BRACKET'), ('[D]b^[x.txt', 'BRACKET2'), ('[D]a.txt', 'A')):
+        for dst, text in (('[D]c.txt', 'DECOY'), ('[D]sp^,c.txt', 'COMMA'), ('[D]y^^', 'CARET'), ('[D]b^[1^].txt', 'BRACKET'), ('[D]b^[x.txt', 'BRACKET2'), ('[D]v^;x.txt', 'SEMI'), ('[D]q^%r.txt', 'PCT'), ('[D]a.txt', 'A')):
             p = os.path.join(work, 'f.txt')
             open(p, 'w').write(text + '\n')
             rc, out = ods2(img, 'COPY %s %s' % (p, dst))
@@ -74,21 +74,21 @@ def main():
             return img
 
         # TYPE: a list is split at the commas that are not escaped
-        for spec, want in (('[D]sp^,c.txt', ['COMMA2']), ('[D]a.txt,sp^,c.txt', ['A', 'COMMA2']), ('[D]y^^,c.txt', ['CARET', 'DECOY']), ('[D]b^[1^].txt,c.txt', ['BRACKET', 'DECOY']), ('[D]b^[x.txt,c.txt', ['BRACKET2', 'DECOY']),
+        for spec, want in (('[D]sp^,c.txt', ['COMMA2']), ('[D]a.txt,sp^,c.txt', ['A', 'COMMA2']), ('[D]y^^,c.txt', ['CARET', 'DECOY']), ('[D]b^[1^].txt,c.txt', ['BRACKET', 'DECOY']), ('[D]b^[x.txt,c.txt', ['BRACKET2', 'DECOY']), ('[D]v^;x.txt,c.txt', ['SEMI', 'DECOY']), ('[D]q^%r.txt,c.txt', ['PCT', 'DECOY']),
                            ('[D]sp^,c.txt,c.txt', ['COMMA2', 'DECOY']), ('[D]a.txt,y^^,sp^,c.txt', ['A', 'CARET', 'COMMA2'])):
             rc, out = ods2(fresh(), 'TYPE ' + spec)
-            ls = [l for l in words(out) if l in ('A', 'COMMA', 'COMMA2', 'CARET', 'BRACKET', 'BRACKET2', 'DECOY')]
+            ls = [l for l in words(out) if l in ('A', 'COMMA', 'COMMA2', 'CARET', 'BRACKET', 'BRACKET2', 'SEMI', 'PCT', 'DECOY')]
             check('TYPE %s shows %s, in that order, and reports nothing missing' % (spec, want), (want, False), (ls, 'SEARCHFAIL' in out or 'not found' in out.lower()))
         # the other commands that take or split a specification read the escaped comma as a character too
         img = fresh()
         check('DIR [D]sp^,c.txt lists the comma file only (both versions)', ['sp^,c.txt;1', 'sp^,c.txt;2'], listing(img, '[D]sp^,c.txt;*'))
         img = fresh()
         rc, out = ods2(img, 'PURGE/LOG [D]sp^,c.txt')
-        check('PURGE [D]sp^,c.txt is one specification (no TOOMANY) and keeps the highest version of the comma file only', (False, ['a.txt;1', 'b^[1^].txt;1', 'b^[x.txt;1', 'c.txt;1', 'sp^,c.txt;2', 'y^^.;1']),
+        check('PURGE [D]sp^,c.txt is one specification (no TOOMANY) and keeps the highest version of the comma file only', (False, ['a.txt;1', 'b^[1^].txt;1', 'b^[x.txt;1', 'c.txt;1', 'q^%r.txt;1', 'sp^,c.txt;2', 'v^;x.txt;1', 'y^^.;1']),
               ('TOOMANY' in out, listing(img, '[D]*.*;*')))
         img = fresh()
         rc, out = ods2(img, 'DELETE [D]sp^,c.txt;1')
-        check('DELETE [D]sp^,c.txt;1 deletes that version of the comma file only', ['a.txt;1', 'b^[1^].txt;1', 'b^[x.txt;1', 'c.txt;1', 'sp^,c.txt;2', 'y^^.;1'], listing(img, '[D]*.*;*'))
+        check('DELETE [D]sp^,c.txt;1 deletes that version of the comma file only', ['a.txt;1', 'b^[1^].txt;1', 'b^[x.txt;1', 'c.txt;1', 'q^%r.txt;1', 'sp^,c.txt;2', 'v^;x.txt;1', 'y^^.;1'], listing(img, '[D]*.*;*'))
         img = fresh()
         rc, out = ods2(img, 'SET FILE/PROTECTION=(W:R) [D]sp^,c.txt')
         pc = re.findall(r'Protection:\s+(\(.*\))', ods2(img, 'DIR/FULL [D]sp^,c.txt')[1])
