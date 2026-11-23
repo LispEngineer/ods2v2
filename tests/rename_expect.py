@@ -17,6 +17,10 @@ Fields:  vols      the volume kinds the case was measured on: '2' ODS-2, '5' ODS
                    name with ;1; file the header of this file is the one compared (an alias entry's file); untouched_extra more versions the test checks that VMS's dumps do not show (only ;3 is dumped); follows the case whose result volume this one starts from (VMS ran a1, a2, a3 one after the other on one volume); ods2v2_msgs the messages ods2v2 prints where they are not VMS's (a read-only image
                    gives the READONLY refusal every ods2v2 write command gives)."""
 
+# The VERSION a renamed file gets (review 65 C1) is measured only in part: e2 shows "the source's version if that name;version is free, else one above the highest"; every single-file case has
+# a source of version 1, so only cases both readings agree on are here (a1-a3, d1: ;1 is taken, so ;4). The two settling cases (RENAME M.TXT;5 N.TXT; RENAME M.TXT;5 T.TXT with ;1 ;2 ;3 present)
+# are asked of ods5-vms3 (j3, j4); step 4 (wildcards) waits for them. No case here renames a file with extension headers (C2) or a file whose header names no entry (C5).
+# f1 is the case-only rename of review 65 C3: the stored case changes and the name does NOT become a new version (the test lists the directory: abc.txt;1 goes, ABC.txt;1 appears).
 CASES = {
     'a1': dict(vols=('2', '5', '5h'), old='[X]A.TXT;1', new='[X]B.TXT', stored=('A.TXT;1', 'B.TXT;1'), dir='[X]', removed=['A.TXT;1'], added=['B.TXT;1'], revision=1, header='changed', status='ok'),
     'a2': dict(vols=('2', '5', '5h'), old='[X]B.TXT;1', new='[X]B.DAT', stored=('B.TXT;1', 'B.DAT;1'), dir='[X]', removed=['B.TXT;1'], added=['B.DAT;1'], revision=1, header='changed', status='ok', follows='a1'),

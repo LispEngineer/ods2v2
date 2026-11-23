@@ -225,6 +225,64 @@ def run_case(cid, t, kind, level, hl, kname, base, work, start=None):
     return img
 
 
+def efblk(img, num):
+    rc, out = run(['./ods2_dump_header', img, str(num)])
+    m = re.search(r'efblk\(swapped\)=(\d+)', out)
+    return int(m.group(1)) if m else None
+
+
+def hiblk(img, num):
+    rc, out = run(['./ods2_dump_header', img, str(num)])
+    m = re.search(r'hiblk\(swapped\)=(\d+)', out)
+    return int(m.group(1)) if m else None
+
+
+def full_volume(work, level):
+    """a full volume (review 65): a directory whose next insert must grow it, and no free block: the RENAME that needs the growth is refused and the image is byte for byte the same"""
+    tag = 'ODS-%d full volume' % level
+    img = os.path.join(work, 'full%d.img' % level)
+    rc, out = run([INIT, img, '8192', '--structure=%d' % level, '--label=FULL'])
+    assert rc == 0, out
+    small = os.path.join(work, 'small.txt')
+    open(small, 'w').write('one block of text\n')
+    assert ods2(img, 'CREATE/DIRECTORY [F]')[0] == 0
+    fid = E.D.fnum(img, '[000000]F.DIR')
+    nxt = None
+    for i in range(400):
+        name = 'N%05d.TXT' % i
+        probe = img + '.probe'
+        shutil.copyfile(img, probe)
+        e = efblk(img, fid)
+        ods2(probe, 'COPY %s [F]%s' % (small, name))
+        grows = efblk(probe, fid) > e
+        os.remove(probe)
+        if grows and e >= 3 and e - 1 == hiblk(img, fid):       # the directory is full to its allocation: the growth needs a new, larger area
+            nxt = name
+            break
+        assert ods2(img, 'COPY %s [F]%s' % (small, name))[0] == 0
+    assert nxt, 'the directory never grew'
+    # take every free block: a file of the size that is left, smaller until it fits
+    out = ods2(img, 'SHOW VOLUME')[1]
+    free = int(re.search(r'Free blocks:\s+(\d+)', out).group(1))
+    for n in range(free - 1, 0, -1):
+        big = os.path.join(work, 'big.bin')
+        with open(big, 'wb') as f:
+            f.write(b'x' * (n * 512))
+        if ods2(img, 'COPY %s [000000]BIG.BIN' % big)[0] == 0 and 'ODS2-E' not in ods2(img, 'DIR [000000]BIG.BIN')[1]:
+            break
+    left = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
+    check('%s: the volume has no room for the growth of the directory (%d blocks free)' % (tag, left), True, left < 2)
+    probe = img + '.probe'
+    shutil.copyfile(img, probe)
+    rcp, outp = ods2(probe, 'COPY %s [F]%s' % (small, nxt))
+    check('%s: (precondition) a COPY of a new name into the directory is refused: the volume cannot hold the growth' % tag, True, '%ODS2-E' in outp or rcp != 0)
+    os.remove(probe)
+    h0 = sha(img)
+    rc, out = ods2(img, 'RENAME [F]N00000.TXT [F]%s' % nxt)
+    check('%s: RENAME that needs the directory to grow is refused' % tag, (True, False), ('ILLCMD' not in out and ('-E-' in out or 'ODS2-' in out), '%RENAME-S' in out))
+    check('%s: the image is byte for byte the same' % tag, h0, sha(img))
+
+
 def list_alias_before(base):
     return listing(base, '[Y]')
 
@@ -244,6 +302,8 @@ def main():
                 if alias not in bases:
                     bases[alias] = build(work, level, hl, alias)
                 done[cid] = run_case(cid, t, kind, level, hl, kname, bases[alias], work, done.get(t.get('follows')))
+        for level in (2, 5):
+            full_volume(work, level)
     finally:
         if not keep:
             shutil.rmtree(work, ignore_errors=True)
