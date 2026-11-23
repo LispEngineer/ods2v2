@@ -562,6 +562,7 @@ def main():
                     # only the case the name is still found: "already named", the image unchanged unless the header still has the old spelling: then it is finished).
                     old_k, new_k = (x % ctx_op for x in RENAME_PAIRS[name])
                     case_pair = old_k.lower() == new_k.lower()
+                    import ext_headers
                     rerun = os.path.join(WORK, 'rerun.img')
                     shutil.copyfile(trial, rerun)
                     h_before = md5(rerun)
@@ -584,6 +585,20 @@ def main():
                         if extra_keys:
                             prob.append('after the RENAME run again there is an extra entry (a new version?): %s' % extra_keys[:3])
                         prob += ['after the RENAME run again, checker: ' + b for b in badr + leakr]
+                        if need_hl:
+                            # HARDLINKS: the link count is what it was before the rename (the entries are as many as before); the checker only warns about a wrong count
+                            def spec_of(key):
+                                path, _, ver = key.rpartition(';')
+                                d, _, nm = path.rpartition('/')
+                                return '[%s]%s;%s' % (d.replace('/', '.') if d else '000000', nm, ver)
+                            hb0 = ext_headers.chain(base, spec_of(old_k))
+                            hr = ext_headers.chain(rerun, spec_of(new_k))
+                            lc0 = int.from_bytes(hb0[0][1][74:76], 'little') if hb0 else None
+                            lcr = int.from_bytes(hr[0][1][74:76], 'little') if hr else None
+                            # a stop right after the first write (the link count + 1, before any entry) cannot be told from the start: the run again counts once more, one too high for good
+                            # (a leak, never too little; the checker warns about it); every other stop ends with the count as it was
+                            if lc0 is not None and lcr is not None and lcr != lc0 + (1 if k == 1 else 0):
+                                prob.append('after the RENAME run again the link count is %d, it was %d%s' % (lcr, lc0, ' (a stop after the first write may leave one too many)' if k == 1 else ''))
                     else:
                         # the old name is gone: refused, nothing changed
                         if '%ODS2-E' not in outr:

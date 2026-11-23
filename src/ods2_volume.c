@@ -5334,7 +5334,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     if (!r.ok) return r;
     r = remove_directory_entry(vol, src_dir_number, dir_header, src_stored, sv, src_fid);
     if (!r.ok) return r;
-    if (hardlinks && !resumed) {
+    if (hardlinks) {                       /* also when an interrupted rename is finished: its first run counted the new entry (step 1), the old entry goes now */
         unsigned links = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
         if (links > 0) links--;
         h[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
