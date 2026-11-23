@@ -3712,6 +3712,14 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
     /* the version limit of the entry: 0 and 32767 are no limit */
     if (info.verlimit >= 1 && info.verlimit < ODS2_MAX_VERSION && info.count + 1 > info.verlimit) {
         unsigned lowest = 0, k;            /* exactly one version goes, the lowest, even when the name is over its limit (CORPUS 49.9) */
+        /* H1 (review 66 F1): the version the limit drops is chosen by NUMBER; on a name stored out of order VMS goes by the stored order (CORPUS 66.4), so a number could be the wrong file:
+           refused, even with an explicit version (version_req > 0 was let through above; X stored ;1 ;2 ;3 with limit 3, COPY f X.TXT;5 deleted ;1 silently) */
+        for (k = 1; k < info.count; k++) {
+            if (info.versions[k] >= info.versions[k - 1]) {
+                free(info.versions);
+                return fail("the versions of this name are stored out of order (BAD_VERSORDER) and its version limit would delete one: no new version is made");
+            }
+        }
         for (k = 0; k < info.count; k++) if (lowest == 0 || info.versions[k] < lowest) lowest = info.versions[k];
         if (v < lowest) {
             free(info.versions);

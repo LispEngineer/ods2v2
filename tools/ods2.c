@@ -374,10 +374,19 @@ static bool group_usable(const ods2_dir_entry_t *entries, int count, int i)
     return true;
 }
 
+/* How many names a walk refused for their order: the commands that go on to say "nothing found" must not, when the name was found and refused (review 66 S1) */
+static int g_disorder_refused;
+
 static void report_version_order(const char *dir_path, const char *name, const char *what)
 {
     char shown[ODS2_PATH_MAX];
     display_name(name, shown, sizeof(shown));
+    if (strcmp(what, "purged") == 0) {
+        /* PURGE takes no version (review 66 S2): the way out is DELETE with the version number of each version to go */
+        report_error("%%ODS2-E-VERSORDER, [%s%s]%s: the versions of this name are stored out of order (BAD_VERSORDER): not purged; PURGE takes no version: DELETE name;n removes a version by its number\n",
+                     dir_path[0] == '\0' ? "000000" : "", dir_path, shown);
+        return;
+    }
     report_error("%%ODS2-E-VERSORDER, [%s%s]%s: the versions of this name are stored out of order (BAD_VERSORDER): not %s; name a version (;n) or all of them (;*)\n",
                  dir_path[0] == '\0' ? "000000" : "", dir_path, shown, what);
 }
@@ -636,16 +645,22 @@ static int show_directory(ods2_volume_t *vol, const char *dir_path, const ods2_d
     /* Every version of a name is its own entry, newest first and
        contiguous (a name's versions may span several records). */
     char refused_name[ODS2_DIR_MAX_NAME + 1] = "";
+    bool g_ok = true, g_use = true;        /* the verdict on the name of the current group, worked out once at its first entry (review 66 S3: not once per entry) */
 
     for (i = 0; i < count; i++) {
         rank = (i > 0 && same_name(entries[i].name, entries[i - 1].name)) ? rank + 1 : 0;
+        if (rank == 0 && g_disorder_mode != 0 && g_entry_hook != NULL) {
+            g_ok = group_in_order(entries, count, i);
+            g_use = g_ok ? true : group_usable(entries, count, i);
+        }
         if (ods2_wildcard_match(pattern, entries[i].name) &&
             version_selected(p, &entries[i], rank)) {
-            if (g_disorder_mode != 0 && g_entry_hook != NULL && !group_in_order(entries, count, i) &&
-                (g_disorder_mode == 1 ? !(p->has_version && (p->version_wildcard || p->version > 0)) : group_usable(entries, count, i))) {
+            if (g_disorder_mode != 0 && g_entry_hook != NULL && !g_ok &&
+                (g_disorder_mode == 1 ? !(p->has_version && (p->version_wildcard || p->version > 0)) : g_use)) {
                 if (strcmp(refused_name, entries[i].name) != 0) {                 /* once for each name; the other names go on */
                     report_version_order(dir_path, entries[i].name, g_disorder_mode == 2 ? "purged" : "changed");
                     snprintf(refused_name, sizeof(refused_name), "%s", entries[i].name);
+                    g_disorder_refused++;
                 }
                 continue;
             }
@@ -1673,10 +1688,16 @@ static void cmd_set_record_sizes(ods2_volume_t *vol, const ods2_parsed_path_t *p
     g_entry_hook = recsize_entry;
     g_entry_hook_ctx = &x;
     g_paths_mode = false;
+    g_disorder_mode = 1;                     /* SET FILE/ATTRIBUTES changes the header of the version the walk picks by position: refused on a name out of order (H1) */
+    g_disorder_refused = 0;
     walk_from(&w, start);
+    g_disorder_mode = 0;
     g_entry_hook = saved_hook;
     g_entry_hook_ctx = saved_ctx;
     g_paths_mode = saved_paths;
+    if (x.files == 0 && w.errors == 0 && g_disorder_refused > 0) {
+        return;
+    }
     if (x.files == 0 && w.errors == 0) {
         fprintf(stderr, "%%ODS2-W-NOFILES, no files found\n");
     } else {
@@ -3232,9 +3253,11 @@ static void delete_wildcard(ods2_volume_t *vol, const uint8_t *dir_header, ods2_
         report_error("%%ODS2-E-DELETEERR, %s: out of memory\n", p->filename);
         return;
     }
+    bool g_ok = true;                       /* the order of the current name, judged once at its first entry (review 66 S3) */
     for (i = 0; i < count; i++) {
         bool take;
         rank = (i > 0 && same_name(entries[i].name, entries[i - 1].name)) ? rank + 1 : 0;
+        if (rank == 0 && !p->version_wildcard && !(p->has_version && p->version > 0)) g_ok = group_in_order(entries, count, i);
         {
             char lit_name[ODS2_DIR_MAX_NAME + 1];
             const char *ldot = strrchr(entries[i].name, '.');
@@ -3249,7 +3272,7 @@ static void delete_wildcard(ods2_volume_t *vol, const uint8_t *dir_header, ods2_
         else if (p->version > 0) take = (entries[i].version == (unsigned) p->version);
         else take = (rank == -p->version);                                       /* ;-n */
         if (!take) continue;
-        if (!p->version_wildcard && !(p->has_version && p->version > 0) && !group_in_order(entries, count, i)) {
+        if (!p->version_wildcard && !(p->has_version && p->version > 0) && !g_ok) {
             /* H1: a name whose versions are stored out of order: refused (once), the others go on */
             if (strcmp(last_refused, entries[i].name) != 0) {
                 report_version_order(dir_path_for_msg, entries[i].name, "deleted");
@@ -3280,7 +3303,9 @@ static void delete_wildcard(ods2_volume_t *vol, const uint8_t *dir_header, ods2_
     }
     free(targets);
 
-    if (matched == 0) {
+    if (matched == 0 && last_refused[0] != '\0') {
+        /* a name was found and refused for its order (H1): no "no files match" for it (review 66 S1) */
+    } else if (matched == 0) {
         char spec[ODS2_PATH_MAX + 16];
         format_file_spec(p, spec, sizeof(spec));
         report_error("%%ODS2-E-DELETEERR, %s: no files match\n", spec);
@@ -3601,6 +3626,7 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
     memset(&x, 0, sizeof(x));
     walk_path_for(p, true, &wp);
     g_disorder_mode = 2;
+    g_disorder_refused = 0;
     werrs = walk_matches(vol, &wp, purge_collect, &x, &start_ok);
     g_disorder_mode = 0;
     if (!start_ok) {
@@ -3608,6 +3634,10 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
         search_failed("PURGE", echo, true);
         printf("%%PURGE-I-NOFILPURG, no files purged\n");
         free(x.items);
+        return;
+    }
+    if (x.count == 0 && werrs == 0 && g_disorder_refused > 0) {
+        free(x.items);                       /* the name was found and refused for its order: no "not found" and no "no files purged" for it (review 66 S1) */
         return;
     }
     if (x.count == 0 && werrs == 0) {
@@ -4019,8 +4049,12 @@ static void cmd_set_file_security(ods2_volume_t *vol, const char *quals, const c
     if (!ods2_parse_path(spec, &p)) { report_error("%%ODS2-E-BADPATH, could not parse %s\n", spec); return; }
     walk_path_for(&p, false, &wp);
     g_disorder_mode = 1;
+    g_disorder_refused = 0;
     werrs = walk_matches(vol, &wp, setsec_entry, &x, &start_ok);
     g_disorder_mode = 0;
+    if (x.found == 0 && werrs == 0 && g_disorder_refused > 0) {
+        return;                              /* found and refused for its order: no SEARCHFAIL for it (review 66 S1) */
+    }
     if (x.found == 0 && werrs == 0) {
         char echo[ODS2_PATH_MAX + 32];
         echo_spec(&p, echo, sizeof(echo));
