@@ -709,7 +709,7 @@ def main():
                     fid = (u16(blk, ent + 2), u16(blk, ent + 4), blk[ent + 6], blk[ent + 7])
                     lst.append((nm, ntype, ver, fid, flags, vl))
                     if prevver is not None and ver >= prevver:
-                        fnd.err('%s: %r versions not descending (%d then %d)' % (where, nm, prevver, ver))
+                        fnd.err('%s: BAD_VERSORDER, version ordering incorrect: the versions of %r are %d and %d (a name\'s versions are stored newest first; VMS ANALYZE: %%ANALDISK-W-BAD_VERSORDER, CORPUS 66.4)' % (where, nm, prevver, ver))
                     prevver = ver
                     ent += 8
                 carried = prevver

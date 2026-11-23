@@ -168,7 +168,7 @@ def main():
             for desc, cmd in (('DELETE X.TXT', 'DELETE [D]X.TXT'), ('DELETE X.TXT;0', 'DELETE [D]X.TXT;0'), ('DELETE X.TXT;-1', 'DELETE [D]X.TXT;-1'),
                               ('SET FILE/PROTECTION X.TXT', 'SET FILE/PROTECTION=(W:R) [D]X.TXT'), ('SET FILE/PROTECTION X.TXT;0', 'SET FILE/PROTECTION=(W:R) [D]X.TXT;0'),
                               ('SET FILE/OWNER_UIC X.TXT', 'SET FILE/OWNER_UIC=[200,3] [D]X.TXT'), ('PURGE X.TXT', 'PURGE [D]X.TXT'), ('PURGE/KEEP=2 X.TXT', 'PURGE/KEEP=2 [D]X.TXT'),
-                              ('PURGE Y.TXT (two records)', 'PURGE [DY]Y.TXT'), ('PURGE X.TXT;*', 'PURGE [D]X.TXT;*'), ('DELETE *.TXT (the wildcard refuses X)', 'DELETE [D]X*.TXT')):
+                              ('PURGE Y.TXT (two records)', 'PURGE [DY]Y.TXT'), ('DELETE *.TXT (the wildcard refuses X)', 'DELETE [D]X*.TXT')):
                 img = fresh(base, work, desc)
                 h0 = sha(img)
                 rc, out = ods2(img, cmd)
@@ -185,12 +185,12 @@ def main():
             check(t('DELETE X.TXT;* deletes all three (as VMS)'), [], listing(img, '[D]X.TXT;*'))
             img = fresh(base, work, 'delwild')
             rc, out = ods2(img, 'DELETE [D]*.TXT')
-            check(t('DELETE [D]*.TXT: X is refused and stays whole, Z (in order) loses its highest version'), (True, ['X.TXT;1', 'X.TXT;2', 'X.TXT;3'], ['Z.TXT;1', 'Z.TXT;2']),
+            check(t('DELETE [D]*.TXT: X is refused and stays whole, Z (in order) loses its highest version'), (True, ['X.TXT;1', 'X.TXT;2', 'X.TXT;3'], ['Z.TXT;2', 'Z.TXT;1']),
                   (refused(out), listing(img, '[D]X.TXT;*'), listing(img, '[D]Z.TXT;*')))
             img = fresh(base, work, 'setf2')
             ods2(img, 'SET FILE/PROTECTION=(W:R) [D]X.TXT;2')
             prot = {v: re.search(r'Protection:\s+(\(.*\))', ods2(img, 'DIR/FULL [D]X.TXT;%d' % v)[1]) for v in (1, 2, 3)}
-            check(t('SET FILE/PROTECTION X.TXT;2 (explicit) changes ;2 only'), (True, False, False), tuple('W:R' in (prot[v].group(1) if prot[v] else '') for v in (1, 2, 3)))
+            check(t('SET FILE/PROTECTION X.TXT;2 (explicit) changes ;2 only'), (False, True, False), tuple('W:R' in (prot[v].group(1) if prot[v] else '') for v in (1, 2, 3)))
             # a name in the proper order works as always
             img = fresh(base, work, 'purgez')
             rc, out = ods2(img, 'PURGE [D]Z.TXT')

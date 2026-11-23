@@ -173,6 +173,13 @@ ods2_result_t ods2_lookup_name_version(ods2_volume_t *vol, const uint8_t *dir_he
                                         const char *name, int version,
                                         ods2_fid_t *fid_out, uint16_t *version_out);
 
+/* Are the versions of `name` stored newest first (descending), across all the records of the name? *in_order_out is false when two neighbouring entries of the name
+   are not descending. A directory in that state is damaged or written by another tool (ods2v2 and VMS never write it). VMS follows the STORED order for every version form
+   (CORPUS 66.4: ;0, TYPE and PURGE take the first stored entry, DELETE with no version is refused, ANALYZE says BAD_VERSORDER): the lookup does too. A command that CHANGES
+   something on a name that is not in order should refuse unless it names an explicit version (the commands of ods2 do: DELETE, SET FILE, PURGE; RENAME). A name that does
+   not exist is "in order". */
+ods2_result_t ods2_name_versions_in_order(ods2_volume_t *vol, const uint8_t *dir_header, const char *name, bool *in_order_out);
+
 /* Splits a VMS-style directory path (e.g. "DECUS.NETLIB020", no
    brackets) on '.' and walks from the root directory (FID 4,4),
    returning the final directory's FID. An empty path returns root

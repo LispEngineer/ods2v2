@@ -2607,6 +2607,49 @@ static bool visit_lookup_version(const ods2_dir_entry_t *entry, void *ctx_)
     return true;
 }
 
+typedef struct {
+    const char *name;
+    bool sorted;
+    bool name_found;
+    bool have_prev;
+    unsigned prev;
+    bool in_order;
+} version_order_ctx_t;
+
+static bool visit_version_order(const ods2_dir_entry_t *entry, void *ctx_)
+{
+    version_order_ctx_t *ctx = (version_order_ctx_t *) ctx_;
+
+    if (!names_equal(entry->name, ctx->name)) {
+        if (ctx->sorted && ods2_dir_name_compare(entry->name, strlen(entry->name), ctx->name, strlen(ctx->name)) > 0) return false;
+        return !ctx->name_found;
+    }
+    ctx->name_found = true;
+    if (ctx->have_prev && entry->version >= ctx->prev) ctx->in_order = false;     /* two neighbours that are not descending (or equal) */
+    ctx->prev = entry->version;
+    ctx->have_prev = true;
+    return true;
+}
+
+ods2_result_t ods2_name_versions_in_order(ods2_volume_t *vol, const uint8_t *dir_header, const char *name, bool *in_order_out)
+{
+    version_order_ctx_t ctx;
+    unsigned start;
+    bool sorted;
+    ods2_result_t r;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.name = name;
+    ctx.in_order = true;
+    r = dir_search_start(vol, dir_header, name, &start, &sorted);
+    if (!r.ok) return r;
+    ctx.sorted = sorted;
+    r = walk_directory_from(vol, dir_header, start, visit_version_order, &ctx);
+    if (!r.ok) return r;
+    *in_order_out = ctx.in_order;
+    return ok();
+}
+
 ods2_result_t ods2_lookup_name_version(ods2_volume_t *vol, const uint8_t *dir_header,
                                         const char *name, int version,
                                         ods2_fid_t *fid_out, uint16_t *version_out)
@@ -3642,6 +3685,14 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
         }
     }
     if (version_req == 0) {
+        /* H1 (CORPUS 66.4): a name whose versions are stored out of order gets no new version by "highest + 1" (VMS makes a second ;2 beside the stored ;1 ;2 ;3; here the highest number
+           and the lowest number that a limit would drop would be taken by number, against the stored order that VMS follows): refused, changing nothing; ;n names the version */
+        for (i = 1; i < info.count; i++) {
+            if (info.versions[i] >= info.versions[i - 1]) {
+                free(info.versions);
+                return fail("the versions of this name are stored out of order (BAD_VERSORDER): no new version is made; name a version (;n)");
+            }
+        }
         if (info.highest >= ODS2_MAX_VERSION) {
             free(info.versions);
             return fail("%RMS-E-CRE, ACP file create failed; -SYSTEM-W-BADFILEVER, bad file version number (the highest version is 32767)");
