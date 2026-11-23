@@ -173,6 +173,28 @@ ods2_result_t ods2_lookup_name_version(ods2_volume_t *vol, const uint8_t *dir_he
                                         const char *name, int version,
                                         ods2_fid_t *fid_out, uint16_t *version_out);
 
+/* RENAME in one directory (PLAN_WRITE_OPS item 5, step 1; CORPUS 65 and 66; the design: RENAME-PROPOSAL.md, review 65). The file the source entry names (src_version: >0 that version, 0 the
+   highest, <0 relative; the stored order is followed and a name out of order is refused unless a version is named: H1) gets the name dst_name. dst_version: 0 = none given: the new version is
+   1 for a name that is new and one above the highest for a name that exists (CORPUS 66.2: the source's version is never kept); >0 = that version, refused with "...DUPFILENAME" when
+   it exists. The target is the same entry (the same name and version): nothing is written (info->same; VMS bumps the revision and the date, ods2v2 does not). A target that differs only in
+   case (ODS-5): the record's name bytes are replaced in place (info->case_only). A target entry that already names the source's file is an interrupted rename: it is finished, not
+   repeated (info->resumed). The header: name, revision +1, the level's date (ODS-2 revision date; ODS-5 attribute change date) when the entry is the file's primary one or the header names
+   no entry (back link 0: adopted, name and back link set); an alias entry leaves the header alone; the extension headers are never touched (CORPUS 66.2). The version limit of the target name
+   removes the lowest version as COPY does (CORPUS 66.1). Order of the writes: link count + 1 (HARDLINKS), the new entry, the header, the old entry removed, link count - 1: two names for
+   a moment, never none. Refused, the volume unchanged: a directory (step 3), a reserved file, an entry that is an alias of a directory... Step 1 handles ONE directory: dst_dir_number must be
+   src_dir_number. */
+typedef struct {
+    uint16_t version;          /* the version the file has now */
+    bool same;                 /* the target is the source: nothing changed */
+    bool case_only;            /* the record's name bytes were replaced in place */
+    bool resumed;              /* an interrupted rename was finished */
+    bool header_changed;       /* the file's header was rewritten (false: an alias entry) */
+    bool adopted;              /* the header named no entry: its back link was set */
+    unsigned pruned_version;   /* the version the version limit removed, or 0 */
+} ods2_rename_info_t;
+ods2_result_t ods2_rename(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
+                          unsigned dst_dir_number, const char *dst_name, int dst_version, ods2_rename_info_t *info);
+
 /* Splits a VMS-style directory path (e.g. "DECUS.NETLIB020", no
    brackets) on '.' and walks from the root directory (FID 4,4),
    returning the final directory's FID. An empty path returns root

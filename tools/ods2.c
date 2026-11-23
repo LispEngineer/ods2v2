@@ -2534,6 +2534,77 @@ static void cmd_symlink(ods2_volume_t *vol, const ods2_parsed_path_t *p, const c
 
 /* LINK <new-path> <existing-path>   (also SET FILE/ENTER=<new-path> <existing-path>):
    another directory entry for an existing file, on a HARDLINKS volume. */
+/* RENAME <old> <new>: one file in one directory (PLAN_WRITE_OPS item 5, step 1; CORPUS 65 and 66). The new name without a directory is in the old one's directory. Wildcards, another
+   directory and a directory file are later steps and are refused, saying so. */
+static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const ods2_parsed_path_t *dp, const char *src_arg, const char *dst_arg)
+{
+    uint8_t sdir[512], ddir[512];
+    ods2_fid_t sfid, dfid;
+    char sdir_path[ODS2_PATH_MAX], ddir_path[ODS2_PATH_MAX], sname[ODS2_PATH_MAX], dname[ODS2_PATH_MAX];
+    ods2_rename_info_t info;
+    ods2_result_t r;
+    char what[ODS2_PATH_MAX * 2 + 8];
+
+    if (sp->filename[0] == '\0') {
+        report_error("%%ODS2-E-BADPATH, RENAME needs the name of the file to rename (a directory is renamed by its name.DIR)\n");
+        return;
+    }
+    if (ods5_find_unescaped(sp->filename, '*') != NULL || ods5_find_unescaped(sp->filename, '%') != NULL || ods5_find_unescaped(sp->filename, '?') != NULL || sp->version_wildcard ||
+        ods5_find_unescaped(dp->filename, '*') != NULL || ods5_find_unescaped(dp->filename, '%') != NULL || ods5_find_unescaped(dp->filename, '?') != NULL || dp->version_wildcard) {
+        report_error("%%ODS2-E-NOTYET, %s: RENAME with a wildcard is not available yet (step 4)\n", src_arg);
+        return;
+    }
+    if (dp->filename[0] == '\0') {
+        report_error("%%ODS2-E-NOTYET, %s: RENAME into another directory (a target with no file name) is not available yet (step 2)\n", dst_arg);
+        return;
+    }
+    if (ods5_unescape_filename(sp->filename, strlen(sp->filename), sname, sizeof(sname)) == (size_t) -1 ||
+        ods5_unescape_filename(dp->filename, strlen(dp->filename), dname, sizeof(dname)) == (size_t) -1) {
+        report_error("%%ODS2-E-BADNAME, malformed ^ escape in a file name\n");
+        return;
+    }
+    resolve_effective_path(sp, sdir_path, sizeof(sdir_path));
+    r = resolve_dir(vol, sdir_path, sdir, &sfid);
+    if (!r.ok) {
+        report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
+        return;
+    }
+    if (dp->had_brackets) {
+        resolve_effective_path(dp, ddir_path, sizeof(ddir_path));
+        r = resolve_dir(vol, ddir_path, ddir, &dfid);
+        if (!r.ok) {
+            report_error("%%RENAME-E-OPENOUT, error opening %s as output\n-RMS-E-DNF, directory not found\n-SYSTEM-W-NOSUCHFILE, no such file\n", dst_arg);
+            return;
+        }
+    } else {
+        dfid = sfid;                                  /* no directory in the new name: the old file's directory */
+    }
+    if (!(sfid.fid_num == dfid.fid_num && sfid.fid_seq == dfid.fid_seq && sfid.fid_rvn == dfid.fid_rvn && sfid.fid_nmx == dfid.fid_nmx)) {
+        report_error("%%ODS2-E-NOTYET, %s: RENAME into another directory is not available yet (step 2)\n", dst_arg);
+        return;
+    }
+    memset(&info, 0, sizeof(info));
+    r = ods2_rename(vol, ods2_fid_number(sfid), sname, sp->has_version ? sp->version : 0, ods2_fid_number(dfid), dname, dp->has_version ? dp->version : 0, &info);
+    snprintf(what, sizeof(what), "%s", src_arg);
+    if (!r.ok) {
+        report_error("%%ODS2-E-RENAME, %s: %s\n", what, r.problem);
+        return;
+    }
+    {
+        char shown[ODS2_PATH_MAX];
+        display_name(dname, shown, sizeof(shown));
+        if (info.same) {
+            printf("%%ODS2-I-RENAMED, %s is already named %s: nothing changed\n", src_arg, dst_arg);
+        } else if (info.case_only) {
+            printf("%%ODS2-I-RENAMED, %s renamed to %s (the spelling only)\n", src_arg, dst_arg);
+        } else {
+            printf("%%ODS2-I-RENAMED, %s renamed to %s;%u%s%s\n", src_arg, shown, (unsigned) info.version, info.resumed ? " (an interrupted RENAME finished)" : "",
+                   info.header_changed ? "" : " (an alias entry: the file's header is not changed)");
+        }
+        if (info.pruned_version != 0) printf("%%ODS2-I-DELETED, deleted %s;%u (the version limit)\n", shown, info.pruned_version);
+    }
+}
+
 static void cmd_link(ods2_volume_t *vol, const ods2_parsed_path_t *np, const ods2_parsed_path_t *ep)
 {
     uint8_t dir_header[512], target_dir[512];
@@ -4009,6 +4080,9 @@ static void print_help(void)
            "  TYPE [dir]wild[;ver] or a,b  wildcards and comma lists as VMS TYPE: a header (a space line, the\n"
            "                             name, a space line) before each file, none for the first file of a\n"
            "                             list named without a wildcard; no match: %%TYPE-W-SEARCHFAIL\n"
+           "  RENAME old new             rename a file in its directory (a new name, type or version; the target\n"
+           "                             name that exists gets the next version); aliases and other directories\n"
+           "                             and wildcards: later steps\n"
            "  DELETE path                delete a file (one version) or empty directory\n"
            "  DELETE [dir]wild[;ver]     every match: F*.COM (highest), *.*;* (all versions)\n"
            "  PURGE[/KEEP=n][/LOG] [spec]  keep the n highest versions (default 1) of each name, delete the rest\n"
@@ -4532,6 +4606,20 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
             }
             if (!cmd_type_list(vol, tokens[1], raw, lines)) cmd_type(vol, &p, raw, lines);
         }
+        return true;
+    }
+    if (matches(tokens[0], "RENAME") || matches(tokens[0], "MV")) {
+        ods2_parsed_path_t sp, dp;
+        if (n < 3) {
+            report_error("%%ODS2-E-NOPARM, usage: RENAME <old-path> <new-path>\n");
+            return true;
+        }
+        if (!ods2_parse_path(tokens[1], &sp) || !ods2_parse_path(tokens[2], &dp)) {
+            report_error("%%ODS2-E-BADPATH, could not parse the paths\n");
+            return true;
+        }
+        if (refuse_wild_dir(&sp, "RENAME", tokens[1]) || refuse_wild_dir(&dp, "RENAME", tokens[2])) return true;
+        cmd_rename(vol, &sp, &dp, tokens[1], tokens[2]);
         return true;
     }
     if (matches(tokens[0], "DELETE") || matches(tokens[0], "RM")) {

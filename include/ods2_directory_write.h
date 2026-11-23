@@ -169,6 +169,10 @@ typedef struct {
 int ods2_dir_name_records(const uint8_t *block, size_t block_size, const char *name,
                           ods2_dir_namerec_t *out, int max);
 
+/* Replaces the name bytes of the record at `rec_pos` with `name` (RENAME that changes only the case, ODS-5: the record keeps its place, its versions and its flags). Only when the new name
+   takes the same number of bytes and the same name type as the old one; false, nothing changed, otherwise. */
+bool ods2_dir_record_set_name_same_length(uint8_t *block, size_t block_size, size_t rec_pos, const char *name, unsigned level);
+
 /* Adds the pair (version, fid) to the record at `rec_pos` as its pair number `index` (0 = in front: the new highest version).
    1: done. 0: the block has no room (split it). -1: the record cannot grow (a record is at most 510 bytes): add a record.
    -2: the record or the block is malformed, or the index is beyond the record's pairs: nothing changed. */
