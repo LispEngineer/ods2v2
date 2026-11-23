@@ -76,7 +76,7 @@ def tree(img, tag):
 # A block that splits inside a directory with blocks after it is rewritten so that every name stays listed at
 # every write, a name being listed twice for a moment (F2): the checker reports that as duplicate entries and
 # a block out of order. Allowed for those operations only; a name missing is never allowed (the tree compare).
-SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"versions not descending"]
+SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"BAD_VERSORDER"]
 SHRINK_OPS = ['delete_dirshrink', 'delete_dirshrink_mid']     # operations after which no directory block may be all zeros inside the end of file (a WARN of the checker)
 SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big', 'newver_split']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
