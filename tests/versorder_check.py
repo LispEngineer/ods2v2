@@ -15,6 +15,7 @@ The directories are made by ods2v2 (versions inserted newest first, as it insist
 Usage: versorder_check.py   (run from the project root, with ./ods2 and ./ods2_init built; TMPDIR holds the scratch images)."""
 import hashlib
 import os
+import time
 import re
 import shutil
 import struct
@@ -117,7 +118,7 @@ def build(work, level):
             p = os.path.join(work, '%s%d.txt' % (nm, v))
             open(p, 'w').write('%s VERSION %d\n' % (nm, v))
             cmds.append('COPY %s [%s]%s.TXT;%d' % (p, 'DY' if nm == 'Y' else 'D', nm, v))
-    for c in cmds:
+    for c in cmds + ['SET FILE/VERSION_LIMIT=3 [D]X.TXT']:
         rc, out = ods2(img, c)
         assert rc == 0 and '%ODS2-E' not in out, (c, out)
     patch(img, 'X')
@@ -147,6 +148,59 @@ def refused(out):
     return 'ILLCMD' not in out and ('BAD_VERSORDER' in out or 'out of order' in out)
 
 
+def timed(img, cmd):
+    t0 = time.time()
+    rc, out = ods2(img, cmd)
+    return time.time() - t0, out
+
+
+def big_case(work):
+    """review 66 S3: the order of a name is judged once, not once for each of its entries: a name with 4,000 versions (PURGE and SET FILE ;* went from 0.04 s to 5.2 s and a refusal took 85 s when it was
+    judged for every entry). Generous bounds, not a benchmark: 3 s for the healthy name and for the refusal (the first measure on this host: 0.03 to 0.1 s)."""
+    img = os.path.join(work, 'big.img')
+    rc, out = run([INIT, img, '20000', '--structure=2', '--maxfiles=6000', '--label=BIGNAME'])
+    assert rc == 0, out
+    src = os.path.join(work, 'v.txt')
+    open(src, 'w').write('v\n')
+    script = os.path.join(work, 'big.cmds')
+    open(script, 'w').write('CREATE/DIRECTORY [D]\n' + ('COPY %s [D]V.TXT\n' % src) * 4000)
+    rc, out = ods2(img, '@' + script)
+    base = os.path.join(work, 'big0.img')
+    shutil.copyfile(img, base)
+    check('a name with 4,000 versions is made (%s)' % ods2(img, 'DIR [D]V.TXT;*')[1].strip().splitlines()[-1], 4000, len(listing(img, '[D]V.TXT;*')))
+    for desc, cmd in (('SET FILE/PROTECTION V.TXT;* (healthy name)', 'SET FILE/PROTECTION=(W:R) [D]V.TXT;*'), ('PURGE/KEEP=4000 V.TXT (healthy name, nothing to purge)', 'PURGE/KEEP=4000 [D]V.TXT')):
+        shutil.copyfile(base, img)
+        dt, out = timed(img, cmd)
+        check('%s takes under 3 s (took %.2f s)' % (desc, dt), True, dt < 3.0)
+    # out of order: every record of V.TXT stored ascending
+    shutil.copyfile(base, img)
+    lbns = dir_lbns(img, '[000000]D.DIR')
+    with open(img, 'r+b') as f:
+        for lb in lbns:
+            f.seek(lb * 512)
+            blk = bytearray(f.read(512))
+            changed = False
+            for pos, size, nm in records(blk):
+                if nm.upper() == 'V.TXT':
+                    nc = blk[pos + 5]
+                    ent = pos + 6 + nc
+                    ent += ent % 2
+                    es = [bytes(blk[i:i + 8]) for i in range(ent, pos + size, 8)]
+                    es.reverse()
+                    blk[ent:pos + size] = b''.join(es)
+                    changed = True
+            if changed:
+                f.seek(lb * 512)
+                f.write(bytes(blk))
+    bad = os.path.join(work, 'big_bad.img')
+    shutil.copyfile(img, bad)
+    for desc, cmd in (('PURGE V.TXT', 'PURGE [D]V.TXT'), ('SET FILE/PROTECTION V.TXT', 'SET FILE/PROTECTION=(W:R) [D]V.TXT'), ('DELETE V*.TXT', 'DELETE [D]V*.TXT')):
+        shutil.copyfile(bad, img)
+        h0 = sha(img)
+        dt, out = timed(img, cmd)
+        check('%s on 4,000 versions stored out of order is refused, once, in under 3 s (took %.2f s), the image unchanged' % (desc, dt), (True, 1, h0), (dt < 3.0, out.count('BAD_VERSORDER'), sha(img)))
+
+
 def main():
     work = tempfile.mkdtemp(prefix='versorder_check_', dir=os.environ.get('TMPDIR', 'samples'))
     try:
@@ -173,6 +227,10 @@ def main():
                 h0 = sha(img)
                 rc, out = ods2(img, cmd)
                 check(t('%s is refused (versions out of order: BAD_VERSORDER) and the image is unchanged' % desc), (True, h0), (refused(out), sha(img)))
+                # review 66 S1: the refused name is not then reported missing or "nothing purged"
+                check(t('%s: after the refusal no SEARCHFAIL, FNF or NOFILPURG for the same name' % desc), [], [w for w in ('SEARCHFAIL', 'FNF', 'NOFILPURG', 'not found', 'no files') if w in out])
+                if cmd.startswith('PURGE'):
+                    check(t('%s: PURGE takes no version, so the refusal points to DELETE name;n (review 66 S2)' % desc), True, 'DELETE name;n' in out and 'name a version' not in out)
             # an explicit version, or all versions, acts as it is told
             img = fresh(base, work, 'del2')
             rc, out = ods2(img, 'DELETE [D]X.TXT;2')
@@ -199,11 +257,17 @@ def main():
             h0 = sha(img)
             rc, out = ods2(img, 'COPY %s [D]X.TXT' % os.path.join(work, 'X1.txt'))
             check(t('COPY into X.TXT (a new version) is refused and the image is unchanged (it would be stored out of order)'), (True, h0), ('ILLCMD' not in out and 'ODS2-E' in out, sha(img)))
+            # review 66 F1: a version limit that would drop a version of a name stored out of order refuses the COPY even with a version typed (X ;1 ;2 ;3, limit 3: COPY f X.TXT;5 deleted ;1)
+            img = fresh(base, work, 'copylimit')
+            h0 = sha(img)
+            rc, out = ods2(img, 'COPY %s [D]X.TXT;5' % os.path.join(work, 'X1.txt'))
+            check(t('COPY f X.TXT;5 with the limit 3 on X out of order is refused (BAD_VERSORDER, version limit) and the image is unchanged'), (True, True, h0), ('ILLCMD' not in out and refused(out), 'limit' in out, sha(img)))
             # ods5check names it after VMS
             rc, out = run(['python3', '-I', 'tests/ods5check.py', base])
             lines = [l for l in out.splitlines() if 'BAD_VERSORDER' in l]
             check(t('ods5check says BAD_VERSORDER for X (2 pairs) and Y (1 pair, across its two records), nothing for Z'),
                   (3, 0, 0), (len(lines), sum(1 for l in lines if 'Z.TXT' in l), sum(1 for l in out.splitlines() if 'versions not descending' in l)))
+        big_case(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print('versorder_check: %d passed, %d FAILED' % (passes, fails))
