@@ -85,7 +85,7 @@ RENAME_ALLOWED = []
 RENAME_PAIRS = {'rename_same_dir': ('A1.TXT;1', 'A9.TXT;1'), 'rename_type': ('B.DAT;1', 'B.TXT;1'), 'rename_newver': ('A1.TXT;1', 'W.TXT;10'),
                 'rename_alias': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'), 'rename_primary_alias': ('L.TXT;1', 'L2.TXT;1'), 'rename_hardlink': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'),
                 'rename_primary_hardlink': ('L.TXT;1', 'L2.TXT;1'), 'rename_split': ('FULL/N00000.TXT;1', 'FULL/%(next)s;1'),
-                'rename_case': ('abc.txt;1', 'ABC.txt;1'), 'rename_shrink_last': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1'), 'rename_shrink_mid': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1')}
+                'rename_case': ('abc.txt;1', 'ABC.txt;1'), 'rename_ext': ('F/A.DAT;1', 'F/A2.DAT;1'), 'rename_shrink_last': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1'), 'rename_shrink_mid': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1')}
 SHRINK_OPS = ['delete_dirshrink', 'delete_dirshrink_mid', 'rename_shrink_last', 'rename_shrink_mid']     # operations after which no directory block may be all zeros inside the end of file (a WARN of the checker)
 SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big', 'newver_split']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
@@ -443,6 +443,8 @@ OPS = {
     'rename_case': ('RENAME [000000]abc.txt [000000]ABC.txt', ['abc.txt;1', 'ABC.txt;1'], True, False, 'caseonly'),
     # the remove that empties a block (C6b): the old name is alone in the LAST, then a MIDDLE, block of its directory and the new name sorts first, so the insert is in the first block
     # and the remove empties the old name's block (the blocks after it move up, the last is dropped: review 48 N10, review 64 S1)
+    # a file in several headers (a primary header and extension headers): the extension headers are not touched (CORPUS 66.2); the file reads back under one of its names at every stop
+    'rename_ext': ('RENAME [F]A.DAT [F]A2.DAT', ['F/A.DAT;1', 'F/A2.DAT;1'], False, False, 'sfext'),
     'rename_shrink_last': ('RENAME [SH]%(next)s [SH]AAA_FIRST.TXT', ['SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1'], False, False, 'dirshrink'),
     'rename_shrink_mid': ('RENAME [SH]%(next)s [SH]AAA_FIRST.TXT', ['SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1'], False, False, 'dirshrinkmid'),
     # DELETE of the only name in the last block of a directory: the directory shrinks by a block; no block of zeros inside the end of file at any write (review 48 N10)
@@ -556,29 +558,39 @@ def main():
                         prob.append('the completed rename: the file is not under the new name only')
                 if name in RENAME_PAIRS and mode == 'crash':
                     # the way back (review 65 C6c): the same RENAME again. A target entry that already points at the source's file ID is an interrupted rename: the run FINISHES it (no new
-                    # version); after a completed rename the source is gone and the run is refused with the image unchanged. Either way the checker finds nothing.
+                    # version). Once the old entry is gone (or the rename completed) the source no longer exists: the run is refused and the image is unchanged (for a rename that changes
+                    # only the case the name is still found: "already named", the image unchanged unless the header still has the old spelling: then it is finished).
+                    old_k, new_k = (x % ctx_op for x in RENAME_PAIRS[name])
+                    case_pair = old_k.lower() == new_k.lower()
                     rerun = os.path.join(WORK, 'rerun.img')
                     shutil.copyfile(trial, rerun)
                     h_before = md5(rerun)
                     rcr, outr = ods2(rerun, cmd, openv)
                     rr_rc, rr_files, _ = tree(rerun, 'rerun')
-                    if k == n:
-                        if 'ILLCMD' in outr or not ('-E-' in outr or 'not found' in outr.lower()):
-                            prob.append('the RENAME run again after the completed one did not refuse (the source is gone): %s' % outr.strip()[:100])
-                        if md5(rerun) != h_before:
-                            prob.append('the RENAME run again after the completed one changed the image')
-                    else:
-                        old_k, new_k = (x % ctx_op for x in RENAME_PAIRS[name])
-                        if 'ILLCMD' in outr or (rcr != 0 and k > 0):
+                    orig = base_files.get(old_k)
+                    badr, leakr = check(rerun, name, False)
+                    if 'ILLCMD' in outr:
+                        prob.append('the RENAME run again: unrecognized command')
+                    elif case_pair:
+                        if rr_files.get(new_k) != orig or (k == n and md5(rerun) != h_before):
+                            prob.append('the RENAME (case only) run again: the file is not under the new spelling, or the completed rename was changed')
+                    elif old_k in files:
+                        # the old entry is still there: the run finishes the rename
+                        if rcr != 0 or '%ODS2-E' in outr:
                             prob.append('the RENAME run again after the stop at write %d failed: %s' % (k, outr.strip()[:120]))
-                        orig = base_files.get(old_k)
-                        if rr_files.get(new_k) != orig or old_k in rr_files and old_k != new_k and not (old_k.lower() == new_k.lower()):
+                        if rr_files.get(new_k) != orig or old_k in rr_files:
                             prob.append('after the RENAME run again the file is not under the new name only')
                         extra_keys = sorted(x for x in rr_files if x not in base_files and x != new_k)
                         if extra_keys:
                             prob.append('after the RENAME run again there is an extra entry (a new version?): %s' % extra_keys[:3])
-                    badr, leakr = check(rerun, name, False)
-                    prob += ['after the RENAME run again, checker: ' + b for b in badr + leakr]
+                        prob += ['after the RENAME run again, checker: ' + b for b in badr + leakr]
+                    else:
+                        # the old name is gone: refused, nothing changed
+                        if '%ODS2-E' not in outr:
+                            prob.append('the RENAME run again after the old entry was removed did not refuse (the source is gone): %s' % outr.strip()[:100])
+                        if md5(rerun) != h_before:
+                            prob.append('the RENAME run again after the old entry was removed changed the image')
+                        prob += ['after the RENAME run again, checker: ' + b for b in badr]
                 if name in INDEX_OPS:
                     # the first change of any kind repairs an interrupted growth, not only a create (review 28 a): a
                     # relabel, then the checker must show nothing of the transient

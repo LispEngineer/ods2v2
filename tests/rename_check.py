@@ -86,6 +86,8 @@ def fields(h, level):
         name = raw.decode('utf-16-le') if nt == 3 else raw.decode('latin-1')
         return {'name': name, 'nametype': nt, 'namelen': nl, 'revision': u16(ident + 2), 'revdate': u64(ident + 12), 'attdate': u64(ident + 44), 'linkcount': u16(74)}
     name = bytes(h[ident:ident + 20]).decode('latin-1').rstrip(' \x00')
+    if len(name) == 20 and True:                  # a name over 20 characters goes on in FILENAMEXT (the ident area has it when it is 120 bytes long)
+        name += bytes(h[ident + 54:ident + 120]).decode('latin-1').rstrip(' \x00')
     return {'name': name, 'nametype': 0, 'namelen': len(name), 'revision': u16(ident + 20), 'revdate': u64(ident + 30), 'attdate': 0, 'linkcount': 0}
 
 
@@ -99,11 +101,11 @@ def may_differ(h, level):
     ident = h[0] * 2
     if level == 5:
         return [(ident + 1, ident + 2), (ident + 2, ident + 4), (ident + 44, ident + 52), (ident + 76, ident + 76 + 248), (510, 512)]
-    return [(ident, ident + 20), (ident + 20, ident + 22), (ident + 30, ident + 38), (510, 512)]
+    return [(ident, ident + 20), (ident + 20, ident + 22), (ident + 30, ident + 38), (ident + 54, ident + 120), (510, 512)]
 
 
-def other_bytes_same(a, b, level):
-    ok = [(x, y) for x, y in may_differ(a, level)]
+def other_bytes_same(a, b, level, adopt=False):
+    ok = [(x, y) for x, y in may_differ(a, level)] + ([(66, 72)] if adopt else [])
     bad = [i for i in range(512) if a[i] != b[i] and not any(x <= i < y for x, y in ok)]
     return bad
 
@@ -133,9 +135,10 @@ KINDS = (('2', 2, False, 'ODS-2'), ('5', 5, False, 'ODS-5'), ('5h', 5, True, 'OD
 PLAIN = re.compile(r'^[A-Za-z0-9_.;-]+$')
 
 
-def build(work, level, hl, alias):
-    """the base volume of one kind: the files of the cases of the table, with the alias entry [Y]<alias> for FILE.TXT (None: none)"""
-    img = os.path.join(work, 'base_%d%s_%s.img' % (level, 'h' if hl else '', alias or 'none'))
+def build(work, level, hl, link, noprimary=False):
+    """the base volume of one kind: the files of the cases of the table; `link` = (alias entry, file) made with LINK (None: none); noprimary: the file's header gets back link (0,0,0) (VMS: SET FILE/REMOVE of the
+    primary entry), which ods2 cannot make"""
+    img = os.path.join(work, 'base_%d%s_%s.img' % (level, 'h' if hl else '', re.sub(r'\W', '_', str(link))))
     a = [INIT, img, '16384', '--structure=%d' % level, '--label=RENAME'] + (['--hardlinks'] if hl else [])
     rc, out = run(a)
     assert rc == 0, out
@@ -144,18 +147,38 @@ def build(work, level, hl, alias):
         p = os.path.join(work, name)
         open(p, 'w').write(text)
         return p
-    cmds = ['CREATE/DIRECTORY [X]', 'CREATE/DIRECTORY [X2]', 'CREATE/DIRECTORY [Y]']
+    cmds = ['CREATE/DIRECTORY [X]', 'CREATE/DIRECTORY [X2]', 'CREATE/DIRECTORY [Y]', 'CREATE/DIRECTORY [K]', 'CREATE/DIRECTORY [L]', 'CREATE/DIRECTORY [VL]']
     files = [('[X]A.TXT', 'content of A'), ('[X2]M.TXT', 'content of M'), ('[X2]M2.TXT', 'content of M2'),
-             ('[X2]T.TXT', 'T version 1'), ('[X2]T.TXT', 'T version 2'), ('[X2]T.TXT', 'T version 3'), ('[X2]FILE.TXT', 'content of FILE'), ('[X2]H3.TXT', 'content of H3')]
+             ('[X2]T.TXT', 'T version 1'), ('[X2]T.TXT', 'T version 2'), ('[X2]T.TXT', 'T version 3'), ('[X2]FILE.TXT', 'content of FILE'), ('[X2]H3.TXT', 'content of H3'),
+             # CORPUS 66 groups K and L
+             ('[K]P1.TXT', 'P1'), ('[K]F3.TXT', 'F3'), ('[K]A6.TXT', 'A6'), ('[K]S7.TXT', 'S7'), ('[K]Q5.TXT', 'Q5'), ('[K]T.TXT', 'K T1'), ('[K]T.TXT', 'K T2'), ('[K]T.TXT', 'K T3'),
+             ('[K]L.TXT', 'L1'), ('[K]L.TXT', 'L2'), ('[K]L.TXT', 'L3'), ('[K]N8.TXT', 'N8'),
+             ('[L]M.TXT;5', 'M v5'), ('[L]T.TXT', 'L T1'), ('[L]T.TXT', 'L T2'), ('[L]T.TXT', 'L T3'), ('[L]U.TXT;5', 'U v5'), ('[L]F5.TXT', 'F5'),
+             ('[VL]A.TXT', 'A1'), ('[VL]A.TXT', 'A2'), ('[VL]A.TXT', 'A3'), ('[VL]A.TXT', 'A4'), ('[VL]A.TXT', 'A5'), ('[VL]D.TXT', 'D1'),
+             ('[VL]C.TXT', 'C1'), ('[VL]C.TXT', 'C2'), ('[VL]C.TXT', 'C3'), ('[VL]C.TXT', 'C4'), ('[VL]E.TXT', 'E1')]
     if level == 5:
         files += [('[X2]abc.txt', 'lower case'), ('[X2]sp^_ace.txt', 'a name with a space'), ('[X2]eur^U20ACo.txt', 'a name with a euro sign')]
     for i, (dst, text) in enumerate(files):
         cmds.append('COPY %s %s' % (put('f%d.txt' % i, text + '\n'), dst))
-    if alias:
-        cmds.append('LINK [Y]%s [X2]FILE.TXT' % alias)
+    # the lowest versions go, the limit is the entry's own (66.1): K L.TXT ;1-3 limit 3 (as VMS), VL A.TXT ;3-5 limit 3, VL C.TXT ;3-4 limit 2
+    cmds += ['DELETE [K]T.TXT;2', 'DELETE [VL]A.TXT;1', 'DELETE [VL]A.TXT;2', 'DELETE [VL]C.TXT;1', 'DELETE [VL]C.TXT;2',
+             'SET FILE/VERSION_LIMIT=3 [K]L.TXT;3', 'SET FILE/VERSION_LIMIT=3 [VL]A.TXT;5', 'SET FILE/VERSION_LIMIT=2 [VL]C.TXT;4']
+    if link:
+        cmds.append('LINK %s %s' % link)
     for c in cmds:
         rc, out = ods2(img, c)
         assert rc == 0 and '%ODS2-E' not in out, (c, out)
+    if noprimary:
+        v = O.Vol(img)
+        num = E.D.fnum(img, link[1])
+        lbn = E.D.lbn(v, num)
+        with open(img, 'r+b') as f:
+            f.seek(lbn * 512)
+            hb = bytearray(f.read(512))
+            hb[66:72] = bytes(6)                                  # back link (0,0,0)
+            struct.pack_into('<H', hb, 510, sum(struct.unpack_from('<255H', hb, 0)) & 0xffff)
+            f.seek(lbn * 512)
+            f.write(bytes(hb))
     return img
 
 
@@ -173,6 +196,8 @@ def run_case(cid, t, kind, level, hl, kname, base, work, start=None):
     """one case of the table on one volume kind: the same command, the same changes as VMS's (rename_expect.py)"""
     tag = '%s %s' % (kname, cid)
     img = fresh(start or base, work, tag)
+    if start:
+        time.sleep(1.1)                   # a chained case follows the one before it within the same second otherwise: its date could not be told from the one before
     if cid == 'h3':
         os.chmod(img, 0o444)
     h0 = sha(img)
@@ -187,7 +212,10 @@ def run_case(cid, t, kind, level, hl, kname, base, work, start=None):
         check('%s: the image is byte for byte the same%s' % (tag, ' (VMS bumps the source header: ods2v2 does not, an intended difference)' if t.get('vms_bumps_refused') else ''), h0, sha(img))
         return img
     check('%s: RENAME %s %s succeeds' % (tag, t['old'], t['new']), (0, True), (rc, '%ODS2-E' not in out and '%RENAME-E' not in out and 'ILLCMD' not in out))
-    new_spec = t.get('file') or t.get('after') or (t['new'] if ';' in t['new'] else t['new'] + ';1')
+    if t.get('ods2v2_unchanged'):
+        check('%s: the target is the source: nothing is written (VMS bumps the revision and the date: an intended difference)' % tag, h0, sha(img))
+        return img
+    new_spec = t.get('after') or t.get('file') or (t['new'] if ';' in t['new'] else t['new'] + ';1')
     after = hdr(img, new_spec)
     if before is None or after is None:
         check('%s: the file is found under %s' % (tag, new_spec), True, after is not None)
@@ -199,7 +227,10 @@ def run_case(cid, t, kind, level, hl, kname, base, work, start=None):
         if t['stored'] and PLAIN.match(t['stored'][1]):
             check('%s: the stored name is %s' % (tag, t['stored'][1]), t['stored'][1], fa['name'])
         check('%s: revision number +%d' % (tag, t['revision']), fb['revision'] + t['revision'], fa['revision'])
-        check('%s: no byte outside name, revision, the date field and the checksum changed' % tag, [], other_bytes_same(before, after, level))
+        check('%s: no byte outside name, revision, the date field and the checksum changed%s' % (tag, ' (and the back link, which is set)' if t.get('backlink') == 'adopted' else ''), [],
+              other_bytes_same(before, after, level, t.get('backlink') == 'adopted'))
+        if t.get('backlink') == 'adopted':
+            check('%s: the header named no entry (back link 0); its back link is now the directory of the renamed entry' % tag, (bytes(6), E.D.fnum(img, '[000000]L.DIR')), (bytes(before[66:72]), struct.unpack_from('<H', after, 66)[0]))
         check('%s: the header checksum is right' % tag, True, cksum_ok(after))
         if level == 2:
             check('%s: ODS-2: the revision date is set to the time of the RENAME' % tag, (True, True), (fa['revdate'] > fb['revdate'], abs(fa['revdate'] - vms_now()) < 864000000000))
@@ -219,7 +250,7 @@ def run_case(cid, t, kind, level, hl, kname, base, work, start=None):
     check('%s: the checker finds nothing wrong' % tag, [], checker_errors(img))
     if cid == 'g2':
         check('%s: the alias entry stays as it was and reads the same data' % tag, (list_alias_before(base), 'content of FILE'),
-              (listing(img, '[Y]'), ods2(img, 'TYPE [Y]%s' % t['alias'])[1].strip().splitlines()[-1]))
+              (listing(img, '[Y]'), ods2(img, 'TYPE %s' % t['link'][0])[1].strip().splitlines()[-1]))
     if cid == 'g1':
         check('%s: the data reads back under the alias' % tag, 'content of FILE', ods2(img, 'TYPE %s' % t['new'])[1].strip().splitlines()[-1])
     return img
@@ -283,6 +314,24 @@ def full_volume(work, level):
     check('%s: the image is byte for byte the same' % tag, h0, sha(img))
 
 
+def ext_headers_case(work, level):
+    """a file in a primary header and three extension headers (tests/setfile_ext_check.py's volume): RENAME changes the primary header only; the extension headers keep every byte, the old name in them
+    included (CORPUS 66.2: VMS leaves them so; ods2v2 writes the first 20 bytes of the name into them at ODS-2 since follow-up d, and a RENAME does not rewrite them)"""
+    import setfile_ext_check
+    tag = 'ODS-%d file with extension headers' % level
+    img = setfile_ext_check.build(level, work)
+    before = E.chain(img, '[F]A.DAT')
+    rc, out = ods2(img, 'RENAME [F]A.DAT [F]A2.DAT')
+    check('%s: RENAME succeeds' % tag, (0, True), (rc, '%ODS2-E' not in out and 'ILLCMD' not in out))
+    after = E.chain(img, '[F]A2.DAT')
+    check('%s: the file has the same number of headers (%d)' % (tag, len(before)), len(before), len(after))
+    if len(before) == len(after) and len(before) >= 2:
+        check('%s: every extension header is byte for byte the same' % tag, [], [i for i in range(1, len(before)) if before[i][1] != after[i][1]])
+        check('%s: the primary header changed only in its name, revision, date and checksum' % tag, [], other_bytes_same(before[0][1], after[0][1], level))
+        check('%s: and its name is A2.DAT;1' % tag, 'A2.DAT;1', fields(after[0][1], level)['name'])
+    check('%s: the checker finds nothing wrong' % tag, [], checker_errors(img))
+
+
 def list_alias_before(base):
     return listing(base, '[Y]')
 
@@ -298,12 +347,14 @@ def main():
                 t = T.CASES[cid]
                 if kind not in t['vols']:
                     continue
-                alias = t.get('alias')
+                alias = (t.get('link'), bool(t.get('noprimary')))
                 if alias not in bases:
-                    bases[alias] = build(work, level, hl, alias)
+                    bases[alias] = build(work, level, hl, alias[0], alias[1])
+                    time.sleep(1.1)           # the dates have a resolution of a second here: the RENAME must come later than the creation for its date to be seen
                 done[cid] = run_case(cid, t, kind, level, hl, kname, bases[alias], work, done.get(t.get('follows')))
         for level in (2, 5):
             full_volume(work, level)
+            ext_headers_case(work, level)
     finally:
         if not keep:
             shutil.rmtree(work, ignore_errors=True)

@@ -13,8 +13,8 @@ Fields:  vols      the volume kinds the case was measured on: '2' ODS-2, '5' ODS
          header    'changed' (name area / revision / date / checksum) or 'same' (not one field of the header changes)
          nametype  the File name type VMS prints before and after (it stays with the name); namelen the File name length before and after (bytes, ';version' included)
          linkcount the File entry linkcount of the file (HARDLINKS volumes); status 'ok' or 'refused'; msgs the substrings of the messages of a refused command
-         alias     the name of the alias entry the case needs ([Y]...), and untouched: other versions' headers that must not change; after the header's spec after the rename where it is not the new
-                   name with ;1; file the header of this file is the one compared (an alias entry's file); untouched_extra more versions the test checks that VMS's dumps do not show (only ;3 is dumped); follows the case whose result volume this one starts from (VMS ran a1, a2, a3 one after the other on one volume); ods2v2_msgs the messages ods2v2 prints where they are not VMS's (a read-only image
+         link      (alias entry, file) the volume needs: LINK makes the alias entry for the file (SET FILE/ENTER on VMS); and untouched: other versions' headers that must not change; after the header's spec after the rename where it is not the new
+                   name with ;1; file the header of this file is the one compared (an alias entry's file); pruned the versions the version limit deletes in the same command; untouched_extra more versions the test checks that VMS's dumps do not show (only ;3 is dumped); follows the case whose result volume this one starts from (VMS ran a1, a2, a3 one after the other on one volume); ods2v2_msgs the messages ods2v2 prints where they are not VMS's (a read-only image
                    gives the READONLY refusal every ods2v2 write command gives)."""
 
 # The VERSION a renamed file gets (review 65 C1) is measured only in part: e2 shows "the source's version if that name;version is free, else one above the highest"; every single-file case has
@@ -40,14 +40,52 @@ CASES = {
                nametype=('UCS-2', 'UCS-2'), namelen=(22, 24)),
     # an alias entry (SET FILE/ENTER, here LINK): HARDLINKS volume: the primary entry renamed changes the header (the link count 2 stays), the alias entry renamed changes nothing in the header
     'f4': dict(vols=('5h',), old='[X2]FILE.TXT;1', new='[X2]FILE2.TXT', stored=('FILE.TXT;1', 'FILE2.TXT;1'), dir='[X2]', removed=['FILE.TXT;1'], added=['FILE2.TXT;1'], revision=1, header='changed', status='ok',
-               alias='LNK2.TXT', linkcount=2),
+               link=('[Y]LNK2.TXT', '[X2]FILE.TXT'), linkcount=2),
     'f5': dict(vols=('5h',), old='[Y]LNK2.TXT;1', new='[Y]LNK3.TXT', stored=('FILE2.TXT;1', 'FILE2.TXT;1'), dir='[Y]', removed=['LNK2.TXT;1'], added=['LNK3.TXT;1'], revision=0, header='same', status='ok',
-               alias='LNK2.TXT', linkcount=2, file='[X2]FILE2.TXT;1'),
+               link=('[Y]LNK2.TXT', '[X2]FILE.TXT'), linkcount=2, file='[X2]FILE2.TXT;1', follows='f4'),
     # the same without the link count (ODS-2 and ODS-5 without HARDLINKS)
     'g1': dict(vols=('2', '5'), old='[Y]ALIAS.TXT;1', new='[Y]ALIAS2.TXT', stored=('FILE.TXT;1', 'FILE.TXT;1'), dir='[Y]', removed=['ALIAS.TXT;1'], added=['ALIAS2.TXT;1'], revision=0, header='same', status='ok',
-               alias='ALIAS.TXT', file='[X2]FILE.TXT;1'),
+               link=('[Y]ALIAS.TXT', '[X2]FILE.TXT'), file='[X2]FILE.TXT;1'),
     'g2': dict(vols=('2', '5'), old='[X2]FILE.TXT;1', new='[X2]FILE3.TXT', stored=('FILE.TXT;1', 'FILE3.TXT;1'), dir='[X2]', removed=['FILE.TXT;1'], added=['FILE3.TXT;1'], revision=1, header='changed', status='ok',
-               alias='ALIAS2.TXT'),
+               link=('[Y]ALIAS2.TXT', '[X2]FILE.TXT')),
+    # --- CORPUS 66 (ods5-vms3's follow-up e, 23-NOV-2026): the version rule, the header that names no entry, an alias in its own directory, names, the version limit, reserved files ---
+    # C1 (66.2): with no version in the target the new version is ONE ABOVE THE HIGHEST that exists, or 1 for a name that is new: the source's version number is never kept
+    'l1': dict(vols=('2', '5', '5h'), old='[L]M.TXT;5', new='[L]N.TXT', stored=('M.TXT;5', 'N.TXT;1'), dir='[L]', removed=['M.TXT;5'], added=['N.TXT;1'], revision=1, header='changed', status='ok'),
+    'l2': dict(vols=('2', '5', '5h'), old='[L]U.TXT;5', new='[L]T.TXT', stored=('U.TXT;5', 'T.TXT;4'), dir='[L]', removed=['U.TXT;5'], added=['T.TXT;4'], revision=1, header='changed', status='ok',
+               after='[L]T.TXT;4'),
+    # C5 (66.2): an alias made with SET FILE/ENTER, then the primary entry removed (SET FILE/REMOVE): the header still names the removed entry and its back link is (0,0,0); renaming the
+    # alias entry ADOPTS it: the header's name and back link are set (the directory of the entry), revision +1, the level's date
+    'l3': dict(vols=('2', '5', '5h'), old='[L]F5_AL.TXT;1', new='[L]F5_AL2.TXT', stored=('F5.TXT;1', 'F5_AL2.TXT;1'), dir='[L]', removed=['F5_AL.TXT;1'], added=['F5_AL2.TXT;1'], revision=1,
+               header='changed', status='ok', extra_changed=['Back link file identification'], backlink='adopted', link=('[L]F5_AL.TXT', '[L]F5.TXT'), noprimary=True, file='[L]F5_AL.TXT;1',
+               after='[L]F5_AL2.TXT;1'),
+    # an alias renamed in the directory of its primary entry: the header is not touched at all
+    'k1': dict(vols=('2', '5', '5h'), old='[K]P1_AL.TXT;1', new='[K]P1_AL2.TXT', stored=('P1.TXT;1', 'P1.TXT;1'), dir='[K]', removed=['P1_AL.TXT;1'], added=['P1_AL2.TXT;1'], revision=0, header='same',
+               status='ok', link=('[K]P1_AL.TXT', '[K]P1.TXT'), file='[K]P1.TXT;1'),
+    # nothing checks the type: a file to NAME.DIR
+    'k3a': dict(vols=('2', '5', '5h'), old='[K]F3.TXT;1', new='[K]F3.DIR', stored=('F3.TXT;1', 'F3.DIR;1'), dir='[K]', removed=['F3.TXT;1'], added=['F3.DIR;1'], revision=1, header='changed', status='ok'),
+    # the reserved files: V8.4 refuses (the VAX allows the volume owner: only the V8.4 evidence is compared)
+    'k4a': dict(vols=('2', '5', '5h'), old='[000000]INDEXF.SYS;1', new='[000000]INDEXF2.SYS', stored=('INDEXF.SYS;1', 'INDEXF.SYS;1'), dir='[000000]', removed=[], added=[], revision=0, header='same',
+                status='refused', msgs=['RMS-F-RMV', 'NOPRIV'], ods2v2_msgs=['RESERVED'], evidence=('asim5',)),
+    'k4c': dict(vols=('2', '5', '5h'), old='[000000]BITMAP.SYS;1', new='[000000]BITMAP2.SYS', stored=('BITMAP.SYS;1', 'BITMAP.SYS;1'), dir='[000000]', removed=[], added=[], revision=0, header='same',
+                status='refused', msgs=['RMS-F-RMV', 'NOPRIV'], ods2v2_msgs=['RESERVED'], evidence=('asim5',)),
+    # an explicit target version that is free (T.TXT;1 and ;3 exist): works
+    'k5': dict(vols=('2', '5', '5h'), old='[K]Q5.TXT;1', new='[K]T.TXT;2', stored=('Q5.TXT;1', 'T.TXT;2'), dir='[K]', removed=['Q5.TXT;1'], added=['T.TXT;2'], revision=1, header='changed', status='ok',
+               untouched=['T.TXT;1', 'T.TXT;3'], after='[K]T.TXT;2'),
+    # A.TXT to A.TXT: VMS bumps the revision and sets the date (the name is the same); ods2v2 writes NOTHING (an intended difference; the image is byte for byte the same)
+    'k6': dict(vols=('2', '5', '5h'), old='[K]A6.TXT;1', new='[K]A6.TXT', stored=('A6.TXT;1', 'A6.TXT;1'), dir='[K]', removed=[], added=[], revision=1, header='changed', status='ok', ods2v2_unchanged=True),
+    # a 36-character name (the ident area holds the first 20 bytes at ODS-2, the rest is FILENAMEXT), then at ODS-5 the same name in lower case (a case-only rename of a name over 20 characters)
+    'k7a': dict(vols=('2', '5', '5h'), old='[K]S7.TXT;1', new='[K]ABCDEFGHIJKLMNOPQRSTUVWXYZ012345.TXT', stored=('S7.TXT;1', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ012345.TXT;1'), dir='[K]', removed=['S7.TXT;1'],
+                added=['ABCDEFGHIJKLMNOPQRSTUVWXYZ012345.TXT;1'], revision=1, header='changed', status='ok'),
+    'k7b': dict(vols=('5', '5h'), old='[K]ABCDEFGHIJKLMNOPQRSTUVWXYZ012345.TXT;1', new='[K]abcdefghijklmnopqrstuvwxyz012345.txt', stored=('ABCDEFGHIJKLMNOPQRSTUVWXYZ012345.TXT;1', 'abcdefghijklmnopqrstuvwxyz012345.txt;1'),
+                dir='[K]', removed=['ABCDEFGHIJKLMNOPQRSTUVWXYZ012345.TXT;1'], added=['abcdefghijklmnopqrstuvwxyz012345.txt;1'], revision=1, header='changed', status='ok', follows='k7a'),
+    # the version limit (66.1): a name whose entry has a limit loses its LOWEST version when a rename makes a new one (exactly one: the count stays at the limit). The limit that counts is the entry's own
+    # (SET FILE/VERSION_LIMIT here; the directory default at creation on VMS)
+    'k8': dict(vols=('2', '5', '5h'), old='[K]N8.TXT;1', new='[K]L.TXT', stored=('N8.TXT;1', 'L.TXT;4'), dir='[K]', removed=['L.TXT;1', 'N8.TXT;1'], added=['L.TXT;4'], revision=1, header='changed', status='ok',
+               after='[K]L.TXT;4', pruned=['L.TXT;1']),
+    'i3': dict(vols=('2', '5'), old='[VL]D.TXT;1', new='[VL]A.TXT', stored=('D.TXT;1', 'A.TXT;6'), dir='[VL]', removed=['A.TXT;3', 'D.TXT;1'], added=['A.TXT;6'], revision=1, header='changed', status='ok',
+               after='[VL]A.TXT;6', pruned=['A.TXT;3']),
+    'i7': dict(vols=('2', '5'), old='[VL]E.TXT;1', new='[VL]C.TXT', stored=('E.TXT;1', 'C.TXT;5'), dir='[VL]', removed=['C.TXT;3', 'E.TXT;1'], added=['C.TXT;5'], revision=1, header='changed', status='ok',
+               after='[VL]C.TXT;5', pruned=['C.TXT;3']),
     # a volume mounted /NOWRITE: refused, nothing changes
     'h3': dict(vols=('2', '5', '5h'), old='[X2]H3.TXT;1', new='[X2]H3B.TXT', stored=('H3.TXT;1', 'H3.TXT;1'), dir='[X2]', removed=[], added=[], revision=0, header='same', status='refused',
                msgs=['RMS-F-RMV', 'WRITLCK'], ods2v2_msgs=['READONLY']),
