@@ -384,6 +384,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_maxfiles_check.sh
 	@echo "--- cli_notmp_check (no C source names /tmp: review 61 F2) ---"
 	@sh tests/cli_notmp_check.sh
+	@echo "--- cli_rename_check (RENAME within one directory against what VMS does: CORPUS 65, PLAN_WRITE_OPS item 5 step 1) ---"
+	@sh tests/cli_rename_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
 	@echo "--- CLI directory loop checks ---"

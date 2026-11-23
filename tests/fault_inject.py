@@ -77,6 +77,10 @@ def tree(img, tag):
 # every write, a name being listed twice for a moment (F2): the checker reports that as duplicate entries and
 # a block out of order. Allowed for those operations only; a name missing is never allowed (the tree compare).
 SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"versions not descending"]
+# operation -> (old key, new key) of the renamed file as tree() names it (the keys of OPS' targets, with the version); the check is in main()
+RENAME_PAIRS = {'rename_same_dir': ('A1.TXT;1', 'A9.TXT;1'), 'rename_type': ('B.DAT;1', 'B.TXT;1'), 'rename_newver': ('A1.TXT;1', 'W.TXT;10'),
+                'rename_alias': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'), 'rename_primary_alias': ('L.TXT;1', 'L2.TXT;1'), 'rename_hardlink': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'),
+                'rename_primary_hardlink': ('L.TXT;1', 'L2.TXT;1'), 'rename_split': ('FULL/N00000.TXT;1', 'FULL/%(next)s;1')}
 SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big', 'newver_split']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
                  'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT, 'newver_split': SPLIT_TRANSIENT}
@@ -363,6 +367,16 @@ OPS = {
     'insert_move_big': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'movebig'),
     'insert_move': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'move'),
     # COPY makes a new version of a name that exists (PLAN_WRITE_OPS item 1)
+    # RENAME within one directory (PLAN_WRITE_OPS item 5, step 1; CORPUS 65): the file must read back with its original bytes under at least ONE of its two names at every
+    # interruption, and under the new name once the command completed (RENAME_PAIRS); never under none
+    'rename_same_dir': ('RENAME [000000]A1.TXT [000000]A9.TXT', ['A1.TXT;1', 'A9.TXT;1'], False, False, None),
+    'rename_type': ('RENAME [000000]B.DAT [000000]B.TXT', ['B.DAT;1', 'B.TXT;1'], False, False, None),
+    'rename_newver': ('RENAME [000000]A1.TXT [000000]W.TXT', ['A1.TXT;1', 'W.TXT;10'], False, False, None),
+    'rename_alias': ('RENAME [SUB]LNKA.TXT [SUB]LNKB.TXT', ['SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'], False, False, None),
+    'rename_primary_alias': ('RENAME [000000]L.TXT [000000]L2.TXT', ['L.TXT;1', 'L2.TXT;1'], False, False, None),
+    'rename_hardlink': ('RENAME [SUB]LNKA.TXT [SUB]LNKB.TXT', ['SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'], True, True, None),
+    'rename_primary_hardlink': ('RENAME [000000]L.TXT [000000]L2.TXT', ['L.TXT;1', 'L2.TXT;1'], True, True, None),
+    'rename_split': ('RENAME [FULL]N00000.TXT [FULL]%(next)s', ['FULL/N00000.TXT;1', 'FULL/%(next)s;1'], False, False, 'split'),
     'newver_front': ('COPY %(small)s [000000]A1.TXT', ['A1.TXT;2'], False, False, None),
     'newver_limit': ('COPY %(small)s [000000]V.TXT', ['V.TXT;1', 'V.TXT;3'], False, False, None),
     'newver_mid': ('COPY %(small)s [000000]W.TXT;5', ['W.TXT;5'], False, False, None),
@@ -385,7 +399,7 @@ OPS = {
 }
 # the operations that are also run with an I/O error at the k-th write of the commit (the process goes on and says so), not only killed
 ERROR_MODE_OPS = ['newver_limit', 'newver_limit3_big', 'newver_limit1_big', 'newver_front', 'purge_names', 'setfile_prot', 'setfile_wild', 'setfile_owner_ext']
-QUICK = ['index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
+QUICK = ['rename_same_dir', 'rename_newver', 'rename_alias', 'rename_primary_alias', 'rename_split', 'index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
          'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split', 'newver_limit3_big', 'newver_limit1_big',
          'purge_names', 'purge_keep2', 'setfile_prot', 'setfile_owner', 'setfile_dir', 'setfile_reserved', 'setfile_wild', 'setfile_owner_ext']
 
@@ -458,6 +472,15 @@ def main():
                         prob.append('file %s changed' % p)
                     if p not in files and p not in targets:
                         prob.append('file %s lost' % p)
+                if name in RENAME_PAIRS:
+                    old_key, new_key = (x % ctx_op for x in RENAME_PAIRS[name])
+                    orig = base_files.get(old_key)
+                    if orig is None:
+                        prob.append('the base has no %s' % old_key)
+                    elif files.get(old_key) != orig and files.get(new_key) != orig:
+                        prob.append('the file reads back under neither %s nor %s' % (old_key, new_key))
+                    if mode == 'crash' and k == n and (files.get(new_key) != orig or old_key in files):
+                        prob.append('the completed rename: the file is not under the new name only')
                 if name in INDEX_OPS:
                     # the first change of any kind repairs an interrupted growth, not only a create (review 28 a): a
                     # relabel, then the checker must show nothing of the transient
