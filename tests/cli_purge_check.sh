@@ -147,12 +147,14 @@ for level in 2 5; do
     check "ODS-$level P7: PURGE of W.TXT, whose ;1 is also listed as WALIAS.TXT, leaves ;3 and the alias entry" "W.TXT;3 WALIAS.TXT;1" "$(vers "$img" '[P]*.*;*')"
     check "ODS-$level P7: ods5check says only that the alias is dangling" "0 error(s), 1 warning(s)" "$(clean "$img")"
 
-    # --- P8: a name whose versions are stored out of order (review 48 F3): PURGE keeps the highest version numbers, never the first entries as stored ---------
+    # --- P8: a name whose versions are stored out of order (review 48 F3, then H1 / CORPUS 66.4): VMS keeps the FIRST STORED entry (PURGE X.TXT leaves ;1 of ;1 ;2 ;3), the highest
+    # number is not what it follows; ods2v2 used to keep the highest number, and both can lose the file the user wanted on a damaged directory. PURGE now REFUSES the name (BAD_VERSORDER)
+    # and every entry stays as stored (a deliberate divergence from VMS, in the README) -------------------------------------------------------------------------------
     $ODS2 "$img" "DELETE [P]*.*;*" >/dev/null 2>&1; mk "$img" P X.TXT 3
     dn=$($ODS2 "$img" 'DIR/FULL [000000]P.DIR' 2>&1 | sed -n 's/.*File ID: *(\([0-9]*\),.*/\1/p' | head -1)
     python3 -I tests/swap_versions.py "$img" "$dn" X.TXT >/dev/null 2>&1
     o=$($ODS2 "$img" "PURGE/LOG [P]X.TXT" 2>&1)
-    check "ODS-$level P8: versions stored as ;1 ;2 ;3: PURGE deletes ;2 and ;1 (highest of the deleted first) and keeps ;3" "%PURGE-I-FILPURG, [P]X.TXT;2 deleted (2 blocks)|%PURGE-I-FILPURG, [P]X.TXT;1 deleted (2 blocks)|%PURGE-I-TOTAL, 2 files deleted (4 blocks)|X.TXT;3" "$(echo "$o" | tr '\n' '|')$(vers "$img" '[P]X.TXT;*')"
+    check "ODS-$level P8: versions stored as ;1 ;2 ;3: PURGE refuses the name (BAD_VERSORDER, nothing deleted)" "1|X.TXT;1 X.TXT;2 X.TXT;3" "$(echo "$o" | grep -c 'BAD_VERSORDER')|$(vers "$img" '[P]X.TXT;*')"
 
     # --- P11: version numbers that are not usable (review 49 S1): the name is refused with FILNOTPUR and the reason, nothing of it is deleted, the other names go on ----------
     for case in "0:2:0:a version number is 0" "1:1:3:two entries have the same version number" "2:1:40000:a version number is over 32767"; do

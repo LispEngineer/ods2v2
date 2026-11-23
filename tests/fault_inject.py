@@ -87,6 +87,7 @@ RENAME_PAIRS = {'rename_same_dir': ('A1.TXT;1', 'A9.TXT;1'), 'rename_type': ('B.
                 'rename_primary_hardlink': ('L.TXT;1', 'L2.TXT;1'), 'rename_split': ('FULL/N00000.TXT;1', 'FULL/%(next)s;1'),
                 'rename_case': ('abc.txt;1', 'ABC.txt;1'), 'rename_ext': ('F/A.DAT;1', 'F/A2.DAT;1'), 'rename_shrink_last': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1'), 'rename_shrink_mid': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1')}
 SHRINK_OPS = ['delete_dirshrink', 'delete_dirshrink_mid', 'rename_shrink_last', 'rename_shrink_mid']     # operations after which no directory block may be all zeros inside the end of file (a WARN of the checker)
+SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"BAD_VERSORDER"]
 SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big', 'newver_split']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
                  'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT, 'newver_split': SPLIT_TRANSIENT,

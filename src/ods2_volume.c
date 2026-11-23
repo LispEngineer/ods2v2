@@ -2607,6 +2607,49 @@ static bool visit_lookup_version(const ods2_dir_entry_t *entry, void *ctx_)
     return true;
 }
 
+typedef struct {
+    const char *name;
+    bool sorted;
+    bool name_found;
+    bool have_prev;
+    unsigned prev;
+    bool in_order;
+} version_order_ctx_t;
+
+static bool visit_version_order(const ods2_dir_entry_t *entry, void *ctx_)
+{
+    version_order_ctx_t *ctx = (version_order_ctx_t *) ctx_;
+
+    if (!names_equal(entry->name, ctx->name)) {
+        if (ctx->sorted && ods2_dir_name_compare(entry->name, strlen(entry->name), ctx->name, strlen(ctx->name)) > 0) return false;
+        return !ctx->name_found;
+    }
+    ctx->name_found = true;
+    if (ctx->have_prev && entry->version >= ctx->prev) ctx->in_order = false;     /* two neighbours that are not descending (or equal) */
+    ctx->prev = entry->version;
+    ctx->have_prev = true;
+    return true;
+}
+
+ods2_result_t ods2_name_versions_in_order(ods2_volume_t *vol, const uint8_t *dir_header, const char *name, bool *in_order_out)
+{
+    version_order_ctx_t ctx;
+    unsigned start;
+    bool sorted;
+    ods2_result_t r;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.name = name;
+    ctx.in_order = true;
+    r = dir_search_start(vol, dir_header, name, &start, &sorted);
+    if (!r.ok) return r;
+    ctx.sorted = sorted;
+    r = walk_directory_from(vol, dir_header, start, visit_version_order, &ctx);
+    if (!r.ok) return r;
+    *in_order_out = ctx.in_order;
+    return ok();
+}
+
 ods2_result_t ods2_lookup_name_version(ods2_volume_t *vol, const uint8_t *dir_header,
                                         const char *name, int version,
                                         ods2_fid_t *fid_out, uint16_t *version_out)
@@ -3649,6 +3692,13 @@ static ods2_result_t version_limit_drop(const dir_name_info_t *info, unsigned v,
     *drop_out = 0;
     if (info->exists && info->verlimit >= 1 && info->verlimit < ODS2_MAX_VERSION && info->count + 1 > info->verlimit) {
         unsigned lowest = 0, k;
+        /* H1 (review 66 F1): the version the limit drops is chosen by NUMBER; on a name stored out of order VMS goes by the stored order (CORPUS 66.4), so a number could be the wrong file: refused,
+           even with an explicit version (X stored ;1 ;2 ;3 with limit 3, COPY f X.TXT;5 deleted ;1 silently). The one place for COPY and RENAME (review 67 S2). */
+        for (k = 1; k < info->count; k++) {
+            if (info->versions[k] >= info->versions[k - 1]) {
+                return fail("the versions of this name are stored out of order (BAD_VERSORDER) and its version limit would delete one: no new version is made");
+            }
+        }
         for (k = 0; k < info->count; k++) if (lowest == 0 || info->versions[k] < lowest) lowest = info->versions[k];
         if (v < lowest) return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not made");
         *drop_out = lowest;
@@ -3683,6 +3733,17 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
     /* a directory, or one of the volume's own files, is not given a new version (COPY used to refuse the name altogether) */
     r = version_target_ok(vol, dir_number, name, &info);
     if (!r.ok) { free(info.versions); return r; }
+    if (version_req == 0) {
+        /* H1 (CORPUS 66.4): a name whose versions are stored out of order gets no new version by "highest + 1" (VMS makes a second ;2 beside the stored ;1 ;2 ;3; here the highest number
+           and the lowest number that a limit would drop would be taken by number, against the stored order that VMS follows): refused, changing nothing; ;n names the version */
+        unsigned k;
+        for (k = 1; k < info.count; k++) {
+            if (info.versions[k] >= info.versions[k - 1]) {
+                free(info.versions);
+                return fail("the versions of this name are stored out of order (BAD_VERSORDER): no new version is made; name a version (;n)");
+            }
+        }
+    }
     {
         bool exists;
         r = next_version(&info, version_req, &v, &exists);
