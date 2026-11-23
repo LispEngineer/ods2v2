@@ -730,6 +730,7 @@ def main():
     # --- cross checks: entries -> headers, backlinks ---
     referenced = set()
     dir_of_primary = {}
+    entry_count = {}          # file number -> the entries that name it (one of them for the file's primary name, the others links or aliases)
     for dn, lst in entries.items():
         # An entry whose version limit is 1 makes VMS purge version 1 as soon as it makes version 2: every VMS-made user
         # entry has 32767 or the directory's default (AXP1SYS: 40,000 of them, none with 1), and ods2v2 wrote 1 on ODS-2
@@ -770,9 +771,22 @@ def main():
                 else:
                     fnd.err('dir %d: %r;%d -> file %d: sequence %d, header has %d' % (dn, nm, ver, fnum, fid[1], u16(hd, 10)))
                 continue
+            entry_count[fnum] = entry_count.get(fnum, 0) + 1
             bl = u16(hd, 66) | (hd[71] << 16)
             if bl == dn:
                 dir_of_primary.setdefault(fnum, []).append((nm, ver))
+    if v.level == 5 and (v.volchar & 0x40):
+        # On a HARDLINKS volume a file's link count is the number of entries that name it: equal for all 4,185 files of five volumes VMS wrote (review 67 F4). Unequal: a RENAME that was
+        # stopped after its first write (the count + 1, no new entry yet) or after the old entry went and before the count came back (ods2v2 leaves the count too HIGH on purpose: too low
+        # would let a DELETE of one name free a file another name still enters), or a LINK or DELETE that was stopped. A DELETE of such a file takes the count down and removes the entry:
+        # the file stays, in no directory (a lost file)
+        for n, (b, d) in prim.items():
+            if n <= 10 or n not in entry_count or u16(b, 4) != 0:
+                continue
+            lc = u16(b, 74)
+            if lc != entry_count[n]:
+                fnd.warn('file %d (%s): link count %d but %d directory entr%s name it (a RENAME or a LINK or DELETE that was stopped; a count too high keeps the file after its last name is deleted)'
+                         % (n, d['name'] if d else '?', lc, entry_count[n], 'y' if entry_count[n] == 1 else 'ies'))
     for n, (b, d) in prim.items():
         if n <= v.resfiles and n != 4 and False:
             continue

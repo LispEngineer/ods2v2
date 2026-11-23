@@ -98,7 +98,9 @@ bool ods2_header_set_name(uint8_t *header, const char *ident_name)
         size_t name_len = 0;
         unsigned name_type = ODS5_NAME_ODS2;
         if (!level5_name(ident_name, name, sizeof(name), &name_len, &name_type) || name_len > 255) return false;
-        if (ODS5_FI5_FILENAME + name_len > avail) return false;
+        /* the ident area must be exactly what a header made for this name has: 120 bytes up to a 44-byte name, 76 + length above it (the map follows it, and ods5check, like VMS-made headers, wants
+           it there): a name that needs another area would have to move the map: refused (review 67 F3: a 60-byte name renamed to a short one left MPOFFSET 238) */
+        if ((ODS5_FI5_FILENAME + name_len > 120 ? ODS5_FI5_FILENAME + name_len : 120) != avail) return false;
         ident[ODS5_FI5_CONTROL] = (uint8_t) ((ident[ODS5_FI5_CONTROL] & ~ODS5_FI5_NAMETYPE_MASK) | name_type);
         ident[ODS5_FI5_NAMELEN] = (uint8_t) name_len;
         memset(ident + ODS5_FI5_FILENAME, 0, avail - ODS5_FI5_FILENAME);

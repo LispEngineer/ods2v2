@@ -556,6 +556,26 @@ def main():
                         prob.append('the file reads back under neither %s nor %s' % (old_key, new_key))
                     if mode == 'crash' and k == n and (files.get(new_key) != orig or old_key in files):
                         prob.append('the completed rename: the file is not under the new name only')
+                if name in RENAME_PAIRS and need_hl and mode == 'crash':
+                    # review 67 F4: on a HARDLINKS volume, in EVERY stopped state (the old entry gone as well) the checker says it when the file's link count is not the number of entries that name it,
+                    # and says nothing when they agree: the count is read from the header, the entries are counted from DIR/FULL of the whole volume, neither by the checker
+                    import ext_headers as _E
+                    _ok, _nk = (x % ctx_op for x in RENAME_PAIRS[name])
+                    _key = _ok if _ok in files else _nk
+                    _path, _, _ver = _key.rpartition(';')
+                    _d, _, _nm = _path.rpartition('/')
+                    _spec = '[%s]%s;%s' % (_d.replace('/', '.') if _d else '000000', _nm, _ver)
+                    _ch = _E.chain(trial, _spec)
+                    if _ch:
+                        _fnum = _ch[0][0]
+                        _lc = int.from_bytes(_ch[0][1][74:76], 'little')
+                        _rc, _full = ods2(trial, 'DIR/FULL [000000...]*.*;*')
+                        _entries = len(re.findall(r'File ID:\s+\(%d,' % _fnum, _full))
+                        _txt = run(CHECK + [trial])[1]
+                        _warn = bool(re.search(r'file %d \([^)]*\): link count %d but %d directory entr' % (_fnum, _lc, _entries), _txt))
+                        _any = bool(re.search(r'file %d \([^)]*\): link count' % _fnum, _txt))
+                        if _warn != (_lc != _entries) or _any != (_lc != _entries):
+                            prob.append('the link count is %d, %d entries name the file: the checker %s' % (_lc, _entries, 'warns' if _any else 'says nothing'))
                 if name in RENAME_PAIRS and mode == 'crash':
                     # the way back (review 65 C6c): the same RENAME again. A target entry that already points at the source's file ID is an interrupted rename: the run FINISHES it (no new
                     # version). Once the old entry is gone (or the rename completed) the source no longer exists: the run is refused and the image is unchanged (for a rename that changes

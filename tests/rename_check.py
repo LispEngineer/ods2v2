@@ -332,6 +332,60 @@ def ext_headers_case(work, level):
     check('%s: the checker finds nothing wrong' % tag, [], checker_errors(img))
 
 
+def review67_cases(work, level):
+    """review 67: F1 a name held by a directory or a reserved name, F2 another version of the same name under a version limit, F3 an ODS-5 name that needs another ident area, S3 and N2 the words"""
+    kind = 'ODS-%d' % level
+    img = os.path.join(work, 'r67_%d.img' % level)
+    assert run([INIT, img, '8192', '--structure=%d' % level, '--label=R67'])[0] == 0
+    src = os.path.join(work, 'r67.txt')
+    open(src, 'w').write('x\n')
+    cmds = ['CREATE/DIRECTORY [D]', 'CREATE/DIRECTORY [D.SUB]', 'COPY %s [D]A.TXT' % src, 'COPY %s [000000]M.TXT' % src, 'COPY %s [D]AL0.TXT' % src]
+    for v in (1, 2, 3):
+        cmds.append('COPY %s [D]B.TXT' % src)
+    cmds += ['SET FILE/VERSION_LIMIT=3 [D]B.TXT', 'LINK [D]AL.TXT [D]AL0.TXT;1']
+    if level == 5:
+        cmds += ['COPY %s [D]%s' % (src, 'L' * 60 + '.TXT'), 'COPY %s [D]Q.TXT' % src]
+    for c in cmds:
+        rc, out = ods2(img, c)
+        assert rc == 0 and '%ODS2-E' not in out, (c, out)
+    base = os.path.join(work, 'r67_base.img')
+    shutil.copyfile(img, base)
+
+    def case(desc, cmd, msg=None):
+        shutil.copyfile(base, img)
+        h0 = sha(img)
+        rc, out = ods2(img, cmd)
+        check('%s: %s is refused%s and the image is unchanged' % (kind, cmd, ' (%s)' % msg if msg else ''), (True, h0), ('ILLCMD' not in out and '%ODS2-E' in out and (msg is None or msg in out), sha(img)))
+    # F1: the name is held by a directory: no ;2 above its entry; the reserved names are refused by name
+    case('F1', 'RENAME [D]A.TXT [D]SUB.DIR', 'a directory of this name exists')
+    case('F1', 'RENAME [000000]M.TXT [000000]INDEXF.SYS', 'reserved')
+    case('F1', 'RENAME [000000]M.TXT [000000]BITMAP.SYS', 'reserved')
+    # F2: B ;1 ;2 ;3 with the limit 3: a rename to another version of B changes no count: nothing to prune, and the case is not measured on VMS: refused
+    case('F2', 'RENAME [D]B.TXT;1 [D]B.TXT;5', 'version limit')
+    case('F2', 'RENAME [D]B.TXT;3 [D]B.TXT;5', 'version limit')
+    shutil.copyfile(base, img)
+    ods2(img, 'SET FILE/VERSION_LIMIT=32767 [D]B.TXT')
+    rc, out = ods2(img, 'RENAME [D]B.TXT;1 [D]B.TXT;5')
+    check('%s: the same rename with no version limit (32767) works: B.TXT ;5 ;3 ;2' % kind, ['B.TXT;5', 'B.TXT;3', 'B.TXT;2'], sorted((x for x in listing(img, '[D]') if x.startswith('B.TXT')), key=lambda x: -int(x.split(';')[1])))
+    # F3: ODS-5: a name that needs another ident area than the header has is refused, in both directions
+    if level == 5:
+        long60 = 'L' * 60 + '.TXT'
+        case('F3', 'RENAME [D]%s [D]S.TXT' % long60, 'map would have to move')
+        case('F3', 'RENAME [D]Q.TXT [D]%s' % ('M' * 60 + '.TXT'), 'does not fit')
+        shutil.copyfile(base, img)
+        rc, out = ods2(img, 'RENAME [D]%s [D]%s' % (long60, 'K' * 60 + '.TXT'))
+        check('%s: a long name renamed to another of the same length (the same ident area) works and the checker is clean' % kind, (0, [], True), (rc, checker_errors(img), 'K' * 60 + '.TXT;1' in listing(img, '[D]')))
+    # S3: a target entry that already names the file (a LINK, not an interrupted RENAME): said as it is
+    shutil.copyfile(base, img)
+    rc, out = ods2(img, 'RENAME [D]AL0.TXT [D]AL.TXT')
+    check('%s: RENAME onto an alias of the same file says the target already named the file (not "an interrupted RENAME finished")' % kind, (0, True, False, ['AL.TXT;1']),
+          (rc, 'already named this file' in out, 'interrupted' in out, [x for x in listing(img, '[D]') if x.startswith('AL.')]))
+    # N2: a fault of the target name is the target's
+    shutil.copyfile(base, img)
+    rc, out = ods2(img, 'RENAME [D]A.TXT [D]A`B.TXT' if level == 5 else 'RENAME [D]A.TXT [D]A@B.TXT')
+    check('%s: a fault of the new name is reported as the new name\'s' % kind, True, 'the new name is not valid' in out)
+
+
 def list_alias_before(base):
     return listing(base, '[Y]')
 
@@ -355,6 +409,7 @@ def main():
         for level in (2, 5):
             full_volume(work, level)
             ext_headers_case(work, level)
+            review67_cases(work, level)
     finally:
         if not keep:
             shutil.rmtree(work, ignore_errors=True)

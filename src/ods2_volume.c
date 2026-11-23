@@ -3604,11 +3604,63 @@ static ods2_result_t insert_new_version(ods2_volume_t *vol, unsigned dir_file_nu
    makes the new version and deletes one, so the count stays and the excess is never trimmed; SET FILE/VERSION_LIMIT deletes nothing
    (CORPUS 49.9, VAX V7.3 and V8.4). Refused, changing nothing: a version the limit would delete at once (an explicit one below all the
    kept ones: not measured). *prev_out is the file of the highest existing version: the new version takes its owner and protection. */
+/* The rules a new version of an existing name follows, shared by COPY (choose_version) and RENAME (review 67 F1 and S2: RENAME had its own copy, without the first two refusals). */
+
+/* A directory, or one of the volume's own files, is not given a new version: its entry stays the first one of the name and the rest would be out of reach (RENAME A.TXT SUB.DIR made SUB.DIR;2) */
+static ods2_result_t version_target_ok(ods2_volume_t *vol, unsigned dir_number, const char *name, const dir_name_info_t *info)
+{
+    uint8_t h[512];
+    if (!info->exists) return ok();
+    if (ods2_check_fid(info->first_fid).ok && ods2_read_header_fid(vol, info->first_fid, h).ok &&
+        ods2_header_is_file(h, info->first_fid) && (((const ods2_head_core_t *) h)->filechar & 0x2000u)) {
+        return fail("a directory of this name exists: a file cannot be made a version of it");
+    }
+    if (is_reserved_file(vol, dir_number, name, ods2_fid_number(info->first_fid))) {
+        return fail("this name is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... SECURITY.SYS): it gets no new version");
+    }
+    return ok();
+}
+
+/* The number of the new version: 0 asks for one above the highest (1 for a name that is new); n for that version. *exists_out: the explicit version is there already (the caller words
+   the refusal: COPY %RMS-E-FEX, RENAME ...DUPFILENAME). A version above 32767 is refused. */
+static ods2_result_t next_version(const dir_name_info_t *info, int version_req, unsigned *v_out, bool *exists_out)
+{
+    unsigned i;
+    *exists_out = false;
+    if (version_req == 0) {
+        if (!info->exists) { *v_out = 1; return ok(); }
+        if (info->highest >= ODS2_MAX_VERSION) {
+            return fail("%RMS-E-CRE, ACP file create failed; -SYSTEM-W-BADFILEVER, bad file version number (the highest version is 32767)");
+        }
+        *v_out = (unsigned) info->highest + 1;
+        return ok();
+    }
+    *v_out = (unsigned) version_req;
+    for (i = 0; i < info->count; i++) {
+        if (info->versions[i] == *v_out) *exists_out = true;
+    }
+    return ok();
+}
+
+/* The version the name's version limit removes when version `v` is added: none (*drop_out 0) unless the limit is 1 to 32766 and the count would pass it; exactly ONE goes, the lowest, even
+   when the name is over its limit (CORPUS 49.9, 66.1). Refused: a version below all the kept ones (it would go at once). */
+static ods2_result_t version_limit_drop(const dir_name_info_t *info, unsigned v, unsigned *drop_out)
+{
+    *drop_out = 0;
+    if (info->exists && info->verlimit >= 1 && info->verlimit < ODS2_MAX_VERSION && info->count + 1 > info->verlimit) {
+        unsigned lowest = 0, k;
+        for (k = 0; k < info->count; k++) if (lowest == 0 || info->versions[k] < lowest) lowest = info->versions[k];
+        if (v < lowest) return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not made");
+        *drop_out = lowest;
+    }
+    return ok();
+}
+
 static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_header, char *name, size_t name_cap, int version_req,
                                     unsigned special, unsigned *version_out, bool *existing_out, unsigned *drop_out, ods2_fid_t *prev_out)
 {
     dir_name_info_t info;
-    unsigned dir_number = ods2_fid_number(((const ods2_head_core_t *) parent_header)->fid), v, i;
+    unsigned dir_number = ods2_fid_number(((const ods2_head_core_t *) parent_header)->fid), v;
     ods2_result_t r;
 
     (void) special;
@@ -3629,45 +3681,22 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
     *existing_out = true;
     *prev_out = info.first_fid;
     /* a directory, or one of the volume's own files, is not given a new version (COPY used to refuse the name altogether) */
+    r = version_target_ok(vol, dir_number, name, &info);
+    if (!r.ok) { free(info.versions); return r; }
     {
-        uint8_t h[512];
-        if (ods2_check_fid(info.first_fid).ok && ods2_read_header_fid(vol, info.first_fid, h).ok &&
-            ods2_header_is_file(h, info.first_fid) && (((const ods2_head_core_t *) h)->filechar & 0x2000u)) {
+        bool exists;
+        r = next_version(&info, version_req, &v, &exists);
+        if (!r.ok) { free(info.versions); return r; }
+        if (exists) {
+            static char msg[ODS5_MAX_LITERAL_NAME + 96];     /* static: the message outlives this call */
             free(info.versions);
-            return fail("a directory of this name exists: a file cannot be made a version of it");
-        }
-        if (is_reserved_file(vol, dir_number, name, ods2_fid_number(info.first_fid))) {
-            free(info.versions);
-            return fail("this name is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... SECURITY.SYS): it gets no new version");
-        }
-    }
-    if (version_req == 0) {
-        if (info.highest >= ODS2_MAX_VERSION) {
-            free(info.versions);
-            return fail("%RMS-E-CRE, ACP file create failed; -SYSTEM-W-BADFILEVER, bad file version number (the highest version is 32767)");
-        }
-        v = (unsigned) info.highest + 1;
-    } else {
-        v = (unsigned) version_req;
-        for (i = 0; i < info.count; i++) {
-            if (info.versions[i] == v) {
-                static char msg[ODS5_MAX_LITERAL_NAME + 96];     /* static: the message outlives this call */
-                free(info.versions);
-                snprintf(msg, sizeof(msg), "%%RMS-E-FEX, file already exists, not superseded: %s;%u", name, v);
-                return fail(msg);
-            }
+            snprintf(msg, sizeof(msg), "%%RMS-E-FEX, file already exists, not superseded: %s;%u", name, v);
+            return fail(msg);
         }
     }
     /* the version limit of the entry: 0 and 32767 are no limit */
-    if (info.verlimit >= 1 && info.verlimit < ODS2_MAX_VERSION && info.count + 1 > info.verlimit) {
-        unsigned lowest = 0, k;            /* exactly one version goes, the lowest, even when the name is over its limit (CORPUS 49.9) */
-        for (k = 0; k < info.count; k++) if (lowest == 0 || info.versions[k] < lowest) lowest = info.versions[k];
-        if (v < lowest) {
-            free(info.versions);
-            return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not made");
-        }
-        *drop_out = lowest;
-    }
+    r = version_limit_drop(&info, v, drop_out);
+    if (!r.ok) { free(info.versions); return r; }
     free(info.versions);
     *version_out = v;
     return ok();
@@ -5093,16 +5122,23 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     dir_fid = dcore->fid;
 
     /* the target name as a new file's name is made (the same checks, the on-disk form) */
-    if (vol->ods5) {
-        const char *why = ods5_check_new_name(dst_name);
-        if (why != NULL) return fail(why);
-        if (!ods5_complete_name(dst_name, dst_norm, sizeof(dst_norm))) return fail("file name too long");
-    } else {
-        const char *why;
-        if (strchr(dst_name, ';') != NULL || strchr(dst_name, '*') != NULL || strchr(dst_name, '%') != NULL) {
-            return fail("the new name cannot contain ';', '*' or '%': pass the version apart (RENAME wildcards are not available yet)");
+    {
+        static char nmsg[400];            /* static: the message outlives this call; it says whose fault it is: the NEW name's (review 67 N2) */
+        const char *why = NULL;
+        if (vol->ods5) {
+            why = ods5_check_new_name(dst_name);
+            if (why == NULL && !ods5_complete_name(dst_name, dst_norm, sizeof(dst_norm))) why = "file name too long";
+        } else if (strchr(dst_name, ';') != NULL || strchr(dst_name, '*') != NULL || strchr(dst_name, '%') != NULL) {
+            why = "the new name cannot contain ';', '*' or '%': pass the version apart (RENAME wildcards are not available yet)";
+        } else if (!ods2_make_file_name(dst_name, dst_norm, sizeof(dst_norm), &why)) {
+            /* why set by the call */
+        } else {
+            why = NULL;
         }
-        if (!ods2_make_file_name(dst_name, dst_norm, sizeof(dst_norm), &why)) return fail(why);
+        if (why != NULL) {
+            snprintf(nmsg, sizeof(nmsg), "the new name is not valid: %s", why);
+            return fail(nmsg);
+        }
     }
 
     /* the source: the entry as the directory stores it; the stored order is followed (H1, CORPUS 66.4): a version selector that is not explicit on a name out of order is refused */
@@ -5251,33 +5287,28 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
         }
     }
     if (!resumed) {
-        if (dst_version > 0) {
-            v = (unsigned) dst_version;
-            for (i = 0; i < di.count; i++) {
-                if (di.versions[i] == v) {
-                    static char msg[ODS5_MAX_LITERAL_NAME + 160];       /* static: the message outlives this call */
-                    free(di.versions);
-                    snprintf(msg, sizeof(msg), "%%RENAME-E-OPENOUT, error opening the target as output; -RMS-E-ENT, ACP enter function failed; -SYSTEM-W-DUPFILENAME, duplicate file name: %s;%u", dst_norm, v);
-                    return fail(msg);
-                }
-            }
-        } else if (di.exists) {
-            if (di.highest >= ODS2_MAX_VERSION) {
-                free(di.versions);
-                return fail("%RMS-E-CRE, ACP file create failed; -SYSTEM-W-BADFILEVER, bad file version number (the highest version is 32767)");
-            }
-            v = (unsigned) di.highest + 1;
-        } else {
-            v = 1;                                                       /* a new name starts at ;1: the source's version is never kept (CORPUS 66.2) */
+        bool exists;
+        /* the target name is held by a directory or is a reserved file: no new version of it (review 67 F1; the same two refusals as COPY) */
+        r = version_target_ok(vol, src_dir_number, dst_norm, &di);
+        if (!r.ok) { free(di.versions); return r; }
+        r = next_version(&di, dst_version, &v, &exists);               /* the one rule of COPY: 1 for a new name, highest + 1, a typed version kept */
+        if (!r.ok) { free(di.versions); return r; }
+        if (exists) {
+            static char msg[ODS5_MAX_LITERAL_NAME + 160];       /* static: the message outlives this call */
+            free(di.versions);
+            snprintf(msg, sizeof(msg), "%%RENAME-E-OPENOUT, error opening the target as output; -RMS-E-ENT, ACP enter function failed; -SYSTEM-W-DUPFILENAME, duplicate file name: %s;%u", dst_norm, v);
+            return fail(msg);
         }
-        if (di.exists && di.verlimit >= 1 && di.verlimit < ODS2_MAX_VERSION && di.count + 1 > di.verlimit) {
-            unsigned lowest = 0, k;                                      /* as COPY: exactly one version goes, the lowest (CORPUS 66.1) */
-            for (k = 0; k < di.count; k++) if (lowest == 0 || di.versions[k] < lowest) lowest = di.versions[k];
-            if (v < lowest) {
+        if (same_name) {
+            /* another version of the SAME name: one entry goes out and one comes in, the count does not grow, so a version limit prunes nothing. VMS has not been measured for it (ods5-vms3 is asked):
+               refused while a limit applies, instead of pruning a version the count never called for (review 67 F2) */
+            if (di.exists && di.verlimit >= 1 && di.verlimit < ODS2_MAX_VERSION) {
                 free(di.versions);
-                return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not renamed");
+                return fail("a rename to another version of the same name under a version limit is not available (VMS was not measured for it): not renamed");
             }
-            drop_version = lowest;
+        } else {
+            r = version_limit_drop(&di, v, &drop_version);           /* the one rule of COPY: exactly one version, the lowest, goes (CORPUS 66.1) */
+            if (!r.ok) { free(di.versions); return r; }
         }
     }
     free(di.versions);
