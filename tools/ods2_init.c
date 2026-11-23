@@ -146,7 +146,7 @@ int main(int argc, char **argv)
     if (opt.maxfiles != 0) {
         uint32_t written = ods2_init_max_files_written(&opt), vms = ods2_init_max_files_limit(opt.blocks, opt.cluster);
         if (written < opt.maxfiles) {
-            if (written == 16711679u && (opt.maxfiles_over_limit || opt.maxfiles <= opt.blocks)) {
+            if (written == 16711679u) {                  /* every clip to the file-number limit, whatever the blocks and the option */
                 fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (the most a file number allows: --maxfiles-over-limit does not lift this)\n", (unsigned) opt.maxfiles, (unsigned) written);
             } else {
                 fprintf(stderr, "ods2_init: --maxfiles=%u clipped to %u (a volume cannot have more files than blocks); --maxfiles-over-limit keeps it\n", (unsigned) opt.maxfiles, (unsigned) written);
@@ -155,7 +155,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "ods2_init: --maxfiles=%u raised to %u (the minimum)\n", (unsigned) opt.maxfiles, (unsigned) written);
         }
         if (written > vms) {
-            fprintf(stderr, "ods2_init: %u maximum files written; VMS INITIALIZE would allow at most %u here (floor(blocks / (cluster + 1)): measured on VAX V7.3 and Alpha V8.4, ODS-2 and ODS-5, clusters 1 to 16, CORPUS 62 and 64; VMS still reads and writes volumes above it)\n",
+            fprintf(stderr, "ods2_init: %u maximum files written; VMS INITIALIZE would allow at most %u here (floor(blocks / (cluster + 1)): measured at clusters 1, 3, 8 and 16 on 8,192 and 16,384 blocks, on Alpha V8.4 (ODS-2 and ODS-5) and VAX V7.3 (ODS-2), ODS-5 on Alpha V8.4 only, CORPUS 62 and 64; VMS still reads and writes volumes above it)\n",
                     (unsigned) written, (unsigned) vms);
         }
     }

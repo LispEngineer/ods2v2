@@ -38,7 +38,7 @@ for level in 2 5; do
     img="$TMP/k$level.img"; out=$($INIT "$img" 40000000 --structure=$level --cluster=2048 --maxfiles=50000000 2>&1)
     check "ODS-$level --maxfiles=50000000 on 40000000 blocks, no option (above the blocks AND above 16711679): written 16711679, and the note does not say the option keeps it (review 61 nit)" "16711679 1 0" "$(maxfiles "$img") $(echo "$out" | grep -c 'does not lift this') $(echo "$out" | grep -c 'over-limit keeps it')"
     img="$TMP/l$level.img"; out=$($INIT "$img" 8192 --structure=$level --maxfiles=5000 2>&1)
-    check "ODS-$level the note says exactly what was measured (clusters 1, 3, 8 and 16, 8,192 and 16,384 blocks, ODS-5 on V8.4 only), not 'clusters 1 to 16'" "1 0" "$(echo "$out" | grep -c 'clusters 1, 3, 8 and 16.*ODS-5 on Alpha V8.4 only') $(echo "$out" | grep -c 'clusters 1 to 16')"
+    check "ODS-$level the note says exactly what was measured (clusters 1, 3, 8 and 16, 8,192 and 16,384 blocks, ODS-5 on V8.4 only), not 'clusters 1 to 16'" "1 0" "$(echo "$out" | grep -c 'clusters 1, 3, 8 and 16 on 8,192 and 16,384 blocks.*ODS-5 on Alpha V8.4 only') $(echo "$out" | grep -c 'clusters 1 to 16')"
     img="$TMP/h$level.img"; out=$($INIT "$img" 8192 --structure=$level --maxfiles=10 2>&1)
     check "ODS-$level --maxfiles=10: raised to the floor, 64, and the note names the number written" "64 1" "$(maxfiles "$img") $(echo "$out" | grep -c 'raised to 64')"
     img="$TMP/i$level.img"; out=$($INIT "$img" 8192 --structure=$level --cluster=512 --maxfiles=100 2>&1)
