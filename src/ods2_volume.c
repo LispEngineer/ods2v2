@@ -4044,6 +4044,7 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
     int old_count, i;
     unsigned allocated = 0, v;
     bool moved = false, in_place_growth = false;
+    unsigned drop_from = 0, drop_to = 0;       /* the blocks a shrink drops (cleared after the end of file has moved back) */
     uint8_t zero[512];
     ods2_result_t r;
 
@@ -4109,10 +4110,11 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
             r = ods2_write_file_block(vol, dir_header, v + 1, blocks + (size_t) v * 512);
             if (!r.ok) return r;
         }
-        for (v = used; v < old_used; v++) { /* blocks no longer in use */
-            r = ods2_write_file_block(vol, dir_header, v + 1, zero);
-            if (!r.ok) return r;
-        }
+        /* the blocks no longer in use are cleared AFTER the header moves the end of file back (below): cleared first, an interruption left the last block
+           inside the end of file all zeros (review 48 N10). Until the header is written they hold copies of names the blocks before them hold too (or, when no
+           block moved, the names of the entries that are gone: still listed once, in the block that is still in use). */
+        drop_from = used;
+        drop_to = old_used;
     }
 
     core->recattr.efblk = ods2_word_swap32(used + 1);
@@ -4165,6 +4167,11 @@ static ods2_result_t store_directory(ods2_volume_t *vol, unsigned dir_file_numbe
     }
     r = ods2_write_header(vol, dir_file_number, dir_header);
     if (!r.ok) return r;
+
+    for (v = drop_from; v < drop_to; v++) {      /* blocks no longer in use: past the end of file now */
+        r = ods2_write_file_block(vol, dir_header, v + 1, zero);
+        if (!r.ok) return r;
+    }
 
     if (in_place_growth) {
         for (v = used - 1; v > first_changed; v--) {     /* blocks[v - 1] .. blocks[first_changed], last first */

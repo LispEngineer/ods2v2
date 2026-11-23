@@ -77,9 +77,11 @@ def tree(img, tag):
 # every write, a name being listed twice for a moment (F2): the checker reports that as duplicate entries and
 # a block out of order. Allowed for those operations only; a name missing is never allowed (the tree compare).
 SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"versions not descending"]
+SHRINK_OPS = ['delete_dirshrink', 'delete_dirshrink_mid']     # operations after which no directory block may be all zeros inside the end of file (a WARN of the checker)
 SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big', 'newver_split']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
-                 'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT, 'newver_split': SPLIT_TRANSIENT}
+                 'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT, 'newver_split': SPLIT_TRANSIENT,
+                 'delete_dirshrink_mid': SPLIT_TRANSIENT}   # the blocks after the emptied one move up one at a time: a name is listed twice for a moment, never missing
 
 
 # Growing INDEXF.SYS when its last header is an extension header changes two blocks that cannot be written as one: the
@@ -291,6 +293,58 @@ def setup(level, hardlinks, fill_for=None, cluster=None):
         # new name sorts last), 'splitmid' (names in random order, three or more blocks: the block that
         # splits has blocks after it, which move up one), 'move' (three blocks in use, as many as are
         # allocated: the directory moves to a new, larger area). The next name to add is returned in NEXT.
+        if fill_for == 'dirshrink':
+            # [SH]: names added in order until the directory holds four blocks, then the last names are deleted one by one (cleanly) until the next delete
+            # would empty the last block: that name is the operation's target (review 48 N10: the zeroed block was written before the end of file moved back)
+            assert ods2(img, 'CREATE/DIRECTORY [SH]')[0] == 0
+            fid = fid_of(img, '[000000]SH.DIR')
+            names = []
+            for i in range(1, 400):
+                name = 'LONGNAME_NUMBER_%03d_ABCDEFGHIJ.TXT' % i
+                assert ods2(img, 'COPY %s [SH]%s' % (small, name))[0] == 0
+                names.append(name)
+                if efblk(img, fid) >= 5:
+                    break
+            assert efblk(img, fid) >= 5, 'the directory never grew'
+            for name in reversed(names):
+                probe = img + '.probe'
+                shutil.copyfile(img, probe)
+                assert ods2(probe, 'DELETE [SH]%s' % name)[0] == 0
+                shrinks = efblk(probe, fid) < efblk(img, fid)
+                os.remove(probe)
+                if shrinks:
+                    NEXT[img] = name
+                    return img
+                assert ods2(img, 'DELETE [SH]%s' % name)[0] == 0
+            raise AssertionError('no delete shrinks the directory')
+        if fill_for == 'dirshrinkmid':
+            # [SH] of six or more blocks; the names around the middle one are deleted (cleanly), pair by pair, until the delete of the middle name would empty ITS block, which has
+            # blocks after it: the shrink moves those blocks up (review 64 S1: the last block was cleared before the end of file moved back on this path too)
+            assert ods2(img, 'CREATE/DIRECTORY [SH]')[0] == 0
+            fid = fid_of(img, '[000000]SH.DIR')
+            names = []
+            for i in range(1, 400):
+                name = 'LONGNAME_NUMBER_%03d_ABCDEFGHIJ.TXT' % i
+                assert ods2(img, 'COPY %s [SH]%s' % (small, name))[0] == 0
+                names.append(name)
+                if efblk(img, fid) >= 7:
+                    break
+            assert efblk(img, fid) >= 7, 'the directory never grew'
+            m = len(names) // 2
+            for d in range(0, 12):
+                target = names[m]
+                probe = img + '.probe'
+                shutil.copyfile(img, probe)
+                assert ods2(probe, 'DELETE [SH]%s' % target)[0] == 0
+                shrinks = efblk(probe, fid) < efblk(img, fid)
+                os.remove(probe)
+                if shrinks:
+                    assert len(names) - 1 - m >= 12, 'the block that empties is among the last'
+                    NEXT[img] = target
+                    return img
+                for j in (m + d + 1, m - d - 1):
+                    assert ods2(img, 'DELETE [SH]%s' % names[j])[0] == 0
+            raise AssertionError('no delete of a middle block shrinks the directory')
         if fill_for == 'versplit':
             # versions of one 34-character name between two neighbours: the next version grows the directory by a block (the
             # record holding the versions no longer fits beside its neighbour: it is moved to a block of its own)
@@ -363,6 +417,9 @@ OPS = {
     'insert_move_big': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'movebig'),
     'insert_move': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'move'),
     # COPY makes a new version of a name that exists (PLAN_WRITE_OPS item 1)
+    # DELETE of the only name in the last block of a directory: the directory shrinks by a block; no block of zeros inside the end of file at any write (review 48 N10)
+    'delete_dirshrink': ('DELETE [SH]%(next)s', ['SH/%(next)s;1'], False, False, 'dirshrink'),
+    'delete_dirshrink_mid': ('DELETE [SH]%(next)s', ['SH/%(next)s;1'], False, False, 'dirshrinkmid'),
     'newver_front': ('COPY %(small)s [000000]A1.TXT', ['A1.TXT;2'], False, False, None),
     'newver_limit': ('COPY %(small)s [000000]V.TXT', ['V.TXT;1', 'V.TXT;3'], False, False, None),
     'newver_mid': ('COPY %(small)s [000000]W.TXT;5', ['W.TXT;5'], False, False, None),
@@ -385,7 +442,7 @@ OPS = {
 }
 # the operations that are also run with an I/O error at the k-th write of the commit (the process goes on and says so), not only killed
 ERROR_MODE_OPS = ['newver_limit', 'newver_limit3_big', 'newver_limit1_big', 'newver_front', 'purge_names', 'setfile_prot', 'setfile_wild', 'setfile_owner_ext']
-QUICK = ['index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
+QUICK = ['delete_dirshrink', 'delete_dirshrink_mid', 'index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
          'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split', 'newver_limit3_big', 'newver_limit1_big',
          'purge_names', 'purge_keep2', 'setfile_prot', 'setfile_owner', 'setfile_dir', 'setfile_reserved', 'setfile_wild', 'setfile_owner_ext']
 
@@ -451,6 +508,8 @@ def main():
                 allow = name if (k < n or mode == 'error') else None
                 bad, leaks = check(trial, allow)
                 prob += ['checker: ' + b for b in bad]
+                if name in SHRINK_OPS:
+                    prob += ['checker warns: ' + l.strip()[:140] for l in run(CHECK + [trial])[1].splitlines() if l.startswith('WARN') and 'end-of-records' in l]
                 counts['leak' if leaks else 'clean'] += 1
                 rc2, files, text = tree(trial, 'after')
                 for p, h in base_files.items():
