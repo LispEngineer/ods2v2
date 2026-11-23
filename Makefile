@@ -386,6 +386,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_notmp_check.sh
 	@echo "--- cli_versorder_check (versions of a name stored out of order: reads as VMS, changes refused, BAD_VERSORDER: H1, CORPUS 66.4) ---"
 	@sh tests/cli_versorder_check.sh
+	@echo "--- cli_commaesc_check (an escaped comma in a file name is no list separator: review 66) ---"
+	@sh tests/cli_commaesc_check.sh
 	@echo "--- CLI directory wildcard checks ---"
 	@sh tests/cli_dir_wildcard_check.sh
 	@echo "--- CLI directory loop checks ---"
