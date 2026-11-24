@@ -5696,8 +5696,10 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
        header_names_target (the header is not written again: no revision bump), RENAME P R leaves the header alone, and a DELETE of P removes the entry only and leaves the file allocated in no directory (a
        leak that ANALYZE/REPAIR recovers). Header last (entry first) would have left a state in which VMS's DELETE of the old name, the user's natural action, deletes the FILE (CORPUS 67.3) and the new entry
        dangles: header first leaks at worst. An alias entry leaves the header alone: only the link count is written. */
-    /* CORPUS 72.5 (V8.4 and VAX, HARDLINKS): VMS's own RENAME of a DIRECTORY leaves its link count as it was (1 stays 1), so a directory's rename writes no count: no count + 1 in the first write, none
-       to take back, and no state with a count of 2 for one entry. A file's rename keeps counting (CORPUS 67). */
+    /* CORPUS 72.3 (V8.4 HARDLINKS; the VAX has no HARDLINKS): VMS's own RENAME of a DIRECTORY leaves its link count as it was (1 stays 1), so a directory's rename writes no count: no count + 1 in the first
+       write, none to take back, and no state with a count of 2 for one entry. Why a directory needs none and a file does: VMS's DELETE on HARDLINKS decides by the count (CORPUS 72.2: count 1, the entry is the
+       only name, so the directory goes if it is EMPTY and DIRNOTEMPTY otherwise, through either entry), so with the count left at 1 no stopped state can orphan a subtree; a file's count is the number of its
+       names and a DELETE of one name must not free a file another still enters (CORPUS 67), so a file's rename keeps counting. */
     const bool count_links = hardlinks && !is_dir;
     if (header_names_target) inf.header_current = true;
     if (((primary || adopt) && !header_names_target) || (count_links && !resumed && !header_names_target)) {

@@ -362,6 +362,14 @@ def ext_headers_case(work, level):
         check('%s: the primary header changed only in its name, revision, date and checksum' % tag, [], other_bytes_same(before[0][1], after[0][1], level))
         check('%s: and its name is A2.DAT;1' % tag, 'A2.DAT;1', fields(after[0][1], level)['name'])
     check('%s: the checker finds nothing wrong' % tag, [], checker_errors(img))
+    # CORPUS 73 (V8.4 and VAX, ODS-2 and ODS-5, also an ACL extension header of 48 ACEs): VMS's RENAME changes the PRIMARY header only; an extension header keeps its checksum, the old name in its ident area
+    # (ODS-2) and its back link. ods5check must not say anything about that difference: no warning, no info line either, in -v mode
+    rc, out = run(['python3', '-I', 'tests/ods5check.py', '-v', img])
+    ext_old = [E.chain(img, '[F]A2.DAT')[i][1] for i in range(1, len(after))] if len(before) == len(after) else []
+    check('%s: CORPUS 73: ods5check -v says nothing (no ERROR, WARN or info) about extension headers that keep the old name' % tag, [], [ln for ln in out.splitlines() if ln.startswith(('ERROR', 'WARN', 'info')) and 'link count' not in ln])
+    if level == 2 and len(before) == len(after):
+        check('%s: CORPUS 73: the extension headers still hold the OLD name (A.DAT) while the primary holds A2.DAT;1' % tag, (True, True),
+              (all(h[h[0] * 2:h[0] * 2 + 20].rstrip(b' \0').startswith(b'A.DAT') for h in ext_old) if ext_old else False, fields(after[0][1], level)['name'] == 'A2.DAT;1'))
 
 
 def review67_cases(work, level):

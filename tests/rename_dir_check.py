@@ -249,6 +249,29 @@ def cases(work, kind, level, hl):
         rc, out = S.ods2(im, 'RENAME [000000]P.DIR [R]')
         check('%s S1: a tree with a directory alias (Y entered in P and inside P.X.S) cannot be moved: IDR-free refusal naming the entry and saying to run the stopped RENAME again OR DELETE the alias entry, the image is unchanged' % kind,
               (True, True, h0), ('entered twice' in out and 'DELETE the alias entry' in out, '%ODS2-I-RENAMED' not in out, sha(im)))
+    # review 73 N1: a VMS-made twin (a directory entered twice: [P]X.DIR and [Q]X.DIR, count 2) stopped in the second state of RENAME [P]X.DIR [R] has THREE entries and count 2. DELETE of the old entry or of the
+    # alias entry removes that entry alone and takes the count down (1 for two entries); running the same RENAME again finishes with two entries and count 2.
+    if hl:
+        def tw(tag):
+            im = S.build(work, level, hl, 'twin', False, 'tw' + tag)
+            for c in ('CREATE/DIRECTORY [R]', 'COPY %s [R]STUB.TXT' % os.path.join(work, 'ds_stub.txt'), 'LINK [R]X.DIR [R]STUB.TXT'):
+                assert S.ods2(im, c)[0] == 0, c
+            x, r = S.fnum(im, '[P]X.DIR'), S.fnum(im, '[000000]R.DIR')
+            S.move_header(im, x, r, hl)
+            S.entry_fid(im, r, 'X.DIR', x)
+            S.set_count(im, S.fnum(im, '[R]STUB.TXT'), 1)
+            return im
+
+        def state(im):
+            return (tuple('X.DIR;1' in R.listing(im, d) for d in ('[P]', '[Q]', '[R]')), R.fields(R.hdr(im, '[R]X.DIR;1') or R.hdr(im, '[P]X.DIR;1'), level)['linkcount'])
+        im = tw('a')
+        check('%s N1: the twin stopped in the second state has three entries and count 2' % kind, ((True, True, True), 2), state(im))
+        rc, out = S.ods2(im, 'RENAME [P]X.DIR [R]')
+        check('%s N1: the same RENAME again finishes it: two entries ([Q] alias and [R]) and count 2' % kind, (0, ((False, True, True), 2)), (rc, state(im)))
+        for how, cmd, want in (('the old entry', 'DELETE [P]X.DIR', (False, True, True)), ('the alias entry', 'DELETE [Q]X.DIR', (True, False, True))):
+            im = tw('d' + how[4])
+            rc, out = S.ods2(im, cmd)
+            check('%s N1: DELETE of %s removes that entry alone and takes the count to 1 (two entries)' % (kind, how), (0, (want, 1)), (rc, state(im)))
     # CORPUS 72 (pair 4 of the b2-d3 images): DD (of DB4) is ALSO entered as DD.DIR inside SUB4 (an alias entry; its back link names DB4). VMS's IDR follows only the typed path, so
     # RENAME [DA4]SUB4.DIR [DB4.DD] (the typed path never names SUB4) makes a CYCLE on VMS; ods2v2 also walks the directories below the source (DD is one of them) and refuses.
     if not hl:
