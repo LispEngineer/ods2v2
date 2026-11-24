@@ -786,7 +786,8 @@ def main():
     # file ID matches the header. A directory entered inside its own subtree is a CYCLE: an ERROR of its own (VMS's [...] walks never end on it).
     for n, (b, d) in prim.items():
         if n > 10 and (u32(b, 52) & 0x2000) and entry_count.get(n, 0) >= 2:
-            fnd.warn('directory %d (%s) is entered %d times (the second stopped state of a RENAME of a directory, or an alias; VMS can make one)' % (n, d['name'] if d else '?', entry_count[n]))
+            # INFO, not a warning (review 72 S2): VMS makes such directories (SET FILE/ENTER on a directory) and its ANALYZE says nothing; shown with -v
+            fnd.info('directory %d (%s) is entered %d times (the second stopped state of a RENAME of a directory, or an alias; VMS can make one)' % (n, d['name'] if d else '?', entry_count[n]))
     colour = {}
     for root in sorted(dir_edges):
         if colour.get(root):
