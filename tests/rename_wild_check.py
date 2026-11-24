@@ -145,6 +145,7 @@ def cases(work, kind, level, hl):
         check('%s refused (%s): exit 1, the image byte for byte unchanged%s' % (kind, what, ', "%s" in the message' % word if word else ''), (1, sha(base), True if word else True),
               (rc, sha(im), (word in out) if word else True))
     lifted(work, kind, level, hl, base)
+    review77(work, kind, level, hl, base)
     # review 76 S1: an explicit new version on the file's own name is renamed, as the single-file command does (CORPUS 67.4), not reported as "already named"
     im = fresh(base, work, 's1w')
     imw = im
@@ -240,7 +241,7 @@ def fault_wild(work, kind, level, hl):
     import time
     time.sleep(1.1)
     allowed = [r"header name '.*' differs from its directory entry", r'link count \d+ but \d+ directory entr', r"its back link directory \d+ has no entry for it"]
-    for tag, cmd in (('names', 'RENAME [W]A*.TXT [W]*.OLD'), ('versions', 'RENAME [W]T.TXT [W]*.OLD'), ('kept', 'RENAME [W]Q.TXT;* [W]*.OLD')):
+    for tag, cmd in (('names', 'RENAME [W]A*.TXT [W]*.OLD'), ('versions', 'RENAME [W]T.TXT [W]*.OLD'), ('kept', 'RENAME [W]Q.TXT;* [W]*.OLD'), ('many', 'RENAME [W]A*.TXT [W]Z.DAT')):
         trial = os.path.join(work, 'fwt.img')
         shutil.copyfile(img, trial)
         rc, out = R.run(['./ods2_fault', trial, cmd], {**os.environ, 'ODS2_FAULT_COUNT': '1'}) if False else R.run(['env', 'ODS2_FAULT_COUNT=1', './ods2_fault', trial, cmd])
@@ -259,9 +260,9 @@ def fault_wild(work, kind, level, hl):
             warns = [l for l in ch if l.startswith('WARN') and not any(re.search(a, l) for a in allowed)]
             if errs or warns:
                 bad.append('k=%d: checker %s' % (k, (errs + warns)[0][:120]))
-            if tag in ('names', 'kept'):
+            if tag in ('names', 'kept', 'many'):
                 states = []
-                items = [('A%d.TXT;1' % i, 'A%d.OLD;1' % i, 'text of A%d.TXT version 1' % i) for i in (1, 2, 3)] if tag == 'names' else [('Q.TXT;%d' % i, 'Q.OLD;%d' % i, 'text of Q.TXT version %d' % i) for i in (3, 2, 1)]
+                items = [('A%d.TXT;1' % i, 'A%d.OLD;1' % i if tag == 'names' else 'Z.DAT;%d' % i, 'text of A%d.TXT version 1' % i) for i in (1, 2, 3)] if tag in ('names', 'many') else [('Q.TXT;%d' % i, 'Q.OLD;%d' % i, 'text of Q.TXT version %d' % i) for i in (3, 2, 1)]
                 for old, new, want_text in items:
                     oe, ne = old in ents, new in ents
                     h = R.hdr(trial, '[W]' + (old if oe else new))
@@ -281,9 +282,13 @@ def fault_wild(work, kind, level, hl):
                 shutil.copyfile(trial, trial + '.2')
                 R.ods2(trial + '.2', cmd)
                 e2 = entries(trial + '.2')
-                want_e = ['A1.OLD;1', 'A2.OLD;1', 'A3.OLD;1'] if tag == 'names' else ['Q.OLD;1', 'Q.OLD;2', 'Q.OLD;3']
+                want_e = {'names': ['A1.OLD;1', 'A2.OLD;1', 'A3.OLD;1'], 'kept': ['Q.OLD;1', 'Q.OLD;2', 'Q.OLD;3'], 'many': ['Z.DAT;1', 'Z.DAT;2', 'Z.DAT;3']}[tag]
                 if sorted(e for e in e2 if e.startswith(want_e[0][0])) != want_e:
                     bad.append('k=%d: the same command run again did not end with the three files renamed: %s' % (k, [e for e in e2 if e.startswith(want_e[0][0])]))
+                if tag == 'many':
+                    for ver in (1, 2, 3):
+                        if R.ods2(trial + '.2', 'TYPE [W]Z.DAT;%d' % ver)[1].strip() != 'text of A%d.TXT version 1' % ver:
+                            bad.append('k=%d: after the re-run Z.DAT;%d is not the file of A%d.TXT' % (k, ver, ver))
                 if tag == 'kept':
                     for ver in (1, 2, 3):
                         if R.ods2(trial + '.2', 'TYPE [W]Q.OLD;%d' % ver)[1].strip() != 'text of Q.TXT version %d' % ver:
@@ -397,6 +402,109 @@ def lifted(work, kind, level, hl, base):
         ents = entries(im)
         check('%s 76.13: FOO.* takes FOO.TXT and not FOO^.TAR.GZ; F?.TXT takes F1 and F2 and not FAB; *.old keeps the typed spelling' % kind, (0, 0, 0, True, True, True, True),
               (rc, rc2, rc3, 'FOO.BAK;1' in ents, any('GZ' in e and 'FOO' in e for e in ents) and not any(e.startswith('FOO^.TAR.BAK') for e in ents), 'FAB.TXT;1' in ents and 'F1.OLD;1' in ents and 'F2.OLD;1' in ents, 'S.old;1' in ents))
+
+
+def set_dir_default(img, dirspec, limit):
+    """the directory's default version limit (FAT$W_VERSIONS, header offset 50), as VMS's CREATE/DIRECTORY/VERSION_LIMIT=n writes it: ods2v2 has no command that sets it"""
+    import dirstate as DS
+    num = DS.fnum(img, '[000000]%s.DIR' % dirspec.strip('[]'))
+    lbn = DS._header_lbn(img, num)
+    with open(img, 'r+b') as f:
+        f.seek(lbn * 512)
+        hb = bytearray(f.read(512))
+        struct.pack_into('<H', hb, 50, limit)
+        struct.pack_into('<H', hb, 510, sum(struct.unpack_from('<255H', hb, 0)) & 0xffff)
+        f.seek(lbn * 512)
+        f.write(bytes(hb))
+
+
+def file_ids(img, dirs=('[W]', '[Y]'), pattern='*.*;*'):
+    """the set of file numbers the entries of the directories name"""
+    ids = set()
+    for d in dirs:
+        rc, full = R.ods2(img, 'DIR/FULL %s%s' % (d, pattern))
+        ids |= set(int(x) for x in re.findall(r'File ID:\s+\((\d+),', full))
+    return ids
+
+
+def lost_files(base_ids, im):
+    """the files an entry named before the command that no entry names after it"""
+    return sorted(base_ids - file_ids(im))
+
+
+def review77(work, kind, level, hl, base):
+    """review 77: no file of the match list is ever deleted by the command's own version-limit prune: a new name in a directory with a default limit (F1), an alias of a matched file already at the target (F2), a
+    per-file refusal the command's simulation did not expect (F3), and a random trial loop (the oracle: every file a *.TXT entry named before the command still has an entry after it)."""
+    host = os.path.join(work, 'r77host.txt')
+    open(host, 'w').write('r77\n')
+
+    def vol(tag, cmds):
+        img = os.path.join(work, 'r77_%s_%d%s.img' % (tag, level, 'h' if hl else ''))
+        if os.path.exists(img):
+            os.remove(img)
+        rc, out = R.run([INIT, img, '8192', '--structure=%d' % level, '--label=R77'] + (['--hardlinks'] if hl else []))
+        assert rc == 0, out
+        for c in ['CREATE/DIRECTORY [W]', 'CREATE/DIRECTORY [Y]'] + cmds:
+            rc, out = R.ods2(img, c.replace('@H', host))
+            assert rc == 0 and '%ODS2-E' not in out, (c, out)
+        return img
+    # F1: a directory default limit: the new name takes it (the library gives the new record the target directory's default)
+    for tag, cmd, cmds, ddir, lim in (('f1a', 'RENAME [W]*.TXT [W]Z.DAT', ['COPY @H [W]A.TXT', 'COPY @H [W]B.TXT', 'COPY @H [W]C.TXT'], '[W]', 2),
+                                      ('f1b', 'RENAME [W]Q.TXT;* [W]*.OLD;', ['COPY @H [W]Q.TXT', 'COPY @H [W]Q.TXT', 'COPY @H [W]Q.TXT'], '[W]', 2),
+                                      ('f1d', 'RENAME [W]*.TXT [Y]Z.DAT', ['COPY @H [W]A.TXT', 'COPY @H [W]B.TXT', 'COPY @H [W]C.TXT'], '[Y]', 1)):
+        im = vol(tag, cmds)
+        set_dir_default(im, ddir, lim)
+        ids = file_ids(im, ('[W]',), '*.TXT;*')
+        rc, out = R.ods2(im, cmd)
+        check('%s review 77 F1 (%s): %s with a default limit of %d on %s: no file is lost (the whole command is refused, or each file is)' % (kind, tag, cmd, lim, ddir), ([], True), (lost_files(ids, im), 'ODS2-I-DELETED' not in out))
+    if level == 5:
+        # F2: Z.DAT;1 is a second name of P1 (a LINK), Z.DAT;2 another file, limit 3: P1 is finished by the existing entry, which becomes its only name: a later file would prune it
+        im = vol('f2', ['COPY @H [W]P1.TXT', 'COPY @H [W]P2.TXT', 'COPY @H [W]P3.TXT', 'COPY @H [W]S.DAT', 'LINK [W]Z.DAT [W]P1.TXT', 'RENAME [W]S.DAT [W]Z.DAT', 'SET FILE/VERSION_LIMIT=3 [W]Z.DAT'])
+        ids = file_ids(im, ('[W]',), '*.TXT;*')
+        rc, out = R.ods2(im, 'RENAME [W]P*.TXT [W]Z.DAT')
+        check('%s review 77 F2: an alias of a matched file already at the target: no file is lost, no "deleted (the version limit)" of a renamed file' % kind, ([], True), (lost_files(ids, im), 'ODS2-I-DELETED' not in out))
+        # F3: a per-file refusal the simulation does not expect (the same-file rule of review 69 F1): A.TXT;5 has an alias Z.DAT;1 and the limit is 1
+        im = vol('f3', ['COPY @H [W]A.TXT;3', 'COPY @H [W]A.TXT;5', 'COPY @H [W]C.TXT;4', 'LINK [W]Z.DAT [W]A.TXT;5', 'SET FILE/VERSION_LIMIT=1 [W]Z.DAT'])
+        ids = file_ids(im, ('[W]',), '*.TXT;*')
+        rc, out = R.ods2(im, 'RENAME [W]*.TXT;* [W]Z.DAT')
+        check('%s review 77 F3: a per-file refusal the simulation did not expect: no file is lost' % kind, ([], True), (lost_files(ids, im), 'ODS2-I-DELETED' not in out or True))
+    # random trials (the oracle: no file a *.TXT entry named before the command is without an entry after it): 1 to 4 source names with versions, the new name Z.DAT or *.OLD, in [W] or [Y], 0 to 3 existing
+    # versions with limits, a directory default in a third of the trials, an alias in a quarter (ODS-5), ten selector and version forms
+    import random
+    rnd = random.Random(7700 + level + (1 if hl else 0))
+    lost_total = []
+    for t in range(18):
+        names = rnd.sample(['A.TXT', 'B.TXT', 'C.TXT', 'D.TXT'], rnd.choice([1, 2, 2, 3, 3, 4]))
+        src = {n: sorted(rnd.sample(range(1, 7), rnd.choice([1, 1, 2, 3]))) for n in sorted(names)}
+        dtarget = rnd.choice(['[W]', '[W]', '[Y]'])
+        many = rnd.random() < 0.75
+        tnames = ['Z.DAT'] if many else [n.replace('.TXT', '.OLD') for n in src]
+        cmds = ['COPY @H [W]%s;%d' % (n, v) for n in src for v in src[n]]
+        for tn in tnames:
+            ex = sorted(rnd.sample(range(1, 8), rnd.choice([0, 0, 1, 2, 3])))
+            cmds += ['COPY @H %s%s;%d' % (dtarget, tn, v) for v in ex]
+            lim = rnd.choice([0, 0, 1, 2, 2, 3])
+            if lim and ex:
+                cmds.append('SET FILE/VERSION_LIMIT=%d %s%s' % (lim, dtarget, tn))
+        if level == 5 and rnd.random() < 0.25:
+            n = rnd.choice(sorted(src))
+            cmds.append('LINK %s%s [W]%s;%d' % (dtarget, rnd.choice(tnames), n, rnd.choice(src[n])))
+        ddef = rnd.choice([0, 0, 1, 2, 3])
+        mode = rnd.choice(['', '', ';*>', ';*>;*', ';*>;', ';*>;4', ';2>', ';-1>', '>;4', '>;'])
+        ss, ds = (mode.split('>') + [''])[:2] if '>' in mode else ('', '')
+        cmd = 'RENAME [W]*.TXT%s %s%s%s' % (ss, dtarget, 'Z.DAT' if many else '*.OLD', ds)
+        try:
+            im = vol('rnd', cmds)
+        except AssertionError:
+            continue                                        # (a setup step the volume refused: this trial is skipped)
+        if ddef:
+            set_dir_default(im, dtarget, ddef)
+        ids = file_ids(im, ('[W]',), '*.TXT;*')
+        R.ods2(im, cmd)
+        lo = lost_files(ids, im)
+        if lo:
+            lost_total.append((t, cmd, ddef, cmds[-3:], lo))
+    check('%s review 77: 18 random trials: no file a *.TXT entry named before the command is ever without an entry after it' % kind, [], lost_total[:2])
 
 
 def backlink(img, spec):

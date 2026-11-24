@@ -3699,7 +3699,7 @@ typedef enum { RW_FAIL, RW_DONE, RW_SAME } rw_result_t;
 
 /* One file: the step 1 to 3 call and the report (the same lines as the single-file RENAME). */
 static rw_result_t rw_apply(ods2_volume_t *vol, unsigned sdir_num, const rw_match_t *m, unsigned ddir_num, const char *dname, int dver, const ods2_fid_t *via, unsigned nvia,
-                            const char *sdir_path, const char *ddir_path)
+                            const ods2_fid_t *protect, unsigned nprotect, const char *sdir_path, const char *ddir_path)
 {
     ods2_rename_info_t info;
     ods2_result_t r;
@@ -3707,7 +3707,7 @@ static rw_result_t rw_apply(ods2_volume_t *vol, unsigned sdir_num, const rw_matc
 
     memset(&info, 0, sizeof(info));
     spec_entry_text(sdir_path, m->name, m->version, src, sizeof(src));
-    r = ods2_rename_ex(vol, sdir_num, m->name, (int) m->version, ddir_num, dname, dver, via, nvia, &info);
+    r = ods2_rename_protect(vol, sdir_num, m->name, (int) m->version, ddir_num, dname, dver, via, nvia, protect, nprotect, &info);     /* review 77: no file of the match list is ever the victim of a version limit's prune */
     if (!r.ok) {
         report_error("%%ODS2-E-RENAME, %s: %s\n", src, r.problem);
         return RW_FAIL;
@@ -3739,7 +3739,7 @@ static rw_result_t rw_apply(ods2_volume_t *vol, unsigned sdir_num, const rw_matc
 static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const ods2_parsed_path_t *dp, const char *src_arg, const char *dst_arg, bool device_only)
 {
     uint8_t sdir[512], ddir[512];
-    ods2_fid_t sfid, dfid, *via = NULL;
+    ods2_fid_t sfid, dfid, *via = NULL, *protect = NULL;
     char sdir_path[ODS2_PATH_MAX], ddir_path[ODS2_PATH_MAX], pat_name[ODS2_PATH_MAX + 4], pat_type[ODS2_PATH_MAX + 4], last_refused[ODS2_DIR_MAX_NAME + 1] = "", msg_dir[ODS2_PATH_MAX];
     ods2_dir_entry_t *entries = NULL, *dentries = NULL;
     int count = 0, dcount = 0, i, rank = 0, nk, tk, refused_order = 0, skipped = 0, renamed = 0, same = 0, failed = 0;
@@ -3875,6 +3875,12 @@ static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const 
         goto out;
     }
 
+    protect = malloc((list.n + 1) * sizeof(*protect));
+    if (protect == NULL) {
+        report_error("%%ODS2-E-NOMEM, out of memory\n");
+        goto out;
+    }
+    for (gi = 0; gi < list.n; gi++) protect[gi] = list.v[gi].fid;
     /* the groups (the versions of one name that follow each other) and their new names */
     gstart = malloc((list.n + 1) * sizeof(*gstart));
     dnames = malloc((list.n + 1) * sizeof(*dnames));
@@ -3966,7 +3972,9 @@ static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const 
                     size_t nv = 0, cap = 0, y, z;
                     unsigned limit = 0;
                     int ti;
+                    bool first_entry = true;
                     for (ti = 0; ti < tcount; ti++) {
+                        size_t li2;
                         if (!same_name(tgt[ti].name, keys[a].key)) continue;
                         if (nv == cap) {
                             void *nvp = realloc(vs, (cap ? cap * 2 : 8) * sizeof(*vs));
@@ -3977,9 +3985,15 @@ static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const 
                         vs[nv].v = tgt[ti].version;
                         vs[nv].moved = false;
                         vs[nv].src = 0;
+                        /* an existing version whose file is in the match list is ours (review 77 F2: an alias entry of a matched file already at the target; the library finishes that file, so the entry is its only name) */
+                        for (li2 = 0; li2 < list.n; li2++) {
+                            if (rw_same_file(list.v[li2].fid, tgt[ti].fid)) { vs[nv].moved = true; vs[nv].src = li2; break; }
+                        }
                         nv++;
-                        limit = tgt[ti].verlimit;
+                        if (first_entry) limit = tgt[ti].verlimit;                  /* the library reads the limit of the FIRST record of the name (review 77 N1) */
+                        first_entry = false;
                     }
+                    if (first_entry) limit = ((const ods2_head_core_t *) ddir)->recattr.versions;       /* a new name takes the target directory's default limit (review 77 F1) */
                     if (limit >= 32767) limit = 0;                           /* no limit */
                     for (x = a; x < b && !refuse && keys[x].kind == 0; x++) {
                         size_t g = keys[x].g, k;
@@ -4004,9 +4018,8 @@ static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const 
                             nv++;
                             if (limit == 0 || before < limit) continue;
                             lowest = vs[0].v;
-                            for (y = 1; y < nv; y++) if (vs[y].v < lowest) { lowest = vs[y].v; li = y; }
                             li = 0;
-                            for (y = 0; y < nv; y++) if (vs[y].v == lowest) li = y;
+                            for (y = 1; y < nv; y++) if (vs[y].v < lowest) { lowest = vs[y].v; li = y; }
                             if (lowest == v) { nv--; continue; }                /* the library refuses this file: the version would be deleted at once */
                             if (vs[li].moved) {
                                 char s1[ODS2_PATH_MAX * 2 + 16], s2[ODS2_PATH_MAX * 2 + 16], dn[ODS2_PATH_MAX];
@@ -4061,7 +4074,7 @@ static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const 
             int dver = (kept_versions && !unchanged[gi]) ? (int) list.v[k].version : (dp->has_version && !dp->version_wildcard ? dp->version : 0);
             rw_result_t rr;
             if (unchanged[gi]) dver = 0;
-            rr = rw_apply(vol, ods2_fid_number(sfid), &list.v[k], ods2_fid_number(dfid), dnames[gi], dver, via, nvia, sdir_path, ddir_path);
+            rr = rw_apply(vol, ods2_fid_number(sfid), &list.v[k], ods2_fid_number(dfid), dnames[gi], dver, via, nvia, protect, (unsigned) list.n, sdir_path, ddir_path);
             if (rr == RW_DONE) renamed++;
             else if (rr == RW_SAME) same++;
             else failed++;
@@ -4082,6 +4095,7 @@ total:
     }
 out:
     free(via);
+    free(protect);
     free(list.v);
     free(gstart);
     free(dnames);

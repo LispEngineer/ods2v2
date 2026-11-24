@@ -5453,7 +5453,8 @@ static ods2_result_t dir_chain_contains(ods2_volume_t *vol, ods2_fid_t start, od
 }
 
 static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
-                                 unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia, ods2_rename_info_t *out)
+                                 unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia,
+                                 const ods2_fid_t *protect, unsigned nprotect, ods2_rename_info_t *out)
 {
     ods2_rename_info_t inf;
     uint8_t dir_header[512], h[512], dst_header[512];
@@ -5755,6 +5756,26 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
                 snprintf(msg, sizeof(msg), "the version limit of %s would remove version %u, which is another entry of this same file; refused to keep the file safe (removing it can delete the file, and the entry this rename makes (%s;%u) would point at nothing): not renamed", dst_norm, drop_version, dst_norm, v); 
                 return fail(msg);
             }
+            /* review 77: a file the command renames (the whole match list of a wildcard RENAME) is never the victim of the limit's prune: refused for THIS file before any write, whatever the command expected. The
+               victim's file is looked up here, where the version is known: an alias entry already at the target, a file that an earlier rename of the same command put there, a version the command's own
+               count missed. A HARDLINKS victim with a link count of 2 or more is only an entry that goes. */
+            if (nprotect != 0 && ods2_lookup_name_version(vol, dst_header, dst_norm, (int) drop_version, &df, NULL).ok) {
+                unsigned pi;
+                for (pi = 0; pi < nprotect; pi++) {
+                    if (ods2_fid_number(protect[pi]) == ods2_fid_number(df) && protect[pi].fid_seq == df.fid_seq) break;
+                }
+                if (pi < nprotect) {
+                    uint8_t vh[512];
+                    bool only_entry = hardlinks && ods2_read_header_fid(vol, df, vh).ok && (((const ods2_head_core_t *) vh)->struclev >> 8) == ODS5_LEVEL_5 &&
+                                      (unsigned) (vh[ODS5_FH2_LINKCOUNT] | (vh[ODS5_FH2_LINKCOUNT + 1] << 8)) >= 2;
+                    if (!only_entry) {
+                        static char pmsg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
+                        free(di.versions);
+                        snprintf(pmsg, sizeof(pmsg), "the version limit of %s would delete version %u, which is a file this command renames: refused to keep it (not renamed)", dst_norm, drop_version);
+                        return fail(pmsg);
+                    }
+                }
+            }
         }
     }
     free(di.versions);
@@ -5857,13 +5878,20 @@ ods2_result_t ods2_stored_name(ods2_volume_t *vol, unsigned dir_file_number, con
     return ok();
 }
 
-ods2_result_t ods2_rename_ex(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
-                             unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia, ods2_rename_info_t *info)
+ods2_result_t ods2_rename_protect(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
+                                  unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia,
+                                  const ods2_fid_t *protect, unsigned nprotect, ods2_rename_info_t *info)
 {
     ods2_result_t r;
     TXN_BEGIN_OR_RETURN(vol);
-    r = rename_impl(vol, src_dir_number, src_name, src_version, dst_dir_number, dst_name, dst_version, via, nvia, info);
+    r = rename_impl(vol, src_dir_number, src_name, src_version, dst_dir_number, dst_name, dst_version, via, nvia, protect, nprotect, info);
     return txn_end(vol, r);
+}
+
+ods2_result_t ods2_rename_ex(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
+                             unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia, ods2_rename_info_t *info)
+{
+    return ods2_rename_protect(vol, src_dir_number, src_name, src_version, dst_dir_number, dst_name, dst_version, via, nvia, NULL, 0, info);
 }
 
 ods2_result_t ods2_rename(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
