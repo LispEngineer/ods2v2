@@ -636,7 +636,8 @@ def main():
                         shutil.copyfile(trial, _timg)
                         _rc, _out = ods2(_timg, 'DELETE ' + _spec, openv)
                         _rc2, _files2, _ = tree(_timg, 'cp69')
-                        _errs = [l for l in run(CHECK + [_timg])[1].splitlines() if l.startswith('ERROR')]
+                        _ct = run(CHECK + [_timg])[1].splitlines()
+                        _errs = [l for l in _ct if l.startswith('ERROR')] + [l for l in _ct if l.startswith('WARN') and 'back link directory' in l]       # (the back link finding is a WARNING since CORPUS 70)
                         if _okey in _files2 or any(k2 not in _files2 for k2 in files if k2 != _okey):
                             prob.append('DELETE of the old name in the first state (CORPUS 69: VMS removes the entry only) changed more than that entry')
                         if '%ODS2-I-DELETED' in _out or 'no entry left in its directory' not in _out:
