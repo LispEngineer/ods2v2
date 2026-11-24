@@ -45,6 +45,9 @@
 typedef struct {
     FILE          *fp;
     bool           writable;
+    bool           quota_known;        /* the lookup of [000000]QUOTA.SYS was made (it cannot appear during a session: ods2v2 refuses to make it) */
+    unsigned       quota_number;       /* its file number, 0 when there is none */
+    char           write_refusal[640]; /* why a read-only mount refuses every write, set by the caller (the CLI: disk quotas are active); empty: the usual reason */
     bool           version0;  /* HM2$W_STRUCLEV version 0: read-only only */
     bool           ods5;      /* HM2$W_STRUCLEV level 5 (ODS-5): read-only
                                  for now, every write path refuses it */
@@ -97,6 +100,17 @@ ods2_result_t ods2_mount(const char *path, ods2_volume_t *vol);
    The file must already exist (this never creates a new disk image -
    that's INITIALIZE's job, deliberately out of scope here). */
 ods2_result_t ods2_mount_write(const char *path, ods2_volume_t *vol);
+
+/* Disk quotas (CORPUS 71/72): VMS marks quotas ACTIVE only by the existence of [000000]QUOTA.SYS (no home block flag; DISKQUOTA DISABLE changes nothing on disk, and MOUNT enables quotas whenever the
+   file exists). ods2v2 does not keep that file, so any write would leave its usage figures wrong (VMS charges the owner of every file made, deleted or changed). ods2_mount_write() therefore FAILS on such a
+   volume, with a message (ODS2_QUOTA_ACTIVE_TEXT is in it) that says why, names the override and advises DISKQUOTA REBUILD on VMS afterwards. ods2_mount_write_opts() with ODS2_MOUNT_IGNORE_QUOTA mounts it
+   for write anyway. Reads (ods2_mount) are unaffected. Whatever the flag, QUOTA.SYS itself is never deleted, renamed, linked to or given a new version, and no entry of that name is made in the master
+   directory (VMS refuses a DELETE of it while quotas are active). */
+#define ODS2_MOUNT_IGNORE_QUOTA 1u
+#define ODS2_QUOTA_ACTIVE_TEXT "disk quotas are active"
+ods2_result_t ods2_mount_write_opts(const char *path, ods2_volume_t *vol, unsigned flags);
+/* True when [000000]QUOTA.SYS exists on the volume (any version): quotas are active. */
+bool ods2_quota_active(ods2_volume_t *vol);
 
 /* Writes a single 512-byte block at absolute LBN `lbn`. Fails if the
    volume was mounted read-only via ods2_mount() rather than

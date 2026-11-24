@@ -390,6 +390,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_linkcount_check.sh
 	@echo "--- cli_dir_delete_check (DELETE never removes the last entry of a non-empty directory; ods5check: a directory entered k times, a cycle: review 71) ---"
 	@sh tests/cli_dir_delete_check.sh
+	@echo "--- cli_quota_check (a volume with active disk quotas, [000000]QUOTA.SYS, is not written unless --ignore-quota; QUOTA.SYS is protected: CORPUS 71/72) ---"
+	@sh tests/cli_quota_check.sh
 	@echo "--- cli_mpoffset_check (ods5check: the map starts at or above what the name needs, the slack zero: CORPUS 67.5) ---"
 	@sh tests/cli_mpoffset_check.sh
 	@echo "--- cli_versorder_check (versions of a name stored out of order: reads as VMS, changes refused, BAD_VERSORDER: H1, CORPUS 66.4) ---"

@@ -3355,7 +3355,7 @@ static void delete_wildcard(ods2_volume_t *vol, const uint8_t *dir_header, ods2_
 
     resolve_effective_path(p, dir_path_for_msg, sizeof(dir_path_for_msg));
     if (!vol->writable) {
-        report_error("%%ODS2-E-DELETEERR, %s: the volume is mounted read-only\n", p->filename);
+        report_error("%%ODS2-E-DELETEERR, %s: %s\n", p->filename, vol->write_refusal[0] != '\0' ? vol->write_refusal : "the volume is mounted read-only");
         return;
     }
     /* The name and the type are matched apart (review 26 F2): on ODS-5 a name may hold dots, and '*' must not
@@ -3827,6 +3827,7 @@ static void cmd_purge(ods2_volume_t *vol, const ods2_parsed_path_t *p, long keep
             spec_entry_text(it->dir, it->name, it->version, what, sizeof(what));
             if (!vol->writable) {
                 report_error("%%PURGE-W-FILNOTPUR, error deleting %s\n-RMS-E-MKD, ACP could not mark file for deletion\n-SYSTEM-F-WRITLCK, write lock error\n", what);
+                if (vol->write_refusal[0] != '\0') report_error("-ODS2-I-NOWRITE, %s\n", vol->write_refusal);
                 continue;
             }
             {
@@ -4890,10 +4891,19 @@ int main(int argc, char **argv)
     int footer_state = 0;
     bool image_short = false;
 
+    unsigned mount_flags = 0;
+    /* a leading option: --ignore-quota writes a volume that has active disk quotas ([000000]QUOTA.SYS exists) although ods2v2 does not keep the usage figures (run DISKQUOTA REBUILD on VMS afterwards) */
+    if (argc >= 2 && strcmp(argv[1], "--ignore-quota") == 0) {
+        mount_flags |= ODS2_MOUNT_IGNORE_QUOTA;
+        argv[1] = argv[0];
+        argv++;
+        argc--;
+    }
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <disk-image> [command...]\n", argv[0]);
-        fprintf(stderr, "       %s <disk-image> @<script-file>\n", argv[0]);
-        fprintf(stderr, "       %s <disk-image>                (interactive)\n", argv[0]);
+        fprintf(stderr, "usage: %s [--ignore-quota] <disk-image> [command...]\n", argv[0]);
+        fprintf(stderr, "       %s [--ignore-quota] <disk-image> @<script-file>\n", argv[0]);
+        fprintf(stderr, "       %s [--ignore-quota] <disk-image>                (interactive)\n", argv[0]);
+        fprintf(stderr, "  --ignore-quota: write a volume whose disk quotas are active ([000000]QUOTA.SYS exists); without it such a volume is read only\n");
         return 1;
     }
 
@@ -4945,8 +4955,19 @@ int main(int argc, char **argv)
                         "read-only\n", argv[1]);
     } else {
         if (r.ok) ods2_dismount(&vol);
-        r = ods2_mount_write(argv[1], &vol);
-        if (!r.ok && strstr(r.problem, "locked") != NULL) {
+        r = ods2_mount_write_opts(argv[1], &vol, mount_flags);
+        if (!r.ok && strstr(r.problem, ODS2_QUOTA_ACTIVE_TEXT) != NULL) {
+            /* active disk quotas (CORPUS 71/72): read the volume, refuse every write with the reason */
+            char why[640];
+            ods2_result_t r_read;
+            snprintf(why, sizeof(why), "%s", r.problem);
+            r_read = ods2_mount(argv[1], &vol);
+            if (r_read.ok) {
+                snprintf(vol.write_refusal, sizeof(vol.write_refusal), "%s", why);
+                fprintf(stderr, "%%ODS2-W-READONLY, %s: %s; mounted read-only\n", argv[1], why);
+                r = r_read;
+            }
+        } else if (!r.ok && strstr(r.problem, "locked") != NULL) {
             /* another process has the image open (one writer or many readers): read it, refuse every write */
             ods2_result_t r_read = ods2_mount(argv[1], &vol);
             if (r_read.ok) {

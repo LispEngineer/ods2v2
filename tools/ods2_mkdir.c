@@ -28,6 +28,7 @@
  *   ods2_mkdir transfer.dsk "" DECUS               (creates [DECUS])
  *   ods2_mkdir transfer.dsk DECUS NETLIB020         (creates [DECUS.NETLIB020])
  */
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "ods2_volume.h"
@@ -39,15 +40,23 @@ int main(int argc, char **argv)
     ods2_fid_t parent_fid, new_fid;
     uint8_t parent_header[512];
 
+    unsigned mount_flags = 0;
+    if (argc >= 2 && strcmp(argv[1], "--ignore-quota") == 0) {     /* write a volume with active disk quotas anyway (DISKQUOTA REBUILD on VMS afterwards) */
+        mount_flags |= ODS2_MOUNT_IGNORE_QUOTA;
+        argv[1] = argv[0];
+        argv++;
+        argc--;
+    }
+
     if (argc != 4) {
-        fprintf(stderr, "usage: %s <disk-image> <parent-path> <new-name>\n", argv[0]);
+        fprintf(stderr, "usage: %s [--ignore-quota] <disk-image> <parent-path> <new-name>\n", argv[0]);
         fprintf(stderr, "  parent-path is dot-separated, no brackets (empty string for root)\n");
         fprintf(stderr, "  new-name has no .DIR suffix or version - added automatically\n");
         fprintf(stderr, "  example: %s transfer.dsk DECUS NETLIB020\n", argv[0]);
         return 1;
     }
 
-    r = ods2_mount_write(argv[1], &vol);
+    r = ods2_mount_write_opts(argv[1], &vol, mount_flags);
     if (!r.ok) {
         fprintf(stderr, "%s: mount failed: %s\n", argv[1], r.problem);
         return 1;

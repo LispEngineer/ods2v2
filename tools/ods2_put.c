@@ -40,6 +40,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L /* fseeko, ftello */
 #endif
+#include <string.h>
 #include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,8 +112,16 @@ int main(int argc, char **argv)
     const char *why;
     int i;
 
+    unsigned mount_flags = 0;
+    if (argc >= 2 && strcmp(argv[1], "--ignore-quota") == 0) {     /* write a volume with active disk quotas anyway (DISKQUOTA REBUILD on VMS afterwards) */
+        mount_flags |= ODS2_MOUNT_IGNORE_QUOTA;
+        argv[1] = argv[0];
+        argv++;
+        argc--;
+    }
+
     if (argc < 5 || argc > 8) {
-        fprintf(stderr, "usage: %s <disk-image> <local-file> <dir-path> <name> "
+        fprintf(stderr, "usage: %s [--ignore-quota] <disk-image> <local-file> <dir-path> <name> "
                         "[rtype [rsize [rattrib]]]\n", argv[0]);
         fprintf(stderr, "  dir-path is dot-separated, no brackets (empty string for root)\n");
         fprintf(stderr, "  rtype: 5=FAB$C_STMLF (default, text), 1=FAB$C_FIX (fixed-length\n"
@@ -157,7 +166,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    r = ods2_mount_write(argv[1], &vol);
+    r = ods2_mount_write_opts(argv[1], &vol, mount_flags);
     if (!r.ok) {
         fprintf(stderr, "%s: mount failed: %s\n", argv[1], r.problem);
         free(buf);

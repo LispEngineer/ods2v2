@@ -50,8 +50,16 @@ int main(int argc, char **argv)
     int version;
     uint16_t deleted_version = 0;
 
+    unsigned mount_flags = 0;
+    if (argc >= 2 && strcmp(argv[1], "--ignore-quota") == 0) {     /* write a volume with active disk quotas anyway (DISKQUOTA REBUILD on VMS afterwards) */
+        mount_flags |= ODS2_MOUNT_IGNORE_QUOTA;
+        argv[1] = argv[0];
+        argv++;
+        argc--;
+    }
+
     if (argc != 4) {
-        fprintf(stderr, "usage: %s <disk-image> <dir-path> <name>[;version]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--ignore-quota] <disk-image> <dir-path> <name>[;version]\n", argv[0]);
         fprintf(stderr, "  dir-path is dot-separated, no brackets (empty string for root)\n");
         fprintf(stderr, "  name includes any suffix, e.g. HELLO.TXT or EMPTYDIR.DIR\n");
         return 1;
@@ -68,7 +76,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    r = ods2_mount_write(argv[1], &vol);
+    r = ods2_mount_write_opts(argv[1], &vol, mount_flags);
     if (!r.ok) {
         fprintf(stderr, "%s: mount failed: %s\n", argv[1], r.problem);
         return 1;

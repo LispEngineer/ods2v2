@@ -78,12 +78,31 @@ static ods2_result_t not_writable(const ods2_volume_t *vol)
     if (vol->version0) {
         return fail("volume has HM2$W_STRUCLEV version 0 and is read-only");
     }
+    if (vol->write_refusal[0] != '\0') return fail(vol->write_refusal);
     return fail("volume was not mounted for write (use ods2_mount_write)");
 }
 
 static ods2_result_t insert_into_directory(ods2_volume_t *vol, unsigned dir_file_number,
                                            const char *name, uint16_t version, ods2_fid_t fid,
                                            uint8_t extra_flags);
+
+/* The disk quota file (CORPUS 71/72): [000000]QUOTA.SYS, whose existence is what makes quotas active on VMS. ods2v2 does not keep it up (no usage figures), so even with --ignore-quota it never deletes,
+   renames, links to or gives a new version to the file, and makes no entry of that name in the master directory (VMS refuses a DELETE of it while quotas are active: FLK). */
+#define QUOTA_FILE_TEXT "[000000]QUOTA.SYS is the disk quota file: ods2v2 does not make, delete, rename, link to or replace it (VMS refuses a DELETE of it while quotas are active)"
+
+/* an entry named QUOTA.SYS (any case, no version) in the master file directory (file 4) */
+static bool quota_name(unsigned dir_file_number, const char *name)
+{
+    size_t i, n = strlen(name);
+    static const char q[] = "QUOTA.SYS";
+    if (dir_file_number != 4 || n != sizeof(q) - 1) return false;
+    for (i = 0; i < n; i++) {
+        if (toupper((unsigned char) name[i]) != q[i]) return false;
+    }
+    return true;
+}
+
+static bool quota_file_protected(ods2_volume_t *vol, unsigned dir_file_number, const char *name, unsigned file_number);
 
 /* Uppercases a string in place. Real VMS always stores filenames and
    directory names uppercase - "create/dir [decus]" on real VMS
@@ -245,7 +264,7 @@ static bool indexf_extents_load(ods2_volume_t *vol, const uint8_t *primary, bool
 
 
 static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
-                                     const char *fopen_mode, bool writable)
+                                     const char *fopen_mode, bool writable, unsigned flags)
 {
     ods2_validate_result_t vr;
     uint8_t indexf_header[512];
@@ -340,18 +359,29 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
                         "the image file to the volume's size first)");
         }
     }
+    if (writable && !(flags & ODS2_MOUNT_IGNORE_QUOTA) && ods2_quota_active(vol)) {
+        ods2_dismount(vol);
+        return fail("disk quotas are active on this volume ([000000]QUOTA.SYS exists); ods2v2 does not keep the quota file, so a write would leave the "
+                    "usage figures wrong (VMS charges the owner of every file made, deleted or changed): nothing was written. Use --ignore-quota to write "
+                    "anyway, then run DISKQUOTA REBUILD on VMS to put the usage figures right");
+    }
     r = ok();
     return r;
 }
 
 ods2_result_t ods2_mount(const char *path, ods2_volume_t *vol)
 {
-    return mount_internal(path, vol, "rb", false);
+    return mount_internal(path, vol, "rb", false, 0);
 }
 
 ods2_result_t ods2_mount_write(const char *path, ods2_volume_t *vol)
 {
-    return mount_internal(path, vol, "r+b", true);
+    return mount_internal(path, vol, "r+b", true, 0);
+}
+
+ods2_result_t ods2_mount_write_opts(const char *path, ods2_volume_t *vol, unsigned flags)
+{
+    return mount_internal(path, vol, "r+b", true, flags);
 }
 
 #ifdef ODS2_FAULT_INJECTION
@@ -3424,6 +3454,7 @@ static ods2_result_t create_link_impl(ods2_volume_t *vol, unsigned dir_file_numb
         return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
                     "SECURITY.SYS): it cannot be linked");
     }
+    if (quota_file_protected(vol, 0, NULL, ods2_fid_number(target))) return fail(QUOTA_FILE_TEXT);
     if (ods2_fid_number(core->fid) != ods2_fid_number(target) || core->fid.fid_seq != target.fid_seq ||
         (core->filechar & 0x8000u)) {
         return fail("the file to link to does not exist");
@@ -3632,6 +3663,38 @@ typedef struct {
 } dir_name_info_t;
 static bool is_reserved_file(const ods2_volume_t *vol, unsigned dir_file_number, const char *name, unsigned file_number);
 static ods2_result_t dir_name_info(ods2_volume_t *vol, const uint8_t *dir_header, const char *name, dir_name_info_t *info);
+
+/* Does [000000]QUOTA.SYS exist (any version)? *number gets its file number (0 when the entry names no valid file ID). A master directory that cannot be read: not active (the volume is refused for other reasons). */
+static bool quota_lookup(ods2_volume_t *vol, unsigned *number)
+{
+    uint8_t mfd[512];
+    dir_name_info_t info;
+    bool exists;
+    if (number != NULL) *number = 0;
+    if (!ods2_read_header(vol, 4, mfd).ok) return false;
+    if (!dir_name_info(vol, mfd, "QUOTA.SYS", &info).ok) return false;
+    exists = info.exists;
+    if (exists && number != NULL && ods2_check_fid(info.first_fid).ok) *number = ods2_fid_number(info.first_fid);
+    free(info.versions);
+    return exists;
+}
+
+bool ods2_quota_active(ods2_volume_t *vol)
+{
+    return quota_lookup(vol, NULL);
+}
+
+/* An entry (dir, name) or a file (number) that is the quota file: protected whatever the mount flags */
+static bool quota_file_protected(ods2_volume_t *vol, unsigned dir_file_number, const char *name, unsigned file_number)
+{
+    if (name != NULL && quota_name(dir_file_number, name)) return true;
+    if (file_number == 0) return false;
+    if (!vol->quota_known) {
+        quota_lookup(vol, &vol->quota_number);
+        vol->quota_known = true;
+    }
+    return vol->quota_number == file_number;
+}
 static ods2_result_t insert_new_version(ods2_volume_t *vol, unsigned dir_file_number, const char *name, uint16_t version,
                                         ods2_fid_t fid, uint8_t extra_flags);
 
@@ -4398,6 +4461,7 @@ static ods2_result_t insert_into_directory_vl(ods2_volume_t *vol, unsigned dir_f
                                               const char *name, uint16_t version, ods2_fid_t fid,
                                               uint8_t extra_flags, uint16_t verlimit_override)
 {
+    if (quota_name(dir_file_number, name)) return fail(QUOTA_FILE_TEXT);
     uint8_t dir_header[512];
     uint8_t *blocks = NULL;
     unsigned used, t;
@@ -4521,6 +4585,7 @@ static ods2_result_t dir_name_info(ods2_volume_t *vol, const uint8_t *dir_header
 static ods2_result_t insert_new_version(ods2_volume_t *vol, unsigned dir_file_number, const char *name, uint16_t version,
                                         ods2_fid_t fid, uint8_t extra_flags)
 {
+    if (quota_name(dir_file_number, name)) return fail(QUOTA_FILE_TEXT);
     uint8_t dir_header[512];
     uint8_t *blocks = NULL;
     unsigned used, b, level = vol->ods5 ? ODS5_LEVEL_5 : ODS5_LEVEL_2;
@@ -5307,6 +5372,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
         return fail("%RENAME-E-OPENIN, error opening the file as input; -RMS-F-RMV, ACP remove function failed; -SYSTEM-F-NOPRIV, insufficient privilege or object protection violation "
                     "(a reserved file: V8.4 refuses it; the VAX allows the volume owner)");
     }
+    if (quota_file_protected(vol, src_dir_number, src_stored, number)) return fail(QUOTA_FILE_TEXT);
     if (core->filechar & 0x2000u) return fail("RENAME of a directory is not available yet (step 3)");
     if (core->seg_num != 0) return fail("the entry names an extension header: damaged, not renamed");
     hardlinks = vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS);
@@ -5883,6 +5949,7 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
         return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
                     "SECURITY.SYS): it cannot be deleted");
     }
+    if (quota_file_protected(vol, dir_file_number, name, ods2_fid_number(target_fid))) return fail(QUOTA_FILE_TEXT);
 
     r = ods2_read_header(vol, ods2_fid_number(target_fid), target_header);
     if (!r.ok) return r;
