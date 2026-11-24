@@ -225,7 +225,7 @@ ods2_result_t ods2_rename(ods2_volume_t *vol, unsigned src_dir_number, const cha
                           unsigned dst_dir_number, const char *dst_name, int dst_version, ods2_rename_info_t *info);
 /* ods2_rename_ex() for a command that renames SEVERAL files (RENAME with wildcards, review 77): `protect` lists the whole file IDs of every file the command renames (the whole match list). A version-limit
    prune whose victim is a file in that set is REFUSED for this file, before any write (the per-file transaction leaves the volume unchanged), whatever the command's own simulation expected: a file the
-   command renames is never deleted by the command. (A HARDLINKS victim with a link count of 2 or more is only an entry that goes, and is not refused.) NULL/0: no file is protected. */
+   command renames is never deleted by the command. (No HARDLINKS exemption: a link count can be one too high after a stopped rename.) NULL/0: no file is protected. */
 ods2_result_t ods2_rename_protect(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
                                   unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia,
                                   const ods2_fid_t *protect, unsigned nprotect, ods2_rename_info_t *info);

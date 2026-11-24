@@ -5758,22 +5758,18 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             }
             /* review 77: a file the command renames (the whole match list of a wildcard RENAME) is never the victim of the limit's prune: refused for THIS file before any write, whatever the command expected. The
                victim's file is looked up here, where the version is known: an alias entry already at the target, a file that an earlier rename of the same command put there, a version the command's own
-               count missed. A HARDLINKS victim with a link count of 2 or more is only an entry that goes. */
+               count missed. (No HARDLINKS exemption: review 77 R1.) */
             if (nprotect != 0 && ods2_lookup_name_version(vol, dst_header, dst_norm, (int) drop_version, &df, NULL).ok) {
                 unsigned pi;
                 for (pi = 0; pi < nprotect; pi++) {
                     if (ods2_fid_number(protect[pi]) == ods2_fid_number(df) && protect[pi].fid_seq == df.fid_seq) break;
                 }
                 if (pi < nprotect) {
-                    uint8_t vh[512];
-                    bool only_entry = hardlinks && ods2_read_header_fid(vol, df, vh).ok && (((const ods2_head_core_t *) vh)->struclev >> 8) == ODS5_LEVEL_5 &&
-                                      (unsigned) (vh[ODS5_FH2_LINKCOUNT] | (vh[ODS5_FH2_LINKCOUNT + 1] << 8)) >= 2;
-                    if (!only_entry) {
-                        static char pmsg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
-                        free(di.versions);
-                        snprintf(pmsg, sizeof(pmsg), "the version limit of %s would delete version %u, which is a file this command renames: refused to keep it (VMS deletes it without a word, CORPUS 77; not renamed)", dst_norm, drop_version);
-                        return fail(pmsg);
-                    }
+                    /* no HARDLINKS exemption here (review 77 R1): it would trust a link count that a stopped rename leaves one too high; a refusal costs little */
+                    static char pmsg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
+                    free(di.versions);
+                    snprintf(pmsg, sizeof(pmsg), "the version limit of %s would delete version %u, which is a file this command renames: refused to keep it (VMS deletes it without a word, CORPUS 77; not renamed)", dst_norm, drop_version);
+                    return fail(pmsg);
                 }
             }
         }

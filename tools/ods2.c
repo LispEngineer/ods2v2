@@ -3998,11 +3998,27 @@ static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const 
                     for (x = a; x < b && !refuse && keys[x].kind == 0; x++) {
                         size_t g = keys[x].g, k;
                         for (k = gstart[g]; k < gstart[g + 1] && !refuse; k++) {
-                            unsigned v = 0, lowest, before = (unsigned) nv;
-                            bool taken = false;
+                            unsigned v = 0, lowest, before;
+                            unsigned explicit_v = kept_versions ? (unsigned) list.v[k].version : (dp->has_version && !dp->version_wildcard && dp->version > 0 ? (unsigned) dp->version : 0);
+                            bool taken = false, resumed = false;
                             size_t li = 0;
-                            if (kept_versions) v = list.v[k].version;
-                            else if (dp->has_version && !dp->version_wildcard && dp->version > 0) v = (unsigned) dp->version;
+                            /* review 77 recheck S2: a file that already has an entry of the new name (an alias, the second stopped state) is finished into it by the library: no new version is made */
+                            for (y = 0; y < nv; y++) {
+                                if (vs[y].moved && rw_same_file(list.v[vs[y].src].fid, list.v[k].fid) && (explicit_v == 0 || vs[y].v == explicit_v)) { vs[y].src = k; resumed = true; break; }
+                            }
+                            if (resumed) continue;
+                            /* review 77 recheck S1: a new name that is the file's own name (a new version number on it): the source's own version goes out as the new one comes in, the count does not grow (the library's has_removed) */
+                            if (same_dir && same_name(dnames[g], list.v[gstart[g]].name)) {
+                                for (y = 0; y < nv; y++) {
+                                    if (vs[y].v == list.v[k].version) {
+                                        for (z = y; z + 1 < nv; z++) vs[z] = vs[z + 1];
+                                        nv--;
+                                        break;
+                                    }
+                                }
+                            }
+                            before = (unsigned) nv;
+                            if (explicit_v != 0) v = explicit_v;
                             else { for (y = 0; y < nv; y++) if (vs[y].v > v) v = vs[y].v; v++; }
                             for (y = 0; y < nv; y++) if (vs[y].v == v) taken = true;
                             if (taken || v > 32767) continue;                  /* this file fails alone: nothing is made */
@@ -4026,7 +4042,7 @@ static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const 
                                 spec_entry_text(sdir_path, list.v[k].name, list.v[k].version, s1, sizeof(s1));
                                 spec_entry_text(sdir_path, list.v[vs[li].src].name, list.v[vs[li].src].version, s2, sizeof(s2));
                                 display_name(dnames[g], dn, sizeof(dn));
-                                report_error("%%ODS2-E-RENAME, %s: the version limit (%u) of %s would delete %s, which this command renamed (VMS deletes it without a word, CORPUS 76.4): nothing renamed\n", s1, limit, dn, s2);
+                                report_error("%%ODS2-E-RENAME, %s: the version limit (%u) of %s would delete %s, which this command renames (VMS deletes it without a word, CORPUS 77): nothing renamed\n", s1, limit, dn, s2);
                                 refuse = true;
                                 break;
                             }

@@ -418,6 +418,37 @@ def set_dir_default(img, dirspec, limit):
         f.write(bytes(hb))
 
 
+def dangle_entry(img, dirspec, name, idx):
+    """the version entry idx (0: the highest stored) of the record `name` of the directory gets a wrong file sequence number: the entry names no file (a damaged directory)"""
+    import dirstate as DS
+    import ods5check as O
+    num = DS.fnum(img, '[000000]%s.DIR' % dirspec.strip('[]'))
+    v = O.Vol(img)
+    hdr = v.blk(DS._header_lbn(img, num))
+    ext = O.decode_map(hdr, O.Findings(False), 'dir')
+    nm = name.upper().encode('latin-1')
+    with open(img, 'r+b') as f:
+        for lbn, cnt in ext:
+            for b in range(cnt):
+                f.seek((lbn + b) * 512)
+                blk = bytearray(f.read(512))
+                pos = 0
+                while pos + 6 <= 512:
+                    size = struct.unpack_from('<H', blk, pos)[0]
+                    if size == 0xffff or size == 0:
+                        break
+                    namecount = blk[pos + 5]
+                    if bytes(blk[pos + 6:pos + 6 + namecount]) == nm:
+                        first = pos + 6 + namecount + (namecount % 2)
+                        seq = struct.unpack_from('<H', blk, first + 8 * idx + 4)[0]
+                        struct.pack_into('<H', blk, first + 8 * idx + 4, seq + 7)
+                        f.seek((lbn + b) * 512)
+                        f.write(blk)
+                        return
+                    pos += 2 + size
+    raise AssertionError('no record %s in %s' % (name, dirspec))
+
+
 def file_ids(img, dirs=('[W]', '[Y]'), pattern='*.*;*'):
     """the set of file numbers the entries of the directories name"""
     ids = set()
@@ -457,6 +488,32 @@ def review77(work, kind, level, hl, base):
         ids = file_ids(im, ('[W]',), '*.TXT;*')
         rc, out = R.ods2(im, cmd)
         check('%s review 77 F1 (%s): %s with a default limit of %d on %s: no file is lost (the whole command is refused, or each file is)' % (kind, tag, cmd, lim, ddir), ([], True), (lost_files(ids, im), 'ODS2-I-DELETED' not in out))
+    # review 77 recheck S1: a new version number on a file's own name when the name is AT its limit: the count does not grow (the source's own version goes out as the new one comes in): both renamed, as the
+    # single-file commands do
+    im = vol('s1', ['COPY @H [W]A.TXT', 'COPY @H [W]A.TXT', 'COPY @H [W]B.TXT', 'SET FILE/VERSION_LIMIT=2 [W]A.TXT'])
+    ims = fresh(im, work, 's1_single')
+    rc, out = R.ods2(im, 'RENAME [W]*.TXT;1 [W]*.TXT;5')
+    R.ods2(ims, 'RENAME [W]A.TXT;1 [W]A.TXT;5')
+    R.ods2(ims, 'RENAME [W]B.TXT;1 [W]B.TXT;5')
+    check('%s review 77 S1: *.TXT;1 to *.TXT;5 with A.TXT at its limit of 2: both renamed (exit 0), the same directory as the two single commands' % kind, (0, entries(ims)), (rc, entries(im)))
+    # review 77 recheck S2: the re-run with a file that already has an entry of the target name (Z.DAT;2 is a second name of P1: the second stopped state): the library finishes P1 into it and makes no version,
+    # so the command is not refused as a whole
+    import dirstate as DS
+    im = vol('s2', ['COPY @H [W]P1.TXT', 'COPY @H [W]P2.TXT', 'COPY @H [W]P3.TXT', 'COPY @H [W]S.DAT', 'RENAME [W]S.DAT [W]Z.DAT', 'COPY @H [W]Z.DAT', 'SET FILE/VERSION_LIMIT=3 [W]Z.DAT'])
+    DS.entry_fid(im, DS.fnum(im, '[000000]W.DIR'), 'Z.DAT', DS.fnum(im, '[W]P1.TXT'))
+    ids = file_ids(im, ('[W]',), 'P*.TXT;*')
+    rc, out = R.ods2(im, 'RENAME [W]P*.TXT [W]Z.DAT')
+    check('%s review 77 S2: P1 already has an entry of Z.DAT (Z.DAT;2): the command is not refused as a whole, it finishes P1, makes Z.DAT;3 and ;4 and prunes only the old Z.DAT;1; no file is lost' % kind,
+          (0, [], ['Z.DAT;2', 'Z.DAT;3', 'Z.DAT;4']), (rc, lost_files(ids, im), sorted(e for e in entries(im) if e.startswith('Z.DAT'))))
+    # review 77 recheck: the LIBRARY's refusal itself (ods2_rename_protect), reached by making the simulation wrong: A.TXT;7 names no file (its entry's sequence number is changed by hand), so its rename
+    # fails, A.TXT;3 is accepted where the simulation took it for refused, and C.TXT;8 would prune it; Z.DAT has a limit of 2. Only this test fails if the library check is removed.
+    im = vol('lib', ['COPY @H [W]A.TXT;3', 'COPY @H [W]A.TXT;7', 'COPY @H [W]C.TXT;8', 'COPY @H [W]Z.DAT;5', 'SET FILE/VERSION_LIMIT=2 [W]Z.DAT'])
+    dangle_entry(im, '[W]', 'A.TXT', 0)
+    ids = file_ids(im, ('[W]',), 'C.TXT;*')
+    rc, out = R.ods2(im, 'RENAME [W]*.TXT;* [W]Z.DAT')
+    z = [e for e in entries(im) if e.startswith('Z.DAT')]
+    check('%s review 77: the library refuses C.TXT;8 itself ("refused to keep it") because its prune would delete A.TXT;3, which this command renamed: exit 1, Z.DAT;3 kept, C.TXT;8 not renamed' % kind,
+          (1, True, ['Z.DAT;3', 'Z.DAT;5'], 'C.TXT;8' in entries(im)), (rc, 'refused to keep it' in out, z, 'C.TXT;8' in entries(im)))
     # CORPUS 77.4: two versions and a directory default of 2: the renumbering ; makes Q.OLD;1 of the highest and Q.OLD;2 of the lower, nothing is pruned (the new name has the directory's limit 2 and two versions)
     im = vol('z2a', ['COPY @H [W]Q.TXT', 'COPY @H [W]Q.TXT'])
     set_dir_default(im, '[W]', 2)
