@@ -234,7 +234,7 @@ ods2: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c third_part
 #     UBSAN_OPTIONS=log_path, so a UB report from any call, discarded output or not, leaves a file. The normal binaries are built again afterwards.
 # Any report file, any "Sanitizer" or "runtime error" text in a test's output, or a failing test fails the target.
 SAN_TESTS = tests/cli_longargs_check.sh tests/cli_*_check.sh
-SAN_BINS = ods2 ods2_init ods2_fault ods2_put ods2_dump_header ods2_deep_make
+SAN_BINS = ods2 ods2_init ods2_fault ods2_put ods2_rm ods2_mkdir ods2_dump_header ods2_deep_make
 .PHONY: sancheck sancheck-ub sancheck-run
 sancheck: $(TESTS) $(SAN_BINS) $(BUILD)/ods2_make_loop tools
 	@nm ods2 | grep -q '__asan_init' || { echo "ods2 is not built with -fsanitize=address,undefined"; exit 1; }
@@ -268,7 +268,7 @@ ods2_fault: tools/ods2.c $(VOLUME_SRCS) src/ods2_path.c src/ods2_wildcard.c thir
 ods2_deep_make: tests/ods2_deep_make.c $(VOLUME_SRCS) include/ods2_volume.h
 	$(CC) $(CFLAGS) -DODS2_FAULT_INJECTION $(SANFLAGS) tests/ods2_deep_make.c $(VOLUME_SRCS) -o $@
 
-test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_fault ods2_deep_make
+test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_rm ods2_mkdir ods2_dump_header ods2_fault ods2_deep_make
 	@nm ods2 | grep -q '__asan_init' || { echo "ods2 is not built with the AddressSanitizer: a make sancheck that was stopped leaves the UBSan-only tools. Rebuild them: rm -f ods2 ods2_init ods2_fault ods2_put ods2_dump_header ods2_deep_make && make tools"; exit 1; }
 	@echo "--- ods2_ondisk_selftest ---"
 	@$(BUILD)/ods2_ondisk_selftest
