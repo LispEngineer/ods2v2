@@ -690,14 +690,18 @@ def main():
                     if _first:
                         _ok_w = [r"its back link directory \d+ has no entry for it", r"header name '.*' differs from its directory entry", r"link count \d+ but \d+ directory entr"]
                     elif _second:
-                        _ok_w = [r"directory \d+ \(.*\) is entered 2 times", r"link count \d+ but \d+ directory entr"]
+                        _ok_w = [r"link count \d+ but \d+ directory entr"]
                     if need_hl and k < n:
                         _ok_w = _ok_w + [r"link count \d+ but \d+ directory entr"]      # (the stop between the old entry's removal and the count written back: the known leak)
                     _bad = [l for l in _ct if not any(re.search(a, l) for a in _ok_w)]
                     if _bad:
                         prob.append('a warning the %s state may not have: %s' % ('first' if _first else 'second' if _second else 'final', _bad[0].strip()[:140]))
-                    if _second and not any('entered 2 times' in l for l in _ct):
-                        prob.append('the second state (two entries) shows no "entered 2 times" warning')
+                    # the directory entered twice is an INFO line of ods5check -v (review 72 S2: VMS makes such directories and its ANALYZE is silent): present in the second state, absent after the end
+                    _inf = [l for l in run(CHECK + ['-v', trial])[1].splitlines() if l.startswith('info') and 'is entered' in l and 'times' in l]
+                    if _second and len(_inf) != 1:
+                        prob.append('the second state (two entries) should show one "entered 2 times" INFO line, it shows %d' % len(_inf))
+                    if not _second and _inf:
+                        prob.append('a state that is not the second shows an "entered k times" INFO line: %s' % _inf[0].strip()[:120])
                     if k == n and _ct:
                         prob.append('the completed rename leaves a warning: %s' % _ct[0].strip()[:140])
                     # (3) the same RENAME again finishes it (the old entry gone, the subtree under the new path, the checker clean)
