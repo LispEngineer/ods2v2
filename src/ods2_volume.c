@@ -5441,6 +5441,17 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
            prunes only when it is below the count (CORPUS 67.4, review 67 F2): the lowest version after the rename goes */
         r = version_limit_drop(&di, v, same_name, same_name ? sv : 0, &drop_version);
         if (!r.ok) { free(di.versions); return r; }
+        if (drop_version != 0) {
+            /* review 69 F1 (data loss): the version the limit removes may be another entry of THIS file (an alias made with LINK, or the entry a stopped move left in the target directory): that entry is the
+               primary one by the rule (no version compared without HARDLINKS), so removing it deletes the file that is being renamed. Refused before any write. */
+            ods2_fid_t df;
+            if (ods2_lookup_name_version(vol, dst_header, dst_norm, (int) drop_version, &df, NULL).ok && fid_equal(df, src_fid)) {
+                static char msg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
+                free(di.versions);
+                snprintf(msg, sizeof(msg), "the version limit of %s would remove version %u, which is another entry of this same file (renaming onto %s;%u would delete the file): not renamed", dst_norm, drop_version, dst_norm, v);
+                return fail(msg);
+            }
+        }
     }
     free(di.versions);
     di.versions = NULL;

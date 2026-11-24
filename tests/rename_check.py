@@ -660,6 +660,9 @@ def move_cases(work, level, hl):
     # the version limit of the target name (CORPUS 66.1: the lowest goes)
     im, out = moved('mb6', 'RENAME [X]V.TXT [Y]L.TXT', '[X]V.TXT;1', '[Y]L.TXT;4', 'L.TXT;4', 1, ynum)
     check('mb6 %s: the target name limit of 3 removes its lowest version: [Y]L.TXT is ;2 ;3 ;4' % kind, ['L.TXT;2', 'L.TXT;3', 'L.TXT;4'], [x for x in listing(im, '[Y]') if x.startswith('L.TXT')])
+    ims = im
+    assert ods2(ims, 'COPY %s [Y]L.TXT' % put('one more L'))[0] == 0
+    check('mb6 %s: the moved file carries the target name\'s limit (CORPUS 70): one more version of [Y]L.TXT still leaves three' % kind, ['L.TXT;3', 'L.TXT;4', 'L.TXT;5'], [x for x in listing(ims, '[Y]') if x.startswith('L.TXT')])
     # an alias entry (here in the primary's own directory): the entry moves, the header is untouched (CORPUS 66.2 k2)
     im, out = moved('mk2', 'RENAME [X]QAL.TXT [Y]', '[X]Q.TXT;1', '[Y]QAL.TXT;1', None, 0, None, True)
     check('mk2 %s: the alias is in [Y] now and the primary [X]Q.TXT is as it was' % kind, ('QAL.TXT;1' in listing(im, '[Y]'), 'Q.TXT;1' in listing(im, '[X]'), 'QAL.TXT;1' in listing(im, '[X]')),
@@ -724,6 +727,77 @@ def move_cases(work, level, hl):
     return None
 
 
+def review69_cases(work, level, hl):
+    """review 69 (FIX FIRST), tests first: F1 the version limit's prune must never remove another entry of the file being renamed (step 1 had it too); S1 an over-long device name is refused; S2 a device with no
+    directory is parsed off, not made part of the name; S3 a target with only a name, only a type or only a version takes the missing parts from the source (DCL)"""
+    kind = 'ODS-%d%s' % (level, ' HARDLINKS' if hl else '')
+    img = os.path.join(work, 'r69_%d%s.img' % (level, 'h' if hl else ''))
+    assert run([INIT, img, '8192', '--structure=%d' % level, '--label=R69'] + (['--hardlinks'] if hl else []))[0] == 0
+    src = os.path.join(work, 'r69.txt')
+    open(src, 'w').write('content of the file\n')
+    for c in ('CREATE/DIRECTORY [X]', 'CREATE/DIRECTORY [Y]', 'COPY %s [X]A.TXT' % src, 'COPY %s [X]A2.TXT' % src, 'COPY %s [X]B' % src):
+        assert ods2(img, c)[0] == 0, c
+    time.sleep(1.1)
+    base = os.path.join(work, 'r69_base_%d%s.img' % (level, 'h' if hl else ''))
+    shutil.copyfile(base if False else img, base)
+
+    def fresh():
+        shutil.copyfile(base, img)
+        return img
+
+    def reads(im, spec):
+        return 'content of the file' in ods2(im, 'TYPE ' + spec)[1]
+
+    # F1 (a): the second stopped state of a move (two entries), the target name's limit set to 1, then the rename onto the next version
+    for where, setup in (('across (the second stopped state of a move)', 'stop'), ('across, an alias made with LINK', 'linkY'), ('in one directory, an alias made with LINK', 'linkX')):
+        im = fresh()
+        if setup == 'stop':
+            run(['env', 'ODS2_FAULT_AFTER_WRITES=2', './ods2_fault', im, 'RENAME [X]A.TXT [Y]M.TXT'])
+            tgt, name_old = '[Y]M.TXT', '[X]A.TXT'
+            cmd = 'RENAME [X]A.TXT [Y]M.TXT;2'
+        elif setup == 'linkY':
+            assert ods2(im, 'LINK [Y]C.TXT [X]A.TXT')[0] == 0
+            tgt, name_old = '[Y]C.TXT', '[X]A.TXT'
+            cmd = 'RENAME [X]A.TXT [Y]C.TXT;5'
+        else:
+            assert ods2(im, 'LINK [X]C.TXT [X]A.TXT')[0] == 0
+            tgt, name_old = '[X]C.TXT', '[X]A.TXT'
+            cmd = 'RENAME [X]A.TXT C.TXT;5'
+        assert ods2(im, 'SET FILE/VERSION_LIMIT=1 %s' % tgt)[0] == 0
+        h0 = sha(im)
+        rc, out = ods2(im, cmd)
+        check('%s F1 %s: %s is refused (the version the limit would remove is another entry of this same file), the image is unchanged' % (kind, where, cmd),
+              (True, True, h0), ('another entry of this same file' in out and '%ODS2-I-RENAMED' not in out, '%ODS2-E' in out, sha(im)))
+        check('%s F1 %s: the file still reads under its names' % (kind, where), True, reads(im, name_old) and reads(im, tgt + ';1'))
+    # the same limit with ANOTHER file's version in the way is still pruned (the earlier tests: mb6 and the table's k8)
+    # S1: a device name that does not fit the buffer is refused, not taken as this volume (empty equals empty)
+    im = fresh()
+    h0 = sha(im)
+    long_dev = 'A' * 70
+    for cmd in ('RENAME [X]A.TXT %s:[Y]' % long_dev, 'RENAME %s:[X]A.TXT %s:[Y]' % (long_dev, 'B' * 71), 'RENAME %s:[X]A.TXT %s:[Y]' % (long_dev, long_dev)):
+        rc, out = ods2(im, cmd)
+        check('%s S1: %s... is refused (NOTSAMEDEV), the image is unchanged' % (kind, cmd[:30]), (True, h0), ('NOTSAMEDEV' in out, sha(im)))
+    # S2: a device with no directory is parsed off
+    im = fresh()
+    rc, out = ods2(im, 'RENAME [X]A.TXT R69:N.TXT')
+    check('%s S2: RENAME [X]A.TXT R69:N.TXT makes [X]N.TXT;1 (the device is this volume\'s label, parsed off), not a name with a colon' % kind, (0, ['A2.TXT;1', 'B.;1', 'N.TXT;1']), (rc, listing(im, '[X]')))
+    im = fresh()
+    h0 = sha(im)
+    rc, out = ods2(im, 'RENAME [X]A.TXT R69:')
+    check('%s S2: RENAME [X]A.TXT R69: (a device and nothing else) is the same name: nothing changes' % kind, (0, True, h0), (rc, 'already named' in out, sha(im)))
+    for cmd in ('RENAME [X]A.TXT A:B.TXT', 'RENAME [X]A.TXT R69::[Y]', 'RENAME [X]A.TXT R69:R69:[Y]'):
+        rc, out = ods2(im, cmd)
+        check('%s S2: %s is refused (NOTSAMEDEV), the image is unchanged' % (kind, cmd), (True, h0), ('NOTSAMEDEV' in out, sha(im)))
+    # S3: the missing parts of the target come from the source: [Y]N is N.TXT, [Y].DAT is A.DAT, [Y];7 is A.TXT;7 (the type of B, which has none, stays none)
+    for cmd, want in (('RENAME [X]A.TXT [Y]N', 'N.TXT;1'), ('RENAME [X]A.TXT [Y].DAT', 'A.DAT;1'), ('RENAME [X]A.TXT [Y];7', 'A.TXT;7'), ('RENAME [X]A.TXT [X]N', 'N.TXT;1'), ('RENAME [X]A.TXT [X].DAT', 'A.DAT;1'),
+                      ('RENAME [X]A.TXT [Y]N.', 'N.;1'), ('RENAME [X]A.TXT [Y]N.DAT', 'N.DAT;1'), ('RENAME [X]B [Y]N', 'N.;1'), ('RENAME [X]B [Y].DAT', 'B.DAT;1')):
+        im = fresh()
+        rc, out = ods2(im, cmd)
+        d = '[Y]' if '[Y]' in cmd else '[X]'
+        got = [x for x in listing(im, d) if x in (want,)]
+        check('%s S3: %s makes %s (DCL fills the missing part from the input)' % (kind, cmd, want), (0, [want], []), (rc, got, checker_errors(im)))
+
+
 def r1_unusable_number(work, level):
     """review 67 recheck R1: a name with a version number that is not usable (0) is not pruned: E.TXT stored ;2 ;1 ;0 with the limit 2: COPY and RENAME delete nothing (version 0 was taken for \"nothing removed\")"""
     kind = 'ODS-%d' % level
@@ -776,9 +850,11 @@ def main():
             header_first_states(work, level, False)
             g1_aliases(work, level, False)
             move_cases(work, level, False)
+            review69_cases(work, level, False)
         header_first_states(work, 5, True)
         g1_aliases(work, 5, True)
         move_cases(work, 5, True)
+        review69_cases(work, 5, True)
     finally:
         if not keep:
             shutil.rmtree(work, ignore_errors=True)

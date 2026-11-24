@@ -82,13 +82,13 @@ SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"versions
 # for delete, a back link directory without an entry): a rename that loses a header or a block must be seen. The two-entry states (one file under two names, in one directory or two) are
 # no error of the checker; the transient duplicates of a split or a shrink are in EXTRA_ALLOWED for the operations that make them.
 RENAME_ALLOWED = []
-HF_NO_WARN_OPS = ('rename_alias', 'rename_hardlink', 'rename_case', 'rename_move', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_ext')     # the header is not rewritten (an alias), or the spelling only differs (no name differs)
-MOVE_OPS = ['rename_move', 'rename_move_name', 'rename_move_exist', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_split', 'rename_move_ext']
+HF_NO_WARN_OPS = ('rename_move_limit', 'rename_alias', 'rename_hardlink', 'rename_case', 'rename_move', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_ext')     # the header is not rewritten (an alias), or the spelling only differs (no name differs)
+MOVE_OPS = ['rename_move', 'rename_move_name', 'rename_move_exist', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_split', 'rename_move_ext', 'rename_move_limit']
 MOVE_ALIAS_OPS = ('rename_move_alias', 'rename_move_hardlink')               # the header is not written: no header-first state
 MOVE_FIRST_STATE_ERROR = r'its back link directory \d+ has no entry for it'     # the ONE error of the checker the first state of a primary move has (the header names the target directory, which has no entry yet)
 RENAME_PAIRS = {'rename_move': ('A1.TXT;1', 'SUB/A1.TXT;1'), 'rename_move_name': ('A1.TXT;1', 'SUB/A9.TXT;1'), 'rename_move_exist': ('A1.TXT;1', 'SUB/D.TXT;2'),
                 'rename_move_alias': ('SUB/LNKA.TXT;1', 'EMPTY/LNKA.TXT;1'), 'rename_move_primary': ('L.TXT;1', 'EMPTY/L.TXT;1'), 'rename_move_hardlink': ('SUB/LNKA.TXT;1', 'EMPTY/LNKA.TXT;1'),
-                'rename_move_primary_hardlink': ('L.TXT;1', 'EMPTY/L.TXT;1'), 'rename_move_split': ('A1.TXT;1', 'FULL/%(next)s;1'), 'rename_move_ext': ('F/A.DAT;1', 'A2.DAT;1'),
+                'rename_move_primary_hardlink': ('L.TXT;1', 'EMPTY/L.TXT;1'), 'rename_move_split': ('A1.TXT;1', 'FULL/%(next)s;1'), 'rename_move_ext': ('F/A.DAT;1', 'A2.DAT;1'), 'rename_move_limit': ('SUB/D.TXT;1', 'V.TXT;3'),
                 'rename_same_dir': ('A1.TXT;1', 'A9.TXT;1'), 'rename_type': ('B.DAT;1', 'B.TXT;1'), 'rename_newver': ('A1.TXT;1', 'W.TXT;10'),
                 'rename_alias': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'), 'rename_primary_alias': ('L.TXT;1', 'L2.TXT;1'), 'rename_hardlink': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'),
                 'rename_primary_hardlink': ('L.TXT;1', 'L2.TXT;1'), 'rename_split': ('FULL/N00000.TXT;1', 'FULL/%(next)s;1'),
@@ -98,7 +98,7 @@ SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"BAD_VERS
 SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big', 'newver_split']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
                  'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT, 'newver_split': SPLIT_TRANSIENT,
-                 'delete_dirshrink_mid': SPLIT_TRANSIENT, 'rename_split': SPLIT_TRANSIENT, 'rename_move_split': SPLIT_TRANSIENT, 'rename_shrink_last': SPLIT_TRANSIENT, 'rename_shrink_mid': SPLIT_TRANSIENT}   # the blocks after the emptied one move up one at a time: a name is listed twice for a moment, never missing
+                 'delete_dirshrink_mid': SPLIT_TRANSIENT, 'rename_split': SPLIT_TRANSIENT, 'rename_move_split': SPLIT_TRANSIENT, 'rename_move_limit': ALLOWED, 'rename_shrink_last': SPLIT_TRANSIENT, 'rename_shrink_mid': SPLIT_TRANSIENT}   # the blocks after the emptied one move up one at a time: a name is listed twice for a moment, never missing
 
 
 # Growing INDEXF.SYS when its last header is an extension header changes two blocks that cannot be written as one: the
@@ -459,6 +459,8 @@ OPS = {
     'rename_move_primary_hardlink': ('RENAME [000000]L.TXT [EMPTY]', ['L.TXT;1', 'EMPTY/L.TXT;1'], True, True, None),
     'rename_move_split': ('RENAME [000000]A1.TXT [FULL]%(next)s', ['A1.TXT;1', 'FULL/%(next)s;1'], False, False, 'split'),
     'rename_move_ext': ('RENAME [F]A.DAT [000000]A2.DAT', ['F/A.DAT;1', 'A2.DAT;1'], False, False, 'sfext'),
+    # a move onto a name at its version limit (review 69 F1, N6): V.TXT;1 ;2 with the limit 2: the rename makes V.TXT;3 and the lowest, V.TXT;1, goes; the moved file must survive every stop
+    'rename_move_limit': ('RENAME [SUB]D.TXT [000000]V.TXT', ['SUB/D.TXT;1', 'V.TXT;3', 'V.TXT;1'], False, False, None),
     # a case-only rename at ODS-5 (C3): the record's name bytes are replaced in place; the insert of a spelling that differs only in case is blind to case and would make a new version
     'rename_case': ('RENAME [000000]abc.txt [000000]ABC.txt', ['abc.txt;1', 'ABC.txt;1'], True, False, 'caseonly'),
     # the remove that empties a block (C6b): the old name is alone in the LAST, then a MIDDLE, block of its directory and the new name sorts first, so the insert is in the first block
@@ -569,7 +571,7 @@ def main():
                     _mo, _mn = (x % ctx_op for x in RENAME_PAIRS[name])
                     _first = _mo in files and _mn not in files
                     _mv_first = _first
-                    _bl = [b for b in _bad0 if re.search(MOVE_FIRST_STATE_ERROR, b)]
+                    _bl = [b for b in _bad0 + leaks if re.search(MOVE_FIRST_STATE_ERROR, b)]       # (an operation that allows leak classes files that error under `leaks`)
                     if _first:
                         if len(_bl) != 1:
                             prob.append('the state after the header write of a move should show exactly one "back link directory has no entry" error, it shows %d: not header first?' % len(_bl))
