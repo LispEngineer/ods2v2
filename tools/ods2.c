@@ -2818,6 +2818,8 @@ typedef struct {
     unsigned long long bytes;
     const copy_options_t *opts;          /* /FORMAT, /ATTRIBUTES */
     const ods2_record_attrs_t *attrs_in; /* the /ATTRIBUTES given */
+    ods2_fid_t *made;                    /* the files this IMPORT created (review 77 O1): none of them may be deleted by a version limit's prune of a later file */
+    size_t nmade, cap_made;
 } import_stats_t;
 
 static int import_name_cmp(const struct dirent **a, const struct dirent **b)
@@ -2965,6 +2967,17 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             }
             st->files++;
             st->bytes += in.length;
+            if (st->opts->new_version) {
+                if (st->nmade == st->cap_made) {
+                    size_t nc = st->cap_made ? st->cap_made * 2 : 64;
+                    ods2_fid_t *nm = realloc(st->made, nc * sizeof(*nm));
+                    if (nm != NULL) { st->made = nm; st->cap_made = nc; }
+                }
+                if (st->nmade < st->cap_made) {
+                    st->made[st->nmade++] = fid;
+                    ods2_set_create_protect(st->vol, st->made, (unsigned) st->nmade);
+                }
+            }
         } else if (S_ISLNK(sb.st_mode)) {
             char *target = b->target;
             ssize_t n = readlink(path, target, sizeof(b->target) - 1);
@@ -3011,6 +3024,8 @@ static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods
         return;
     }
     import_tree(&st, local_dir, ods2_fid_number(dir_fid), 0);
+    ods2_set_create_protect(vol, NULL, 0);
+    free(st.made);
     if (st.deep > 0) {
         fprintf(stderr, "%%ODS2-W-DEEPDIR, %d director%s deeper than %u levels below [000000] created: OpenVMS "
                         "VAX V7.3 cannot reach them on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "

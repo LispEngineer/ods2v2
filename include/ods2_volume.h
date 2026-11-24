@@ -45,6 +45,8 @@
 typedef struct {
     FILE          *fp;
     bool           writable;
+    const ods2_fid_t *create_protect;  /* files a multi-file command (IMPORT) has created: a version-limit prune of one of them by a later create is refused (review 77 O1); see ods2_set_create_protect */
+    unsigned       ncreate_protect;
     bool           quota_known;        /* the lookup of [000000]QUOTA.SYS was made (it cannot appear during a session: ods2v2 refuses to make it) */
     unsigned       quota_number;       /* its file number, 0 when there is none */
     char           write_refusal[640]; /* why a read-only mount refuses every write, set by the caller (the CLI: disk quotas are active); empty: the usual reason */
@@ -229,6 +231,9 @@ ods2_result_t ods2_rename(ods2_volume_t *vol, unsigned src_dir_number, const cha
 ods2_result_t ods2_rename_protect(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
                                   unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia,
                                   const ods2_fid_t *protect, unsigned nprotect, ods2_rename_info_t *info);
+/* Files made by the command now running (IMPORT/NEW_VERSION): a create that would delete one of these files by the version limit of its name is REFUSED for that file (nothing is written; the message says
+   so), whatever the command expected (review 77 O1: three host files that fold to one name, default limit 1, used to leave only the last, in silence). The array is not copied: keep it valid while it is set; NULL/0 clears. */
+void ods2_set_create_protect(ods2_volume_t *vol, const ods2_fid_t *fids, unsigned n);
 /* Are the versions of `name` stored newest first (descending), across all the records of the name? *in_order_out is false when two neighbouring entries of the name
    are not descending. A directory in that state is damaged or written by another tool (ods2v2 and VMS never write it). VMS follows the STORED order for every version form
    (CORPUS 66.4: ;0, TYPE and PURGE take the first stored entry, DELETE with no version is refused, ANALYZE says BAD_VERSORDER): the lookup does too. A command that CHANGES

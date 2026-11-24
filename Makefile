@@ -396,6 +396,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_rm ods2_mkdir ods2_du
 	@sh tests/cli_rename_dir_check.sh
 	@echo "--- cli_rename_wild_check (RENAME with wildcards: step 4, CORPUS 65.4, review 75) ---"
 	@sh tests/cli_rename_wild_check.sh
+	@echo "--- cli_import_prune_check (IMPORT/NEW_VERSION never deletes a file the same IMPORT made: review 77 O1) ---"
+	@sh tests/cli_import_prune_check.sh
 	@echo "--- cli_mpoffset_check (ods5check: the map starts at or above what the name needs, the slack zero: CORPUS 67.5) ---"
 	@sh tests/cli_mpoffset_check.sh
 	@echo "--- cli_versorder_check (versions of a name stored out of order: reads as VMS, changes refused, BAD_VERSORDER: H1, CORPUS 66.4) ---"

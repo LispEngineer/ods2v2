@@ -3798,6 +3798,12 @@ static ods2_result_t version_limit_drop(const dir_name_info_t *info, unsigned v,
     return ok();
 }
 
+void ods2_set_create_protect(ods2_volume_t *vol, const ods2_fid_t *fids, unsigned n)
+{
+    vol->create_protect = fids;
+    vol->ncreate_protect = fids != NULL ? n : 0;
+}
+
 static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_header, char *name, size_t name_cap, int version_req,
                                     unsigned special, unsigned *version_out, bool *existing_out, unsigned *drop_out, ods2_fid_t *prev_out)
 {
@@ -3849,6 +3855,22 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
     }
     /* the version limit of the entry: 0 and 32767 are no limit */
     r = version_limit_drop(&info, v, false, 0, drop_out);
+    if (r.ok && *drop_out != 0 && vol->ncreate_protect != 0) {
+        /* review 77 O1: the version the limit removes may be a file the running command (IMPORT) made: refused for this file, before any write */
+        ods2_fid_t vf;
+        if (ods2_lookup_name_version(vol, parent_header, name, (int) *drop_out, &vf, NULL).ok) {
+            unsigned pi;
+            for (pi = 0; pi < vol->ncreate_protect; pi++) {
+                if (ods2_fid_number(vol->create_protect[pi]) == ods2_fid_number(vf) && vol->create_protect[pi].fid_seq == vf.fid_seq) {
+                    static char pmsg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
+                    free(info.versions);
+                    snprintf(pmsg, sizeof(pmsg), "the version limit of %s would delete version %u, which a file this command made: refused to keep it (not made)", name, *drop_out);
+                    *drop_out = 0;
+                    return fail(pmsg);
+                }
+            }
+        }
+    }
     if (!r.ok) { free(info.versions); return r; }
     free(info.versions);
     *version_out = v;
