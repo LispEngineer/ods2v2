@@ -4956,7 +4956,7 @@ int main(int argc, char **argv)
     } else {
         if (r.ok) ods2_dismount(&vol);
         r = ods2_mount_write_opts(argv[1], &vol, mount_flags);
-        if (!r.ok && strstr(r.problem, ODS2_QUOTA_ACTIVE_TEXT) != NULL) {
+        if (!r.ok && (strstr(r.problem, ODS2_QUOTA_ACTIVE_TEXT) != NULL || strstr(r.problem, ODS2_QUOTA_UNKNOWN_TEXT) != NULL)) {
             /* active disk quotas (CORPUS 71/72): read the volume, refuse every write with the reason */
             char why[640];
             ods2_result_t r_read;
@@ -5002,6 +5002,8 @@ int main(int argc, char **argv)
                 if (!keep_going) break;
             }
         }
+        /* commands fed on standard input (not a terminal) carry their status as a script does: 1 if any command failed (review 74 S1) */
+        if (!isatty(STDIN_FILENO) && g_command_failed) exit_code = 1;
     } else if (argv[2][0] == '@') {
         exit_code = run_script(&vol, argv[2] + 1);
     } else {

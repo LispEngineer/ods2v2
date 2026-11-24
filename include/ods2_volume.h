@@ -108,6 +108,8 @@ ods2_result_t ods2_mount_write(const char *path, ods2_volume_t *vol);
    directory (VMS refuses a DELETE of it while quotas are active). */
 #define ODS2_MOUNT_IGNORE_QUOTA 1u
 #define ODS2_QUOTA_ACTIVE_TEXT "disk quotas are active"
+/* ... and when the master directory cannot be read to the end, so that nothing can be said about QUOTA.SYS (review 74 F1: the guard fails closed; ODS2_MOUNT_IGNORE_QUOTA overrides this too): */
+#define ODS2_QUOTA_UNKNOWN_TEXT "could not be read to look for [000000]QUOTA.SYS"
 ods2_result_t ods2_mount_write_opts(const char *path, ods2_volume_t *vol, unsigned flags);
 /* True when [000000]QUOTA.SYS exists on the volume (any version): quotas are active. */
 bool ods2_quota_active(ods2_volume_t *vol);

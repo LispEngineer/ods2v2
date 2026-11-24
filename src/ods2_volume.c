@@ -103,6 +103,7 @@ static bool quota_name(unsigned dir_file_number, const char *name)
 }
 
 static bool quota_file_protected(ods2_volume_t *vol, unsigned dir_file_number, const char *name, unsigned file_number);
+static int quota_lookup(ods2_volume_t *vol, unsigned *number);
 
 /* Uppercases a string in place. Real VMS always stores filenames and
    directory names uppercase - "create/dir [decus]" on real VMS
@@ -359,11 +360,20 @@ static ods2_result_t mount_internal(const char *path, ods2_volume_t *vol,
                         "the image file to the volume's size first)");
         }
     }
-    if (writable && !(flags & ODS2_MOUNT_IGNORE_QUOTA) && ods2_quota_active(vol)) {
-        ods2_dismount(vol);
-        return fail("disk quotas are active on this volume ([000000]QUOTA.SYS exists); ods2v2 does not keep the quota file, so a write would leave the "
-                    "usage figures wrong (VMS charges the owner of every file made, deleted or changed): nothing was written. Use --ignore-quota to write "
-                    "anyway, then run DISKQUOTA REBUILD on VMS to put the usage figures right");
+    if (writable && !(flags & ODS2_MOUNT_IGNORE_QUOTA)) {
+        int q = quota_lookup(vol, NULL);
+        if (q > 0) {
+            ods2_dismount(vol);
+            return fail(ODS2_QUOTA_ACTIVE_TEXT " on this volume ([000000]QUOTA.SYS exists); ods2v2 does not keep the quota file, so a write would leave the "
+                        "usage figures wrong (VMS charges the owner of every file made, deleted or changed): nothing was written. Use --ignore-quota to write "
+                        "anyway, then run DISKQUOTA REBUILD on VMS to put the usage figures right");
+        }
+        if (q < 0) {
+            /* review 74 F1: fail closed. A record the reader cannot go past may hide QUOTA.SYS (VMS reads a directory record by record: it may find the file and enable quotas) */
+            ods2_dismount(vol);
+            return fail("the master directory " ODS2_QUOTA_UNKNOWN_TEXT ", so it is not known whether disk quotas are active (a damaged record?): nothing was written. Use --ignore-quota to write anyway "
+                        "(if [000000]QUOTA.SYS exists, run DISKQUOTA REBUILD on VMS afterwards)");
+        }
     }
     r = ok();
     return r;
@@ -3664,24 +3674,25 @@ typedef struct {
 static bool is_reserved_file(const ods2_volume_t *vol, unsigned dir_file_number, const char *name, unsigned file_number);
 static ods2_result_t dir_name_info(ods2_volume_t *vol, const uint8_t *dir_header, const char *name, dir_name_info_t *info);
 
-/* Does [000000]QUOTA.SYS exist (any version)? *number gets its file number (0 when the entry names no valid file ID). A master directory that cannot be read: not active (the volume is refused for other reasons). */
-static bool quota_lookup(ods2_volume_t *vol, unsigned *number)
+/* Does [000000]QUOTA.SYS exist (any version)? 1 yes, 0 no, -1 the master directory could not be read to look (a damaged record, a read error: review 74 F1). *number gets its file number (0 when the entry
+   names no valid file ID). */
+static int quota_lookup(ods2_volume_t *vol, unsigned *number)
 {
     uint8_t mfd[512];
     dir_name_info_t info;
-    bool exists;
+    int found;
     if (number != NULL) *number = 0;
-    if (!ods2_read_header(vol, 4, mfd).ok) return false;
-    if (!dir_name_info(vol, mfd, "QUOTA.SYS", &info).ok) return false;
-    exists = info.exists;
-    if (exists && number != NULL && ods2_check_fid(info.first_fid).ok) *number = ods2_fid_number(info.first_fid);
+    if (!ods2_read_header(vol, 4, mfd).ok) return -1;
+    if (!dir_name_info(vol, mfd, "QUOTA.SYS", &info).ok) return -1;
+    found = info.exists ? 1 : 0;
+    if (info.exists && number != NULL && ods2_check_fid(info.first_fid).ok) *number = ods2_fid_number(info.first_fid);
     free(info.versions);
-    return exists;
+    return found;
 }
 
 bool ods2_quota_active(ods2_volume_t *vol)
 {
-    return quota_lookup(vol, NULL);
+    return quota_lookup(vol, NULL) > 0;
 }
 
 /* An entry (dir, name) or a file (number) that is the quota file: protected whatever the mount flags */
@@ -3690,7 +3701,7 @@ static bool quota_file_protected(ods2_volume_t *vol, unsigned dir_file_number, c
     if (name != NULL && quota_name(dir_file_number, name)) return true;
     if (file_number == 0) return false;
     if (!vol->quota_known) {
-        quota_lookup(vol, &vol->quota_number);
+        if (quota_lookup(vol, &vol->quota_number) < 0) vol->quota_number = 0;     /* (a master directory that cannot be read: only the name test above can protect) */
         vol->quota_known = true;
     }
     return vol->quota_number == file_number;
@@ -4721,6 +4732,7 @@ static ods2_result_t set_entry_version_limit_impl(ods2_volume_t *vol, unsigned d
 
     *changed = 0;
     if (!vol->writable) return not_writable(vol);
+    if (quota_name(dir_file_number, name)) return fail(QUOTA_FILE_TEXT);        /* review 74 N1: the entry's version limit is the quota file's too */
     r = ods2_read_header(vol, dir_file_number, dir_header);
     if (!r.ok) return r;
     r = directory_header_ok(dir_header, dir_file_number);
@@ -4902,6 +4914,7 @@ static ods2_result_t set_file_security_impl(ods2_volume_t *vol, ods2_fid_t fid, 
 ods2_result_t ods2_set_file_security(ods2_volume_t *vol, ods2_fid_t fid, unsigned what, uint16_t prot, uint16_t group, uint16_t member)
 {
     ods2_result_t r;
+    if (vol->writable && quota_file_protected(vol, 0, NULL, ods2_fid_number(fid))) return fail(QUOTA_FILE_TEXT);     /* review 74 N1: DISKQUOTA owns QUOTA.SYS */
     TXN_BEGIN_OR_RETURN(vol);
     r = set_file_security_impl(vol, fid, what, prot, group, member);
     return txn_end(vol, r);
@@ -4910,6 +4923,8 @@ ods2_result_t ods2_set_file_security(ods2_volume_t *vol, ods2_fid_t fid, unsigne
 ods2_result_t ods2_set_stream_record_sizes(ods2_volume_t *vol, ods2_fid_t fid, unsigned *changed)
 {
     ods2_result_t r;
+    *changed = 0;
+    if (vol->writable && quota_file_protected(vol, 0, NULL, ods2_fid_number(fid))) return fail(QUOTA_FILE_TEXT);
     TXN_BEGIN_OR_RETURN(vol);
     r = set_stream_record_sizes_impl(vol, fid, changed);
     return txn_end(vol, r);
@@ -5949,7 +5964,6 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
         return fail("this is one of the volume's reserved files (INDEXF.SYS, BITMAP.SYS, ... "
                     "SECURITY.SYS): it cannot be deleted");
     }
-    if (quota_file_protected(vol, dir_file_number, name, ods2_fid_number(target_fid))) return fail(QUOTA_FILE_TEXT);
 
     r = ods2_read_header(vol, ods2_fid_number(target_fid), target_header);
     if (!r.ok) return r;
@@ -5970,6 +5984,9 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
         if (info != NULL) info->kept = 2;
         return ok();
     }
+    /* the quota file: a DELETE of an entry that names a real file is refused (review 74 N2: an entry that names NO file, the dangling case above, is taken out, so that a volume whose QUOTA.SYS entry dangles is
+       not stuck read only for good) */
+    if (quota_file_protected(vol, dir_file_number, name, ods2_fid_number(target_fid))) return fail(QUOTA_FILE_TEXT);
 
     if ((target_core->filechar & 0x2000u) && target_core->seg_num == 0) {
         /* A DIRECTORY file (review 71 C2): never remove the last entry of a directory that is not empty. If the directory the header's back link names holds ANOTHER entry for this whole file ID (the

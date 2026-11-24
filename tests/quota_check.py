@@ -68,6 +68,67 @@ def writes(work):
     ]
 
 
+def review74(work, kind, level, hl):
+    host = os.path.join(work, 'host.txt')
+    # F1 fail closed: the master directory cannot be read to the end (a damaged record before or after QUOTA.SYS, or at it): the guard cannot tell, so the write mount is refused, with its own message,
+    # and --ignore-quota overrides it. Reads work (DIR lists what it can).
+    for where, dmg in (('after QUOTA.SYS (TOP.TXT)', 'TOP.TXT'), ('before QUOTA.SYS (BACKUP.SYS)', 'BACKUP.SYS'), ('at QUOTA.SYS', 'QUOTA.SYS')):
+        im = Q.make(work, level, hl, True, 'f1', top=True)
+        Q.damage_record(im, '[000000]', dmg)
+        h0 = sha(im)
+        rc, out = Q.ods2(im, 'COPY %s [A]N.TXT' % host)
+        check('%s F1 damaged record %s: the write is refused (it cannot be told whether quotas are active), the image unchanged, the message says the master directory could not be read and names --ignore-quota' % (kind, where),
+              (True, True, h0), ('could not be read to look for' in out and '--ignore-quota' in out, 'ODS2-I-COPIED' not in out, sha(im)))
+        rc, out = Q.ods2(im, 'DIR [A]')
+        check('%s F1 damaged record %s: a read still works' % (kind, where), True, 'F.TXT' in out and 'ODS2-F' not in out)
+        rc, out = Q.ods2(im, 'COPY %s [A]N.TXT' % host, ['--ignore-quota'])
+        check('%s F1 damaged record %s: --ignore-quota writes' % (kind, where), True, 'ODS2-I-COPIED' in out and sha(im) != h0)
+        rc, out = Q.run(['./ods2_put', im, host, 'A', 'P.TXT'])
+        check('%s F1 damaged record %s: ods2_put exits 1 with the same reason' % (kind, where), (1, True), (rc, 'could not be read to look for' in out))
+    # S1: commands on standard input: exit 1 when any command failed (as @script does), also when nothing is a quota
+    im = Q.make(work, level, hl, True, 's1')
+    p = __import__('subprocess').run(['./ods2', im], input='COPY %s [A]X.TXT\nDIR [A]\n' % host, capture_output=True, text=True)
+    check('%s S1: a write refused on a quota volume, commands on standard input: exit 1' % kind, 1, p.returncode)
+    im = Q.make(work, level, hl, False, 's1p')
+    p = __import__('subprocess').run(['./ods2', im], input='DELETE [A]NOSUCH.TXT;1\nDIR [A]\n', capture_output=True, text=True)
+    check('%s S1: a failing DELETE on a plain volume, commands on standard input: exit 1' % kind, 1, p.returncode)
+    p = __import__('subprocess').run(['./ods2', im], input='DIR [A]\nDELETE [A]G.TXT;1\n', capture_output=True, text=True)
+    check('%s S1: commands on standard input that all succeed: exit 0' % kind, 0, p.returncode)
+    # N1: SET FILE on QUOTA.SYS is refused even with the override (DISKQUOTA owns the file)
+    quota = Q.make(work, level, hl, True, 'n1')
+    for what in ('SET FILE/VERSION_LIMIT=1 [000000]QUOTA.SYS', 'SET FILE/PROTECTION=(W:R) [000000]QUOTA.SYS', 'SET FILE/OWNER_UIC=[1,4] [000000]QUOTA.SYS', 'SET FILE/ATTRIBUTES=(MRS:0) [000000]QUOTA.SYS'):
+        im = fresh(quota, work, 'n1')
+        h0 = sha(im)
+        rc, out = Q.ods2(im, what, ['--ignore-quota'])
+        check('%s N1: %s is refused with --ignore-quota (QUOTA.SYS named), the image unchanged' % (kind, what.split()[1].split('=')[0]), (True, h0), ('QUOTA.SYS' in out and ('-E-' in out or '-W-' in out), sha(im)))
+    # N2: a dangling QUOTA.SYS entry (it names no file): read only without the override; with it DELETE removes the entry only, and then the volume is written without the option
+    im = Q.make(work, level, hl, True, 'n2')
+    Q.dangle_quota(im)
+    h0 = sha(im)
+    rc, out = Q.ods2(im, 'COPY %s [A]N.TXT' % host)
+    check('%s N2: a dangling QUOTA.SYS entry still makes the volume read only' % kind, (True, h0), (MSG in out, sha(im)))
+    rc, out = Q.ods2(im, 'DELETE [000000]QUOTA.SYS;1', ['--ignore-quota'])
+    rc2, out2 = Q.ods2(im, 'DIR [000000]QUOTA.SYS')
+    check('%s N2: DELETE of the dangling entry with --ignore-quota removes the entry' % kind, (True, True), ('ODS2-E' not in out and sha(im) != h0, 'QUOTA.SYS' not in out2.replace('QUOTA.SYS;1: no', '')))
+    rc, out = Q.ods2(im, 'COPY %s [A]N.TXT' % host)
+    check('%s N2: afterwards the volume is written without the option' % kind, (True, False), ('ODS2-I-COPIED' in out, MSG in out))
+    # N6: a lower-case entry (ODS-5) is the quota file too; an alias entry of the quota file is refused by its file number
+    if level == 5:
+        im = Q.make(work, level, hl, True, 'n6l', lower=True)
+        h0 = sha(im)
+        rc, out = Q.ods2(im, 'COPY %s [A]N.TXT' % host)
+        check('%s N6: an entry quota.sys (lower case) is the quota file: read only' % kind, (True, h0), (MSG in out, sha(im)))
+    im = Q.make(work, level, hl, True, 'n6a', alias=True)
+    h0 = sha(im)
+    for what in ('DELETE [A]ALIAS.SYS;1', 'RENAME [A]ALIAS.SYS [A]OTHER.SYS', 'LINK [A]L2.SYS [A]ALIAS.SYS'):
+        if what.startswith('LINK') and level != 5:
+            continue
+        im = Q.make(work, level, hl, True, 'n6a', alias=True)
+        h0 = sha(im)
+        rc, out = Q.ods2(im, what, ['--ignore-quota'])
+        check('%s N6: %s (an alias entry of the quota file) is refused by the file number, with the override, the image unchanged' % (kind, what.split()[0]), (True, h0), ('QUOTA.SYS' in out and ('-E-' in out or '-W-' in out), sha(im)))
+
+
 def main():
     work = tempfile.mkdtemp(prefix='quota_', dir=os.environ.get('TMPDIR', 'samples'))
     try:
@@ -150,6 +211,7 @@ def main():
                 # (PURGE of a name with one version has nothing to purge: nothing is said, nothing changes)
                 check('%s: %s: even with --ignore-quota the quota file is protected (message names QUOTA.SYS), the image is unchanged' % (kind, gname), (True, h0),
                       ('QUOTA.SYS' in out and ('%ODS2-E' in out or '-E-' in out or '-W-' in out) or gname == 'PURGE', sha(im)))
+            review74(work, kind, level, hl)
             # a volume with no quotas: nothing may be made under that name either (ods2v2 does not make a quota file)
             im = fresh(plain, work, 'n')
             h0 = sha(im)

@@ -24,14 +24,14 @@ def ods2(img, cmd, opts=()):
     return run([ODS2] + list(opts) + [img, cmd])
 
 
-def rename_record(img, dir_spec, old, new):
+def rename_record(img, dir_spec, old, new, exact=False):
     """change the name of one directory record of the directory `dir_spec` ('[000000]' or '[A]') from `old` to `new` (the same length), in place"""
     assert len(old) == len(new)
     num = 4 if dir_spec == '[000000]' else E.D.fnum(img, '[000000]%s.DIR' % dir_spec.strip('[]'))
     v = O.Vol(img)
     hdr = v.blk(E.D.lbn(v, num))
     ext = O.decode_map(hdr, O.Findings(False), 'dir')
-    o, n = old.upper().encode('latin-1'), new.upper().encode('latin-1')
+    o, n = old.upper().encode('latin-1'), (new if exact else new.upper()).encode('latin-1')
     with open(img, 'r+b') as f:
         for lbn, cnt in ext:
             for b in range(cnt):
@@ -67,7 +67,49 @@ def rename_header(img, number, old, new):
         f.write(hb)
 
 
-def make(work, level, hl, quota, tag, decoy=False):
+def damage_record(img, dir_spec, name):
+    """give the directory record `name` of `dir_spec` the impossible size 3 (a damaged master directory: the reader cannot go past it)"""
+    num = 4 if dir_spec == '[000000]' else E.D.fnum(img, '[000000]%s.DIR' % dir_spec.strip('[]'))
+    v = O.Vol(img)
+    hdr = v.blk(E.D.lbn(v, num))
+    ext = O.decode_map(hdr, O.Findings(False), 'dir')
+    nm = name.upper().encode('latin-1')
+    with open(img, 'r+b') as f:
+        for lbn, cnt in ext:
+            for b in range(cnt):
+                f.seek((lbn + b) * 512)
+                blk = bytearray(f.read(512))
+                pos = 0
+                while pos + 6 <= 512:
+                    size = struct.unpack_from('<H', blk, pos)[0]
+                    if size == 0xffff or size == 0:
+                        break
+                    namecount = blk[pos + 5]
+                    if bytes(blk[pos + 6:pos + 6 + namecount]) == nm:
+                        struct.pack_into('<H', blk, pos, 3)
+                        f.seek((lbn + b) * 512)
+                        f.write(blk)
+                        return
+                    pos += 2 + size
+    raise AssertionError('no record %s in %s' % (name, dir_spec))
+
+
+def dangle_quota(img):
+    """the entry [000000]QUOTA.SYS names a file whose header slot is empty (all zeros): an entry that names no file"""
+    v = O.Vol(img)
+    lbn = E.D.lbn(v, E.D.fnum(img, '[000000]QUOTA.SYS'))
+    with open(img, 'r+b') as f:
+        f.seek(lbn * 512)
+        f.write(bytes(512))
+
+
+def alias_of_quota(img):
+    """[A]ALIAS.SYS is a second entry (an alias) of the quota file"""
+    import dirstate as DS
+    DS.entry_fid(img, E.D.fnum(img, '[000000]A.DIR'), 'ALIAS.SYS', E.D.fnum(img, '[000000]QUOTA.SYS'))
+
+
+def make(work, level, hl, quota, tag, decoy=False, top=False, alias=False, lower=False):
     """[A] holds F.TXT (two versions) and G.TXT; with `quota` [000000] holds QUOTA.SYS; with `decoy` [A] holds QUOTA.SYS and [000000] QUOTA.DAT (neither is the quota file)"""
     img = os.path.join(work, 'qv_%s_%d%s.img' % (tag, level, 'h' if hl else ''))
     if os.path.exists(img):
@@ -81,12 +123,18 @@ def make(work, level, hl, quota, tag, decoy=False):
         cmds.append('COPY %s [000000]QUOTX.SYS' % host)
     if decoy:
         cmds += ['COPY %s [A]QUOTX.SYS' % host, 'COPY %s [000000]QUOTA.DAT' % host]
+    if top:
+        cmds.append('COPY %s [000000]TOP.TXT' % host)
+    if alias:
+        cmds.append('COPY %s [A]ALIAS.SYS' % host)
     for c in cmds:
         rc, out = ods2(img, c)
         assert rc == 0 and '%ODS2-E' not in out, (c, out)
     if quota:
         rename_header(img, E.D.fnum(img, '[000000]QUOTX.SYS'), 'QUOTX.SYS', 'QUOTA.SYS')
-        rename_record(img, '[000000]', 'QUOTX.SYS', 'QUOTA.SYS')
+        rename_record(img, '[000000]', 'QUOTX.SYS', 'quota.sys' if lower else 'QUOTA.SYS', exact=lower)
+    if alias and quota:
+        alias_of_quota(img)
     if decoy:
         rename_header(img, E.D.fnum(img, '[A]QUOTX.SYS'), 'QUOTX.SYS', 'QUOTA.SYS')
         rename_record(img, '[A]', 'QUOTX.SYS', 'QUOTA.SYS')
