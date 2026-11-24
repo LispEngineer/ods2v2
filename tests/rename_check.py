@@ -422,7 +422,7 @@ def review67_cases(work, level):
 
 def header_first_states(work, level, hl):
     """the order proposal (review 67 recheck): HEADER FIRST. After the first write the header names the new name and the directory has the old entry only. In that state ods2v2's DELETE of the old name
-    deletes the FILE (the entry is the file's own: the header names an entry the directory does not have), RENAME to a third name works, and the same RENAME run again finishes it; ods5check says
+    removes the ENTRY only (VMS: an alias; the file stays allocated in no directory, CORPUS 69), RENAME to a third name leaves the header alone, and the same RENAME run again finishes it; ods5check says
     exactly one warning (the header name differs from its directory entry). On a HARDLINKS volume the link count was raised in the same write, so a DELETE in that state removes the entry and the
     file stays (the known leak of the README: a lost file for the checker)."""
     kind = 'ODS-%d%s' % (level, ' HARDLINKS' if hl else '')
@@ -448,27 +448,30 @@ def header_first_states(work, level, hl):
     check('%s: after the first write the directory has P.TXT only and the header names Q.TXT;1' % kind, (['P.TXT;1'], 'Q.TXT;1'), (ls, fields(h, level)['name'] if h is not None else None))
     check('%s: ods5check says exactly one warning, the header name that differs from its entry' % kind, (1, True), (len(warns), bool(warns) and "header name 'Q.TXT;1' differs from its directory entry" in warns[0]))
     free0 = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
-    # DELETE P: the file goes (non-HARDLINKS); on HARDLINKS the entry goes and the file stays (the count was raised)
+    h0 = fields(h, level)
+    # CORPUS 69 (V8.4 both levels, VAX V7.3): VMS reads that entry as an ALIAS (the header names Q1, not P1). DELETE P removes the ENTRY only: the file stays allocated in no directory (ANALYZE: LOSTHEADER;
+    # /REPAIR puts it in SYSLOST); ods2v2 says so (not a plain "deleted") and ods5check reports the lost file
     rc, out = ods2(img, 'DELETE [D]P.TXT')
     free1 = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
     errs = checker_errors(img)
-    if hl:
-        check('%s: DELETE P.TXT removes the entry; the file stays allocated in no directory (the link count is one too high: the README\'s known leak)' % kind, ([], free0, True),
-              (listing(img, '[D]'), free1, any('lost file' in e for e in errs)))
-    else:
-        check('%s: DELETE P.TXT deletes the FILE (its header is freed, its blocks returned: the entry was its own), nothing dangles, no lost file' % kind, ([], True, []),
-              (listing(img, '[D]'), free1 > free0, errs))
-    # RENAME P R in that state: the entry is the file's own, the header is updated
+    check('%s: DELETE P.TXT removes the ENTRY only (VMS: an alias): the directory is empty, no blocks came back, the file is allocated in no directory (the checker: a lost file)' % kind,
+          ([], True, True), (listing(img, '[D]'), free1 == free0, any('lost file' in e for e in errs)))
+    check('%s: DELETE P.TXT does not print a plain "deleted": it says only the entry was removed and the file stays in no directory (ANALYZE/REPAIR on VMS)' % kind,
+          (False, True, True), ('%ODS2-I-DELETED' in out, 'stays allocated in no directory' in out, 'REPAIR' in out))
+    # RENAME P R in that state: an alias (VMS): the entry only, the header is untouched
     img = state()
     rc, out = ods2(img, 'RENAME [D]P.TXT [D]R.TXT')
     h = hdr(img, '[D]R.TXT;1')
-    check('%s: RENAME P.TXT R.TXT in that state: one entry R.TXT, the header names R.TXT;1, the checker is clean' % kind, (0, ['R.TXT;1'], 'R.TXT;1', []),
-          (rc, listing(img, '[D]'), fields(h, level)['name'] if h is not None else None, checker_errors(img)))
-    # and the same RENAME run again finishes it
+    hr = fields(h, level) if h is not None else {}
+    check('%s: RENAME P.TXT R.TXT in that state treats P as an alias (VMS): one entry R.TXT, the header untouched (still Q.TXT;1, the same revision, no error)' % kind,
+          (0, ['R.TXT;1'], 'Q.TXT;1', h0['revision'], []), (rc, listing(img, '[D]'), hr.get('name'), hr.get('revision'), checker_errors(img)))
+    # and the same RENAME run again finishes it, through the header that already names Q: no header write, no revision bump (VMS: RENAME P1 Q1 finishes cleanly)
     img = state()
     rc, out = ods2(img, 'RENAME [D]P.TXT [D]Q.TXT')
     h = hdr(img, '[D]Q.TXT;1')
     count = fields(h, level)['linkcount'] if (h is not None and hl) else None
+    rv = fields(h, level)['revision'] if h is not None else None
+    check('%s: RENAME P.TXT Q.TXT in that state finishes it with no header write: the revision is as it was (%s)' % (kind, h0['revision']), h0['revision'], rv)
     warns2 = [w for w in run(['python3', '-I', 'tests/ods5check.py', img])[1].splitlines() if w.startswith('WARN')]
     # third recheck (item 2): a HARDLINKS re-run does not count again when the header already names the target and there is no target entry (the count was already taken): the count ends at 1
     check('%s: the same RENAME run again finishes it: Q.TXT;1 only, the header named once, the checker clean%s' % (kind, ', the link count back to 1 (not counted twice)' if hl else ''),
@@ -492,10 +495,10 @@ def g1_aliases(work, level, hl):
     base = os.path.join(work, 'g1_base.img')
     shutil.copyfile(img, base)
 
-    def state(extra=()):
+    def state(extra=(), link=True):
         shutil.copyfile(base, img)
         run(['env', 'ODS2_FAULT_AFTER_WRITES=1', './ods2_fault', img, 'RENAME [D]P.TXT [D]N.TXT'])
-        for c in ('LINK [D]X.TXT [D]P.TXT',) + tuple(extra):
+        for c in (('LINK [D]X.TXT [D]P.TXT',) if link else ()) + tuple(extra):
             assert ods2(img, c)[0] == 0, c
         return img
 
@@ -521,7 +524,21 @@ def g1_aliases(work, level, hl):
     assert ods2(img, 'LINK [D]X.TXT [D]P.TXT')[0] == 0
     rc, out = ods2(img, 'COPY %s [D]P.TXT' % src)
     check('%s: COPY over the version limit drops P.TXT;1 as an entry only: X.TXT still enters the file' % kind, (['P.TXT;2', 'X.TXT;1'], True), (listing(img, '[D]'), alive(img, 'X.TXT')))
-    # the single-entry state is still the file's own (no LINK): DELETE frees it (the earlier test); the checker finds no error after the alias deletes
+    # the same rule with NO second entry (VMS, CORPUS 69: the entry is an alias, its file is in no directory afterwards): PURGE and the version limit take the entry out and leave the file allocated
+    img = state(('COPY %s [D]P.TXT' % src,), link=False)
+    free0b = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
+    rc, out = ods2(img, 'PURGE [D]P.TXT')
+    check('%s: PURGE P.TXT in that state (no LINK) takes P.TXT;1 out as an entry only; its file stays allocated (a lost file for the checker), nothing is freed' % kind,
+          (['P.TXT;2'], True, True), (listing(img, '[D]'), int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1)) == free0b, any('lost file' in e for e in checker_errors(img))))
+    shutil.copyfile(base, img)
+    assert ods2(img, 'SET FILE/VERSION_LIMIT=1 [D]P.TXT')[0] == 0
+    run(['env', 'ODS2_FAULT_AFTER_WRITES=1', './ods2_fault', img, 'RENAME [D]P.TXT [D]N.TXT'])
+    free0c = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
+    rc, out = ods2(img, 'COPY %s [D]P.TXT' % src)
+    free1c = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
+    check('%s: COPY over the version limit in that state (no LINK) takes P.TXT;1 out as an entry only; the old file stays allocated (the new copy took its blocks, none came back)' % kind,
+          (['P.TXT;2'], True), (listing(img, '[D]'), any('lost file' in e for e in checker_errors(img))))
+    # the single-entry state: the checker finds no error after the alias deletes
     img = state()
     ods2(img, 'DELETE [D]X.TXT')
     check('%s: the checker finds no error after DELETE X.TXT in that state' % kind, [], [e for e in checker_errors(img) if 'lost file' not in e or not hl])

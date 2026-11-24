@@ -5163,32 +5163,31 @@ static bool visit_count_fid(const ods2_dir_entry_t *entry, void *ctx_)
     return true;
 }
 
-/* Is the entry (name;version) of directory `dir_number` the file's PRIMARY entry? The header's back link is this directory and either the header names this entry, or the header names an entry that
-   this directory does not have for this file: a RENAME stopped after its header write (header first: the header already names the new name and the new entry is not there yet) leaves exactly that, and the
-   one entry the directory has is then the file's own. An entry whose header names another entry that IS there (this file's) is an alias. `with_version`: the header's version must be the entry's too. */
-static bool entry_is_primary(ods2_volume_t *vol, unsigned dir_number, const uint8_t *dir_header, const uint8_t *header, const char *name, unsigned version, ods2_fid_t fid, bool with_version)
+/* how many entries of the directory name the file (a full walk: used only by a DELETE of an entry that is not the file's primary one) */
+static bool dir_entries_of_file(ods2_volume_t *vol, const uint8_t *dir_header, ods2_fid_t fid, unsigned *count)
+{
+    fid_count_ctx_t cc;
+    cc.fid = fid;
+    cc.count = 0;
+    if (!walk_directory(vol, dir_header, visit_count_fid, &cc).ok) return false;
+    *count = cc.count;
+    return true;
+}
+
+/* Is the entry (name;version) of directory `dir_number` the file's PRIMARY entry? VMS's rule, exactly (CORPUS 67.3, 68.3, 69): the header's back link is this directory AND the header's name equals the
+   entry's name (and the version too when `with_version`: a HARDLINKS volume). Nothing else: in the state a RENAME that was stopped after its header write leaves (one entry P, the header naming Q) the
+   entry P is NOT primary: VMS (V8.4 both levels, VAX V7.3) treats it as an alias, so DELETE P removes the entry only (the file stays allocated in no directory: ANALYZE says LOSTHEADER, /REPAIR puts it in
+   SYSLOST), RENAME P R leaves the header untouched and RENAME P Q finishes cleanly (no revision bump); ods2v2 does the same (the first idea, an extension that read that entry as the file's own, is gone:
+   CORPUS 69 shows VMS does not, and it also let `LINK X P` then `DELETE X` free the file with P dangling: review 67 G1). */
+static bool entry_is_primary(unsigned dir_number, const uint8_t *header, const char *name, unsigned version, bool with_version)
 {
     const ods2_head_core_t *core = (const ods2_head_core_t *) header;
     ods5_ident_t id;
     const char *why;
     char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
-    ods2_fid_t f;
-    uint16_t fv;
     if (ods2_fid_number(core->backlink) != dir_number) return false;
     if (!ods5_read_ident(header, &id, &why) || !ods5_complete_name(id.name, a, sizeof(a)) || !ods5_complete_name(name, b, sizeof(b))) return false;
-    if (ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0 && (!with_version || id.version == version)) return true;
-    /* the header names another entry: is it there, and is it this file's? */
-    if (ods2_lookup_name_version(vol, dir_header, id.name, (int) id.version, &f, &fv).ok && fid_equal(f, fid)) return false;
-    /* none of the entries is the one the header names: only a file with ONE entry in this directory has an entry that is its own (review 67, third recheck G1: A.TXT renamed to N.TXT and stopped, then
-       LINK X.TXT A.TXT, then DELETE X.TXT freed the file and left A.TXT dangling). Two or more entries and none named by the header: all are aliases, a DELETE removes the entry only (as VMS does) */
-    {
-        fid_count_ctx_t cc;
-        cc.fid = fid;
-        cc.count = 0;
-        if (!walk_directory(vol, dir_header, visit_count_fid, &cc).ok) return false;
-        if (cc.count != 1) return false;
-    }
-    return true;
+    return ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0 && (!with_version || id.version == version);
 }
 
 /* the header's checksum, then the write (INDEXF.SYS's own header goes through its own writer) */
@@ -5319,7 +5318,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
         {
             ods5_ident_t id;
             const char *why;
-            if (entry_is_primary(vol, src_dir_number, dir_header, h, src_stored, sv, src_fid, false)) {
+            if (entry_is_primary(src_dir_number, h, src_stored, sv, false)) {
                 snprintf(ident_name, sizeof(ident_name), "%s;%u", dst_norm, (unsigned) sv);
                 if (ods5_read_ident(h, &id, &why)) {
                     char t[ODS5_MAX_LITERAL_NAME + 16];
@@ -5425,7 +5424,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
         const char *why;
         char a[ODS5_MAX_LITERAL_NAME + 8];
         bool no_primary = (core->backlink.fid_num == 0 && core->backlink.fid_nmx == 0) || (core->backlink.fid_num == 0xFFFF && core->backlink.fid_nmx == 0xFF);
-        primary = entry_is_primary(vol, src_dir_number, dir_header, h, src_stored, sv, src_fid, false);
+        primary = entry_is_primary(src_dir_number, h, src_stored, sv, false);
         snprintf(ident_name, sizeof(ident_name), "%s;%u", dst_norm, v);
         if (ods5_read_ident(h, &id, &why) && ods5_complete_name(id.name, a, sizeof(a))) {
             char t[ODS5_MAX_LITERAL_NAME + 8];
@@ -5438,10 +5437,11 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     snprintf(ident_name, sizeof(ident_name), "%s;%u", dst_norm, v);
 
     /* HEADER FIRST (review 67, the order proposal; CORPUS 67.3): 1 the header (the new name, revision +1, the date, and on a HARDLINKS volume the link count + 1: one write), 2 the new entry, 3 the old entry
-       out, 4 the link count back (HARDLINKS). A stop after 1 leaves one entry (the old name) and a header that names the new one: entry_is_primary() reads that entry as the file's own, so RENAME and DELETE
-       act on the file; VMS's own DELETE of the header-named entry deletes the FILE and leaves the other dangling, which header-last (entry first) would have exposed to the user's intended action (delete the
-       old name). An alias entry leaves the header alone: only the link count is written. */
-    if ((primary || adopt) && header_names_target) inf.header_current = true;
+       out, 4 the link count back (HARDLINKS). A stop after 1 leaves one entry (the old name) and a header that names the new one. VMS reads that entry as an ALIAS (CORPUS 69): RENAME P Q finishes it through
+       header_names_target (the header is not written again: no revision bump), RENAME P R leaves the header alone, and a DELETE of P removes the entry only and leaves the file allocated in no directory (a
+       leak that ANALYZE/REPAIR recovers). Header last (entry first) would have left a state in which VMS's DELETE of the old name, the user's natural action, deletes the FILE (CORPUS 67.3) and the new entry
+       dangles: header first leaks at worst. An alias entry leaves the header alone: only the link count is written. */
+    if (header_names_target) inf.header_current = true;
     if (((primary || adopt) && !header_names_target) || (hardlinks && !resumed && !header_names_target)) {
         if ((primary || adopt) && !header_names_target) {
             if (!ods2_header_set_name(h, ident_name)) return fail("the new name does not fit the header's name area (no room to move the map): not renamed");
@@ -5846,13 +5846,17 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
             const char *why;
             char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
             /* the file's primary entry: the header names it, or names an entry this directory lacks (a RENAME stopped after its header write: entry_is_primary) */
-            bool primary = entry_is_primary(vol, dir_file_number, dir_header, target_header, name, target_version, target_fid, true);
+            bool primary = entry_is_primary(dir_file_number, target_header, name, target_version, true);
             (void) id; (void) why; (void) a; (void) b;
             r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);
             if (!r.ok) return r;
             links--;
             target_header[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
             target_header[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (links >> 8);
+            if (!primary && info != NULL && ods2_fid_number(target_core->backlink) == dir_file_number) {
+                unsigned left = 0;
+                if (dir_entries_of_file(vol, dir_header, target_fid, &left) && left == 0) info->no_entry_left = true;
+            }
             if (primary) {
                 target_core->backlink.fid_num = 0xFFFF;
                 target_core->backlink.fid_seq = 0;
@@ -5885,12 +5889,14 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
         if (ods5_read_ident(target_header, &id, &why) &&
             ods5_complete_name(id.name, a, sizeof(a)) && ods5_complete_name(name, b, sizeof(b))) {
             /* the version is not compared: a header may carry another one than the entry's */
-            bool primary = entry_is_primary(vol, dir_file_number, dir_header, target_header, name, target_version, target_fid, false);
+            bool primary = entry_is_primary(dir_file_number, target_header, name, target_version, false);
             if (!primary) {
                 r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);
                 if (!r.ok) return r;
                 if (version_out != NULL) *version_out = target_version;
                 if (info != NULL) {
+                    unsigned left = 0;
+                    if (ods2_fid_number(target_core->backlink) == dir_file_number && dir_entries_of_file(vol, dir_header, target_fid, &left) && left == 0) info->no_entry_left = true;
                     info->kept = 1;
                     info->name_differs = ods2_dir_name_compare(a, strlen(a), b, strlen(b)) != 0;
                     snprintf(info->primary_name, sizeof(info->primary_name), "%s", id.name);

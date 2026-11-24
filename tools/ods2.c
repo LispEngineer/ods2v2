@@ -3258,7 +3258,11 @@ static void cmd_type(ods2_volume_t *vol, const ods2_parsed_path_t *p, bool raw, 
    gone). */
 static void report_deletion(const char *name, uint16_t version, const ods2_delete_info_t *info)
 {
-    if (info->kept == 1 && info->name_differs) {
+    if (info->no_entry_left) {
+        /* the first state of a stopped RENAME (CORPUS 69): not "deleted": the entry went, the file did not */
+        printf("%%ODS2-W-FILEKEPT, removed the entry %s;%u only: the file stays allocated in no directory (its header names another entry that is not there: a RENAME that was stopped). "
+               "ANALYZE/DISK_STRUCTURE/REPAIR on VMS puts it in SYSLOST; it is not deleted\n", name, version);
+    } else if (info->kept == 1 && info->name_differs) {
         char shown[ODS2_PATH_MAX];
         display_name(info->primary_name, shown, sizeof(shown));
         printf("%%ODS2-I-ALIASREMOVED, removed %s;%u; the file stays: this entry is an alias, "

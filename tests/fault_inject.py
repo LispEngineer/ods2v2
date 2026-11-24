@@ -590,6 +590,35 @@ def main():
                         prob.append('a warning the stopped state may not have: %s' % _bad_w[0].strip()[:150])
                     if _first_state and name not in HF_NO_WARN_OPS and not any("header name '" in l for l in _w):
                         prob.append('the state after the header write (one entry, the old name; the header names the new one) has no "header name ... differs from its directory entry" warning: the order is not header first')
+                    if _first_state and name not in HF_NO_WARN_OPS:
+                        # CORPUS 69 (V8.4 both levels, VAX V7.3): in this state VMS reads the entry as an ALIAS (the header names the new name, which is not there): DELETE removes the ENTRY only (the file stays
+                        # allocated in no directory: the checker's lost file, nothing else), and RENAME to a third name leaves the header untouched. ods2v2 does the same.
+                        import ext_headers as _eh
+                        _path, _, _ver = _okey.rpartition(';')
+                        _d, _, _nm = _path.rpartition('/')
+                        _spec = '[%s]%s;%s' % (_d.replace('/', '.') if _d else '000000', _nm, _ver)
+                        _third = '[%s]ZZ3.TXT' % (_d.replace('/', '.') if _d else '000000')
+                        _third_key = ((_d + '/') if _d else '') + 'ZZ3.TXT;1'
+                        _hdr0 = _eh.chain(trial, _spec)
+                        _timg = os.path.join(WORK, 'cp69.img')
+                        shutil.copyfile(trial, _timg)
+                        _rc, _out = ods2(_timg, 'DELETE ' + _spec, openv)
+                        _rc2, _files2, _ = tree(_timg, 'cp69')
+                        _errs = [l for l in run(CHECK + [_timg])[1].splitlines() if l.startswith('ERROR')]
+                        if _okey in _files2 or any(k2 not in _files2 for k2 in files if k2 != _okey):
+                            prob.append('DELETE of the old name in the first state (CORPUS 69: VMS removes the entry only) changed more than that entry')
+                        if '%ODS2-I-DELETED' in _out or 'stays allocated in no directory' not in _out:
+                            prob.append('DELETE of the old name in the first state printed a plain deleted, not that the file stays allocated in no directory: %s' % _out.strip()[:120])
+                        if not _errs or any('lost file' not in l and 'back link directory' not in l for l in _errs):          # (a file with no entry anywhere: lost; one with an alias elsewhere: its back link directory has no entry)
+                            prob.append('DELETE of the old name in the first state: the checker should say a lost file (or a back link directory with no entry for it) and nothing else: %s' % (_errs[:2],))
+                        shutil.copyfile(trial, _timg)
+                        _rc, _out = ods2(_timg, 'RENAME %s %s' % (_spec, _third), openv)
+                        _rc2, _files2, _ = tree(_timg, 'cp69')
+                        _hdr1 = _eh.chain(_timg, '[%s]ZZ3.TXT;1' % (_d.replace('/', '.') if _d else '000000'))
+                        if _rc != 0 or '%ODS2-E' in _out or _third_key not in _files2 or _okey in _files2:
+                            prob.append('RENAME of the old name to a third name in the first state failed or did not move the entry: %s' % _out.strip()[:120])
+                        elif not (_hdr0 and _hdr1 and _hdr0[0][1] == _hdr1[0][1]):
+                            prob.append('RENAME of the old name to a third name in the first state wrote the header (VMS: an alias, the header is untouched)')
                 if name in RENAME_PAIRS and mode == 'crash':
                     # the way back (review 65 C6c): the same RENAME again. A target entry that already points at the source's file ID is an interrupted rename: the run FINISHES it (no new
                     # version). Once the old entry is gone (or the rename completed) the source no longer exists: the run is refused and the image is unchanged (for a rename that changes
