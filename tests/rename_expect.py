@@ -13,7 +13,7 @@ Fields:  vols      the volume kinds the case was measured on: '2' ODS-2, '5' ODS
          header    'changed' (name area / revision / date / checksum) or 'same' (not one field of the header changes)
          nametype  the File name type VMS prints before and after (it stays with the name); namelen the File name length before and after (bytes, ';version' included)
          linkcount the File entry linkcount of the file (HARDLINKS volumes); status 'ok' or 'refused'; msgs the substrings of the messages of a refused command
-         link      (alias entry, file) the volume needs: LINK makes the alias entry for the file (SET FILE/ENTER on VMS); and untouched: other versions' headers that must not change; after the header's spec after the rename where it is not the new
+         mpoffset  (before, after) FH2$B_MPOFFSET in words (ODS-5 long names); extra_changed more DUMP fields that change; link      (alias entry, file) the volume needs: LINK makes the alias entry for the file (SET FILE/ENTER on VMS); and untouched: other versions' headers that must not change; after the header's spec after the rename where it is not the new
                    name with ;1; file the header of this file is the one compared (an alias entry's file); pruned the versions the version limit deletes in the same command; untouched_extra more versions the test checks that VMS's dumps do not show (only ;3 is dumped); follows the case whose result volume this one starts from (VMS ran a1, a2, a3 one after the other on one volume); ods2v2_msgs the messages ods2v2 prints where they are not VMS's (a read-only image
                    gives the READONLY refusal every ods2v2 write command gives)."""
 
@@ -21,6 +21,13 @@ Fields:  vols      the volume kinds the case was measured on: '2' ODS-2, '5' ODS
 # a source of version 1, so only cases both readings agree on are here (a1-a3, d1: ;1 is taken, so ;4). The two settling cases (RENAME M.TXT;5 N.TXT; RENAME M.TXT;5 T.TXT with ;1 ;2 ;3 present)
 # are asked of ods5-vms3 (j3, j4); step 4 (wildcards) waits for them. No case here renames a file with extension headers (C2) or a file whose header names no entry (C5).
 # f1 is the case-only rename of review 65 C3: the stored case changes and the name does NOT become a new version (the test lists the directory: abc.txt;1 goes, ABC.txt;1 appears).
+# the long names of CORPUS 67.5 (ASIM5 V8.4): 60 and 140 characters, with ';1' a header name of 62 and 142 bytes
+L60 = 'ABCDEFGHIJ0123456789ABCDEFGHIJ0123456789ABCDEFGHIJ012345.TXT'
+L60B = 'ZYXWVUTSRQ9876543210ZYXWVUTSRQ9876543210ZYXWVUTSRQ987654.TXT'
+L140 = '0123456789ABCDEFGHIJ' * 5 + '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.TXT'
+L140B = 'Q' + '0123456789ABCDEFGHIJ' * 5 + '0123456789ABCDEFGHIJKLMNOPQRSTUVWXY.TXT'
+assert (len(L60), len(L60B), len(L140), len(L140B)) == (60, 60, 140, 140)
+
 CASES = {
     'a1': dict(vols=('2', '5', '5h'), old='[X]A.TXT;1', new='[X]B.TXT', stored=('A.TXT;1', 'B.TXT;1'), dir='[X]', removed=['A.TXT;1'], added=['B.TXT;1'], revision=1, header='changed', status='ok'),
     'a2': dict(vols=('2', '5', '5h'), old='[X]B.TXT;1', new='[X]B.DAT', stored=('B.TXT;1', 'B.DAT;1'), dir='[X]', removed=['B.TXT;1'], added=['B.DAT;1'], revision=1, header='changed', status='ok', follows='a1'),
@@ -86,6 +93,29 @@ CASES = {
                after='[VL]A.TXT;6', pruned=['A.TXT;3']),
     'i7': dict(vols=('2', '5'), old='[VL]E.TXT;1', new='[VL]C.TXT', stored=('E.TXT;1', 'C.TXT;5'), dir='[VL]', removed=['C.TXT;3', 'E.TXT;1'], added=['C.TXT;5'], revision=1, header='changed', status='ok',
                after='[VL]C.TXT;5', pruned=['C.TXT;3']),
+    # --- CORPUS 67.4 (F2): RENAME of one version of a name to another version of the SAME name: nothing is pruned while the count stays within the limit; with a FILE limit below the count the
+    # lowest versions AFTER the rename go (exactly one here). m1 m2: no limit; m3 m4: limit 3 (the files carry it); m5 m6: SET FILE/VERSION_LIMIT=2 set after the three versions exist; m7: another
+    # name onto B7 with the limit 3 (the version rule and the prune together)
+    'm1': dict(vols=('2', '5', '5h'), old='[M]B1.TXT;3', new='[M]B1.TXT;5', stored=('B1.TXT;3', 'B1.TXT;5'), dir='[M]', removed=['B1.TXT;3'], added=['B1.TXT;5'], revision=1, header='changed', status='ok'),
+    'm2': dict(vols=('2', '5', '5h'), old='[M]B2.TXT;1', new='[M]B2.TXT;5', stored=('B2.TXT;1', 'B2.TXT;5'), dir='[M]', removed=['B2.TXT;1'], added=['B2.TXT;5'], revision=1, header='changed', status='ok'),
+    'm3': dict(vols=('2', '5', '5h'), old='[ML]B3.TXT;3', new='[ML]B3.TXT;5', stored=('B3.TXT;3', 'B3.TXT;5'), dir='[ML]', removed=['B3.TXT;3'], added=['B3.TXT;5'], revision=1, header='changed', status='ok'),
+    'm4': dict(vols=('2', '5', '5h'), old='[ML]B4.TXT;1', new='[ML]B4.TXT;5', stored=('B4.TXT;1', 'B4.TXT;5'), dir='[ML]', removed=['B4.TXT;1'], added=['B4.TXT;5'], revision=1, header='changed', status='ok'),
+    'm5': dict(vols=('2', '5', '5h'), old='[M]B5.TXT;3', new='[M]B5.TXT;5', stored=('B5.TXT;3', 'B5.TXT;5'), dir='[M]', removed=['B5.TXT;3', 'B5.TXT;1'], added=['B5.TXT;5'], revision=1, header='changed', status='ok',
+               pruned=['B5.TXT;1']),
+    'm6': dict(vols=('2', '5', '5h'), old='[M]B6.TXT;1', new='[M]B6.TXT;5', stored=('B6.TXT;1', 'B6.TXT;5'), dir='[M]', removed=['B6.TXT;2', 'B6.TXT;1'], added=['B6.TXT;5'], revision=1, header='changed', status='ok',
+               pruned=['B6.TXT;2']),
+    'm7': dict(vols=('2', '5', '5h'), old='[ML]X7.TXT;1', new='[ML]B7.TXT', stored=('X7.TXT;1', 'B7.TXT;4'), dir='[ML]', removed=['B7.TXT;1', 'X7.TXT;1'], added=['B7.TXT;4'], revision=1, header='changed', status='ok',
+               after='[ML]B7.TXT;4', pruned=['B7.TXT;1']),
+    # --- CORPUS 67.5 (F3), ODS-5: a long name renamed short keeps MPOFFSET (the ident area keeps its length, the name field is zero-filled to its end); a short name renamed long grows the ident area
+    # and moves the map UP (MPOFFSET 100 to 109 for 62 bytes, to 149 for 142; ACOFFSET and RSOFFSET stay). The names are not compared with the evidence (matched by name type and length)
+    'n1': dict(vols=('5', '5h'), old='[N]' + L60 + ';1', new='[N]SHORT1.TXT', stored=None, dir='[N]', removed=None, added=None, revision=1, header='changed', status='ok', after='[N]SHORT1.TXT;1',
+               nametype=('ISL-1', 'ODS-2'), namelen=(62, 12), extra_changed=['File name type'], mpoffset=(109, 109)),
+    'n2': dict(vols=('5', '5h'), old='[N]SHORT2.TXT;1', new='[N]' + L60B, stored=None, dir='[N]', removed=None, added=None, revision=1, header='changed', status='ok', after='[N]' + L60B + ';1',
+               nametype=('ODS-2', 'ISL-1'), namelen=(12, 62), extra_changed=['File name type', 'Map area offset'], mpoffset=(100, 109)),
+    'n3': dict(vols=('5', '5h'), old='[N]' + L140 + ';1', new='[N]SHORT3.TXT', stored=None, dir='[N]', removed=None, added=None, revision=1, header='changed', status='ok', after='[N]SHORT3.TXT;1',
+               nametype=('ISL-1', 'ODS-2'), namelen=(142, 12), extra_changed=['File name type'], mpoffset=(149, 149)),
+    'n4': dict(vols=('5', '5h'), old='[N]SHORT4.TXT;1', new='[N]' + L140B, stored=None, dir='[N]', removed=None, added=None, revision=1, header='changed', status='ok', after='[N]' + L140B + ';1',
+               nametype=('ODS-2', 'ISL-1'), namelen=(12, 142), extra_changed=['File name type', 'Map area offset'], mpoffset=(100, 149)),
     # a volume mounted /NOWRITE: refused, nothing changes
     'h3': dict(vols=('2', '5', '5h'), old='[X2]H3.TXT;1', new='[X2]H3B.TXT', stored=('H3.TXT;1', 'H3.TXT;1'), dir='[X2]', removed=[], added=[], revision=0, header='same', status='refused',
                msgs=['RMS-F-RMV', 'WRITLCK'], ods2v2_msgs=['READONLY']),

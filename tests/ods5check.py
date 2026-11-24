@@ -209,10 +209,14 @@ def parse_ident(b, fnd, where):
     if b[4] == 0 and b[5] == 0:  # primary header (seg_num is u16 at 4)
         need = max(120, 76 + namelen)
         need += need % 2
-        if mpo != ido + need and not (control & 0x10):
-            fnd.err('%s: MPOFFSET %d bytes, expected %d for a %d-byte name' % (where, mpo, ido + need, namelen))
+        # The map starts AT OR ABOVE what the name needs (CORPUS 67.5, V8.4: a long name renamed to a short one keeps its MPOFFSET, the ident area keeps its length and the name field is
+        # zero-filled to its end; short to long moves the map UP). Below it, or with anything but zeros in the slack: an error.
+        if mpo < ido + need and not (control & 0x10):
+            fnd.err('%s: MPOFFSET %d bytes, at least %d for a %d-byte name' % (where, mpo, ido + need, namelen))
         if ido + 76 + namelen > mpo:
             fnd.err('%s: FI5 name runs past MPOFFSET' % where)
+        elif any(b[ido + 76 + namelen:mpo]):
+            fnd.err('%s: the ident area of a %d-byte name is not zero after the name (MPOFFSET %d bytes): a RENAME of a longer name must leave nothing of it' % (where, namelen, mpo))
         if d['type'] == 3:
             if namelen % 2:
                 fnd.err('%s: UCS-2 name of odd length' % where)

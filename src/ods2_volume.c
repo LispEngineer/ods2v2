@@ -3687,11 +3687,13 @@ static ods2_result_t next_version(const dir_name_info_t *info, int version_req, 
 
 /* The version the name's version limit removes when version `v` is added: none (*drop_out 0) unless the limit is 1 to 32766 and the count would pass it; exactly ONE goes, the lowest, even
    when the name is over its limit (CORPUS 49.9, 66.1). Refused: a version below all the kept ones (it would go at once). */
-static ods2_result_t version_limit_drop(const dir_name_info_t *info, unsigned v, unsigned *drop_out)
+static ods2_result_t version_limit_drop(const dir_name_info_t *info, unsigned v, unsigned removed, unsigned *drop_out)
 {
+    /* `removed`: the version a RENAME of this name's own version takes out as it puts `v` in (the count does not grow); 0 for COPY and a RENAME of another name (one more version) */
+    unsigned after = info->count + (removed != 0 ? 0 : 1);
     *drop_out = 0;
-    if (info->exists && info->verlimit >= 1 && info->verlimit < ODS2_MAX_VERSION && info->count + 1 > info->verlimit) {
-        unsigned lowest = 0, k;
+    if (info->exists && info->verlimit >= 1 && info->verlimit < ODS2_MAX_VERSION && after > info->verlimit) {
+        unsigned lowest = v, k;
         /* H1 (review 66 F1): the version the limit drops is chosen by NUMBER; on a name stored out of order VMS goes by the stored order (CORPUS 66.4), so a number could be the wrong file: refused,
            even with an explicit version (X stored ;1 ;2 ;3 with limit 3, COPY f X.TXT;5 deleted ;1 silently). The one place for COPY and RENAME (review 67 S2). */
         for (k = 1; k < info->count; k++) {
@@ -3699,8 +3701,10 @@ static ods2_result_t version_limit_drop(const dir_name_info_t *info, unsigned v,
                 return fail("the versions of this name are stored out of order (BAD_VERSORDER) and its version limit would delete one: no new version is made");
             }
         }
-        for (k = 0; k < info->count; k++) if (lowest == 0 || info->versions[k] < lowest) lowest = info->versions[k];
-        if (v < lowest) return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not made");
+        /* exactly ONE goes, the lowest after the change, even when the name is over its limit (CORPUS 49.9, 66.1; 67.4: a rename to another version of the same name prunes the lowest versions
+           after the rename when the file's limit is below the count, and nothing while the count is within it) */
+        for (k = 0; k < info->count; k++) if (info->versions[k] != removed && info->versions[k] < lowest) lowest = info->versions[k];
+        if (lowest == v) return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not made");
         *drop_out = lowest;
     }
     return ok();
@@ -3756,7 +3760,7 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
         }
     }
     /* the version limit of the entry: 0 and 32767 are no limit */
-    r = version_limit_drop(&info, v, drop_out);
+    r = version_limit_drop(&info, v, 0, drop_out);
     if (!r.ok) { free(info.versions); return r; }
     free(info.versions);
     *version_out = v;
@@ -5360,17 +5364,10 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             snprintf(msg, sizeof(msg), "%%RENAME-E-OPENOUT, error opening the target as output; -RMS-E-ENT, ACP enter function failed; -SYSTEM-W-DUPFILENAME, duplicate file name: %s;%u", dst_norm, v);
             return fail(msg);
         }
-        if (same_name) {
-            /* another version of the SAME name: one entry goes out and one comes in, the count does not grow, so a version limit prunes nothing. VMS has not been measured for it (ods5-vms3 is asked):
-               refused while a limit applies, instead of pruning a version the count never called for (review 67 F2) */
-            if (di.exists && di.verlimit >= 1 && di.verlimit < ODS2_MAX_VERSION) {
-                free(di.versions);
-                return fail("a rename to another version of the same name under a version limit is not available (VMS was not measured for it): not renamed");
-            }
-        } else {
-            r = version_limit_drop(&di, v, &drop_version);           /* the one rule of COPY: exactly one version, the lowest, goes (CORPUS 66.1) */
-            if (!r.ok) { free(di.versions); return r; }
-        }
+        /* the limit of the target name: one more version for another name (exactly one goes, the lowest, CORPUS 66.1); for another version of the SAME name the count stays and the file's limit
+           prunes only when it is below the count (CORPUS 67.4, review 67 F2): the lowest version after the rename goes */
+        r = version_limit_drop(&di, v, same_name ? sv : 0, &drop_version);
+        if (!r.ok) { free(di.versions); return r; }
     }
     free(di.versions);
     di.versions = NULL;

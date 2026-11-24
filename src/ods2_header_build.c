@@ -95,12 +95,22 @@ bool ods2_header_set_name(uint8_t *header, const char *ident_name)
 
     if ((core->struclev >> 8) == ODS5_LEVEL_5) {
         uint8_t name[2 * ODS5_MAX_LITERAL_NAME + 4];
-        size_t name_len = 0;
+        size_t name_len = 0, need;
         unsigned name_type = ODS5_NAME_ODS2;
         if (!level5_name(ident_name, name, sizeof(name), &name_len, &name_type) || name_len > 255) return false;
-        /* the ident area must be exactly what a header made for this name has: 120 bytes up to a 44-byte name, 76 + length above it (the map follows it, and ods5check, like VMS-made headers, wants
-           it there): a name that needs another area would have to move the map: refused (review 67 F3: a 60-byte name renamed to a short one left MPOFFSET 238) */
-        if ((ODS5_FI5_FILENAME + name_len > 120 ? ODS5_FI5_FILENAME + name_len : 120) != avail) return false;
+        need = ODS5_FI5_FILENAME + name_len > 120 ? ODS5_FI5_FILENAME + name_len : 120;
+        if (need > avail) {
+            /* a longer name: the ident area grows and the map area moves up with MPOFFSET (CORPUS 67.5, V8.4: MPOFFSET 100 to 109 for a 62-byte name, to 149 for 142 bytes; ACOFFSET and RSOFFSET stay).
+               No room above the map (the ACL, or the end of the header): refused, the header untouched */
+            size_t new_mp = (size_t) core->idoffset + (need + 1) / 2, map_bytes = (size_t) core->map_inuse * 2;
+            size_t limit = core->acoffset != 255 ? (size_t) core->acoffset * 2 : 510;
+            if (core->rsoffset != 255 && (size_t) core->rsoffset * 2 < limit) limit = (size_t) core->rsoffset * 2;
+            if (new_mp * 2 + map_bytes > limit) return false;
+            memmove(header + new_mp * 2, header + (size_t) core->mpoffset * 2, map_bytes);
+            core->mpoffset = (uint8_t) new_mp;
+            avail = (size_t) core->mpoffset * 2 - (size_t) core->idoffset * 2;
+        }
+        /* a shorter name: MPOFFSET stays and the name field is zero-filled to the end of the ident area, nothing of the old name left (CORPUS 67.5) */
         ident[ODS5_FI5_CONTROL] = (uint8_t) ((ident[ODS5_FI5_CONTROL] & ~ODS5_FI5_NAMETYPE_MASK) | name_type);
         ident[ODS5_FI5_NAMELEN] = (uint8_t) name_len;
         memset(ident + ODS5_FI5_FILENAME, 0, avail - ODS5_FI5_FILENAME);

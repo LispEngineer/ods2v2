@@ -104,8 +104,8 @@ def may_differ(h, level):
     return [(ident, ident + 20), (ident + 20, ident + 22), (ident + 30, ident + 38), (ident + 54, ident + 120), (510, 512)]
 
 
-def other_bytes_same(a, b, level, adopt=False):
-    ok = [(x, y) for x, y in may_differ(a, level)] + ([(66, 72)] if adopt else [])
+def other_bytes_same(a, b, level, adopt=False, extra=()):
+    ok = [(x, y) for x, y in may_differ(a, level)] + ([(66, 72)] if adopt else []) + list(extra)
     bad = [i for i in range(512) if a[i] != b[i] and not any(x <= i < y for x, y in ok)]
     return bad
 
@@ -147,7 +147,9 @@ def build(work, level, hl, link, noprimary=False):
         p = os.path.join(work, name)
         open(p, 'w').write(text)
         return p
-    cmds = ['CREATE/DIRECTORY [X]', 'CREATE/DIRECTORY [X2]', 'CREATE/DIRECTORY [Y]', 'CREATE/DIRECTORY [K]', 'CREATE/DIRECTORY [L]', 'CREATE/DIRECTORY [VL]']
+    cmds = ['CREATE/DIRECTORY [X]', 'CREATE/DIRECTORY [X2]', 'CREATE/DIRECTORY [Y]', 'CREATE/DIRECTORY [K]', 'CREATE/DIRECTORY [L]', 'CREATE/DIRECTORY [VL]', 'CREATE/DIRECTORY [M]', 'CREATE/DIRECTORY [ML]']
+    if level == 5:
+        cmds.append('CREATE/DIRECTORY [N]')
     files = [('[X]A.TXT', 'content of A'), ('[X2]M.TXT', 'content of M'), ('[X2]M2.TXT', 'content of M2'),
              ('[X2]T.TXT', 'T version 1'), ('[X2]T.TXT', 'T version 2'), ('[X2]T.TXT', 'T version 3'), ('[X2]FILE.TXT', 'content of FILE'), ('[X2]H3.TXT', 'content of H3'),
              # CORPUS 66 groups K and L
@@ -156,13 +158,20 @@ def build(work, level, hl, link, noprimary=False):
              ('[L]M.TXT;5', 'M v5'), ('[L]T.TXT', 'L T1'), ('[L]T.TXT', 'L T2'), ('[L]T.TXT', 'L T3'), ('[L]U.TXT;5', 'U v5'), ('[L]F5.TXT', 'F5'),
              ('[VL]A.TXT', 'A1'), ('[VL]A.TXT', 'A2'), ('[VL]A.TXT', 'A3'), ('[VL]A.TXT', 'A4'), ('[VL]A.TXT', 'A5'), ('[VL]D.TXT', 'D1'),
              ('[VL]C.TXT', 'C1'), ('[VL]C.TXT', 'C2'), ('[VL]C.TXT', 'C3'), ('[VL]C.TXT', 'C4'), ('[VL]E.TXT', 'E1')]
+    for v in (1, 2, 3):                                       # CORPUS 67.4: three versions each; B5 and B6 get a FILE limit of 2 after the three exist, [ML] names the limit 3
+        files += [('[M]B1.TXT', 'B1 v%d' % v), ('[M]B2.TXT', 'B2 v%d' % v), ('[ML]B3.TXT', 'B3 v%d' % v), ('[ML]B4.TXT', 'B4 v%d' % v), ('[M]B5.TXT', 'B5 v%d' % v), ('[M]B6.TXT', 'B6 v%d' % v),
+                  ('[ML]B7.TXT', 'B7 v%d' % v)]
+    files.append(('[ML]X7.TXT', 'X7 v1'))
+    if level == 5:                                           # CORPUS 67.5: names of 60 and 140 characters, and short ones
+        files += [('[N]' + T.L60, 'long name 60'), ('[N]SHORT2.TXT', 'short name'), ('[N]' + T.L140, 'long name 140'), ('[N]SHORT4.TXT', 'short name')]
     if level == 5:
         files += [('[X2]abc.txt', 'lower case'), ('[X2]sp^_ace.txt', 'a name with a space'), ('[X2]eur^U20ACo.txt', 'a name with a euro sign')]
     for i, (dst, text) in enumerate(files):
         cmds.append('COPY %s %s' % (put('f%d.txt' % i, text + '\n'), dst))
     # the lowest versions go, the limit is the entry's own (66.1): K L.TXT ;1-3 limit 3 (as VMS), VL A.TXT ;3-5 limit 3, VL C.TXT ;3-4 limit 2
     cmds += ['DELETE [K]T.TXT;2', 'DELETE [VL]A.TXT;1', 'DELETE [VL]A.TXT;2', 'DELETE [VL]C.TXT;1', 'DELETE [VL]C.TXT;2',
-             'SET FILE/VERSION_LIMIT=3 [K]L.TXT;3', 'SET FILE/VERSION_LIMIT=3 [VL]A.TXT;5', 'SET FILE/VERSION_LIMIT=2 [VL]C.TXT;4']
+             'SET FILE/VERSION_LIMIT=3 [K]L.TXT;3', 'SET FILE/VERSION_LIMIT=3 [VL]A.TXT;5', 'SET FILE/VERSION_LIMIT=2 [VL]C.TXT;4',
+             'SET FILE/VERSION_LIMIT=2 [M]B5.TXT', 'SET FILE/VERSION_LIMIT=2 [M]B6.TXT', 'SET FILE/VERSION_LIMIT=3 [ML]B3.TXT', 'SET FILE/VERSION_LIMIT=3 [ML]B4.TXT', 'SET FILE/VERSION_LIMIT=3 [ML]B7.TXT']
     if link:
         cmds.append('LINK %s %s' % link)
     for c in cmds:
@@ -227,8 +236,23 @@ def run_case(cid, t, kind, level, hl, kname, base, work, start=None):
         if t['stored'] and PLAIN.match(t['stored'][1]):
             check('%s: the stored name is %s' % (tag, t['stored'][1]), t['stored'][1], fa['name'])
         check('%s: revision number +%d' % (tag, t['revision']), fb['revision'] + t['revision'], fa['revision'])
+        extra = []
+        if t.get('nametype') and t['nametype'][0] != t['nametype'][1]:
+            extra.append((before[0] * 2, before[0] * 2 + 1))                     # the name type is in the control byte
+        if t.get('mpoffset'):
+            extra.append((1, 2))                                                  # MPOFFSET
+            if t['mpoffset'][1] > t['mpoffset'][0]:
+                extra.append((before[0] * 2, t['mpoffset'][1] * 2 + before[58] * 2))   # the ident area grows over the old map; the map moves up
         check('%s: no byte outside name, revision, the date field and the checksum changed%s' % (tag, ' (and the back link, which is set)' if t.get('backlink') == 'adopted' else ''), [],
-              other_bytes_same(before, after, level, t.get('backlink') == 'adopted'))
+              other_bytes_same(before, after, level, t.get('backlink') == 'adopted', extra))
+        if t.get('mpoffset'):
+            mp0, mp1 = t['mpoffset']
+            mb = before[58] * 2
+            ident = before[0] * 2
+            check('%s: MPOFFSET goes %d to %d words (a longer name moves the map up, a shorter one leaves it: CORPUS 67.5)' % (tag, mp0, mp1), (mp0, mp1), (before[1], after[1]))
+            check('%s: the map area (%d bytes) is intact, at its new place' % (tag, mb), bytes(before[mp0 * 2:mp0 * 2 + mb]), bytes(after[mp1 * 2:mp1 * 2 + mb]))
+            nl = fa['namelen']
+            check('%s: nothing is left after the name in the ident area (%d bytes of slack, all zero)' % (tag, mp1 * 2 - ident - 76 - nl), True, not any(after[ident + 76 + nl:mp1 * 2]))
         if t.get('backlink') == 'adopted':
             check('%s: the header named no entry (back link 0); its back link is now the directory of the renamed entry' % tag, (bytes(6), E.D.fnum(img, '[000000]L.DIR')), (bytes(before[66:72]), struct.unpack_from('<H', after, 66)[0]))
         check('%s: the header checksum is right' % tag, True, cksum_ok(after))
@@ -360,21 +384,31 @@ def review67_cases(work, level):
     case('F1', 'RENAME [D]A.TXT [D]SUB.DIR', 'a directory of this name exists')
     case('F1', 'RENAME [000000]M.TXT [000000]INDEXF.SYS', 'reserved')
     case('F1', 'RENAME [000000]M.TXT [000000]BITMAP.SYS', 'reserved')
-    # F2: B ;1 ;2 ;3 with the limit 3: a rename to another version of B changes no count: nothing to prune, and the case is not measured on VMS: refused
-    case('F2', 'RENAME [D]B.TXT;1 [D]B.TXT;5', 'version limit')
-    case('F2', 'RENAME [D]B.TXT;3 [D]B.TXT;5', 'version limit')
-    shutil.copyfile(base, img)
-    ods2(img, 'SET FILE/VERSION_LIMIT=32767 [D]B.TXT')
-    rc, out = ods2(img, 'RENAME [D]B.TXT;1 [D]B.TXT;5')
-    check('%s: the same rename with no version limit (32767) works: B.TXT ;5 ;3 ;2' % kind, ['B.TXT;5', 'B.TXT;3', 'B.TXT;2'], sorted((x for x in listing(img, '[D]') if x.startswith('B.TXT')), key=lambda x: -int(x.split(';')[1])))
-    # F3: ODS-5: a name that needs another ident area than the header has is refused, in both directions
+    # F2 is measured now (CORPUS 67.4: the m cases of the table): another version of the same name prunes nothing while the count is within the limit, and the lowest after the rename when
+    # the file's limit is below the count. F3 is measured (67.5: the n cases): a longer name moves the map up, a shorter one leaves MPOFFSET and zero-fills the ident area.
+    # An ODS-5 name of an ODD number of bytes over 44 (the area is rounded up to an even size, review 67 recheck): same length, case only, one byte longer, two bytes longer
     if level == 5:
-        long60 = 'L' * 60 + '.TXT'
-        case('F3', 'RENAME [D]%s [D]S.TXT' % long60, 'map would have to move')
-        case('F3', 'RENAME [D]Q.TXT [D]%s' % ('M' * 60 + '.TXT'), 'does not fit')
+        odd = 'O' * 43 + '.TXT'                    # 47 characters, 49 bytes with ;1: an area of 126
         shutil.copyfile(base, img)
-        rc, out = ods2(img, 'RENAME [D]%s [D]%s' % (long60, 'K' * 60 + '.TXT'))
-        check('%s: a long name renamed to another of the same length (the same ident area) works and the checker is clean' % kind, (0, [], True), (rc, checker_errors(img), 'K' * 60 + '.TXT;1' in listing(img, '[D]')))
+        assert ods2(img, 'COPY %s [D]%s' % (src, odd))[0] == 0
+        for nm_new, what in (('P' * 43 + '.TXT', 'the same length'), ('o' * 43 + '.txt', 'the case only (in place)'), ('P' * 44 + '.TXT', 'one byte longer (the area is 126 already)'),
+                             ('P' * 45 + '.TXT', 'two bytes longer (the map moves up by one word)')):
+            shutil.copyfile(base, img)
+            ods2(img, 'COPY %s [D]%s' % (src, odd))
+            h0 = hdr(img, '[D]%s;1' % odd)
+            rc, out = ods2(img, 'RENAME [D]%s [D]%s' % (odd, nm_new))
+            h1 = hdr(img, '[D]%s;1' % nm_new)
+            check('%s: a name of an odd number of bytes over 44 renamed to %s works, MPOFFSET %s and the checker is clean' % (kind, what, '%d to %d' % (h0[1], h1[1]) if h1 is not None else '?'),
+                  (0, [], True), (rc, checker_errors(img), h1 is not None and h1[1] >= h0[1] and h1[1] * 2 >= h1[0] * 2 + 76 + fields(h1, 5)['namelen']))
+        # no room to move the map: a file whose primary header's map is full (tests/setfile_ext_check.py's volume): refused, the image unchanged
+        import setfile_ext_check
+        ework = os.path.join(work, 'e67')
+        os.makedirs(ework, exist_ok=True)
+        eimg = setfile_ext_check.build(5, ework)
+        h0 = sha(eimg)
+        rc, out = ods2(eimg, 'RENAME [F]A.DAT [F]%s' % ('Z' * 60 + '.DAT'))
+        check('%s: a rename to a name that needs the map to move, with no room above it (the primary header\'s map is full), is refused and the image is unchanged' % kind, (True, h0), ('map' in out and '%ODS2-E' in out, sha(eimg)))
+    # H1 (review 66 F1) in the one function for COPY and RENAME: see tests/versorder_check.py
     # S3: a target entry that already names the file (a LINK, not an interrupted RENAME): said as it is
     shutil.copyfile(base, img)
     rc, out = ods2(img, 'RENAME [D]AL0.TXT [D]AL.TXT')
