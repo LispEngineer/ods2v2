@@ -193,11 +193,18 @@ typedef struct {
     bool adopted;              /* the header named no entry: its back link was set */
     unsigned pruned_version;   /* the version the version limit removed, or 0 */
     bool moved;                /* the new entry is in another directory (step 2) */
+    bool is_dir;               /* the file renamed is a directory (step 3) */
+    unsigned deepest_names;    /* a directory moved: the number of names in the path of the deepest directory below it now (an ODS-2 path of more than 8 names cannot be opened by OpenVMS VAX) */
 } ods2_rename_info_t;
 /* The name `name` of directory `dir_file_number` as the directory STORES it (on an ODS-5 volume the first stored spelling: lower.txt stays lower.txt however it was typed), for a command that fills in what a
    new name leaves out (RENAME [Y]N takes the type of the source: review 69 recheck R2). Fails when the directory has no such name. `out` holds at least ODS5_MAX_LITERAL_NAME + 8 bytes. */
 ods2_result_t ods2_stored_name(ods2_volume_t *vol, unsigned dir_file_number, const char *name, char *out, size_t out_n);
 
+/* ods2_rename() for a command that has resolved the new directory by names: `via` lists the whole file IDs of the directories that path passed through (the master directory not counted; the target itself
+   last). A DIRECTORY is not moved under itself: the typed path (`via`), the back-link chain of the target and the directories below the source are all compared with the source's whole file ID
+   (review 65 C4 and 71 C1): -RMS-E-IDR, nothing written. NULL/0: the path is not known (the other two checks still run). */
+ods2_result_t ods2_rename_ex(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
+                             unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia, ods2_rename_info_t *info);
 ods2_result_t ods2_rename(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
                           unsigned dst_dir_number, const char *dst_name, int dst_version, ods2_rename_info_t *info);
 /* Are the versions of `name` stored newest first (descending), across all the records of the name? *in_order_out is false when two neighbouring entries of the name

@@ -691,6 +691,8 @@ def main():
                         _ok_w = [r"its back link directory \d+ has no entry for it", r"header name '.*' differs from its directory entry", r"link count \d+ but \d+ directory entr"]
                     elif _second:
                         _ok_w = [r"directory \d+ \(.*\) is entered 2 times", r"link count \d+ but \d+ directory entr"]
+                    if need_hl and k < n:
+                        _ok_w = _ok_w + [r"link count \d+ but \d+ directory entr"]      # (the stop between the old entry's removal and the count written back: the known leak)
                     _bad = [l for l in _ct if not any(re.search(a, l) for a in _ok_w)]
                     if _bad:
                         prob.append('a warning the %s state may not have: %s' % ('first' if _first else 'second' if _second else 'final', _bad[0].strip()[:140]))

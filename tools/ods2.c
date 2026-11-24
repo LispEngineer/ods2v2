@@ -2710,7 +2710,36 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
         }
     }
     memset(&info, 0, sizeof(info));
-    r = ods2_rename(vol, ods2_fid_number(sfid), sname, sp->has_version ? sp->version : 0, ods2_fid_number(dfid), dname, dp->has_version ? dp->version : 0, &info);
+    {
+        /* the directories the typed target path passes through, by whole file ID (a directory is not moved under itself by a path that goes through a second entry of it: review 71 C1) */
+        ods2_fid_t *via = NULL;
+        unsigned nvia = 0;
+        if (dp->had_brackets && ddir_path[0] != '\0') {
+            char pre[ODS2_PATH_MAX];
+            const char *dot = ddir_path;
+            size_t cap = 0;
+            for (;;) {
+                const char *nx = ods5_find_unescaped(dot, '.');
+                size_t len = nx != NULL ? (size_t) (nx - ddir_path) : strlen(ddir_path);
+                ods2_fid_t f;
+                memcpy(pre, ddir_path, len);
+                pre[len] = '\0';
+                if (ods2_lookup_path(vol, pre, &f).ok) {
+                    if (nvia == cap) {
+                        ods2_fid_t *nv = realloc(via, (cap ? cap * 2 : 16) * sizeof(*nv));
+                        if (nv == NULL) break;
+                        via = nv;
+                        cap = cap ? cap * 2 : 16;
+                    }
+                    via[nvia++] = f;
+                }
+                if (nx == NULL) break;
+                dot = nx + 1;
+            }
+        }
+        r = ods2_rename_ex(vol, ods2_fid_number(sfid), sname, sp->has_version ? sp->version : 0, ods2_fid_number(dfid), dname, dp->has_version ? dp->version : 0, via, nvia, &info);
+        free(via);
+    }
     snprintf(what, sizeof(what), "%s", src_arg);
     if (!r.ok) {
         report_error("%%ODS2-E-RENAME, %s: %s\n", what, r.problem);
@@ -2728,6 +2757,10 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
                    (info.header_changed || info.header_current) ? "" : " (an alias entry: the file's header is not changed)");
         }
         if (info.pruned_version != 0) printf("%%ODS2-I-DELETED, deleted %s;%u (the version limit)\n", shown, info.pruned_version);
+        if (info.is_dir && !vol->ods5 && info.deepest_names > ODS2_VAX_V73_MAX_LEVELS) {
+            fprintf(stderr, "%%ODS2-W-DEEPDIR, the directory is now %u names deep below [000000]: OpenVMS VAX V7.3 cannot open a path of more than %u names on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and later can\n",
+                    info.deepest_names, ODS2_VAX_V73_MAX_LEVELS);
+        }
     }
 }
 
