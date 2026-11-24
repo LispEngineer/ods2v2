@@ -804,7 +804,8 @@ def main():
         elif bl not in entries:
             fnd.err('file %d: back link %d is not a directory' % (n, bl))
         elif n not in dir_of_primary:
-            fnd.err('file %d (%s): its back link directory %d has no entry for it' % (n, d['name'] if d else '?', bl))
+            # a WARNING, as VMS's ANALYZE rates it (CORPUS 70: %ANALDISK-W-BACKLINK naming the source entry; V8.4 both levels and the VAX): the first stopped state of a RENAME into another directory
+            fnd.warn('file %d (%s): its back link directory %d has no entry for it (a RENAME into another directory that was stopped after its header write; VMS ANALYZE: W-BACKLINK)' % (n, d['name'] if d else '?', bl))
         else:
             # the header's name equals the entry's name (case-blind) of the primary link
             hn = d['name']

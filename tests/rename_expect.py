@@ -65,6 +65,14 @@ CASES = {
     'l3': dict(vols=('2', '5', '5h'), old='[L]F5_AL.TXT;1', new='[L]F5_AL2.TXT', stored=('F5.TXT;1', 'F5_AL2.TXT;1'), dir='[L]', removed=['F5_AL.TXT;1'], added=['F5_AL2.TXT;1'], revision=1,
                header='changed', status='ok', extra_changed=['Back link file identification'], backlink='adopted', link=('[L]F5_AL.TXT', '[L]F5.TXT'), noprimary=True, file='[L]F5_AL.TXT;1',
                after='[L]F5_AL2.TXT;1'),
+    # --- CORPUS 65.1 b1 b2 (a file into ANOTHER directory) and CORPUS 66.2 k2 (an alias moved): dir2 is the directory the entry goes to; backlink='moved': the header's back link becomes dir2's file ID
+    # (the directories' own headers are not touched); the name changes only in b2 ---
+    'b1': dict(vols=('2', '5', '5h'), old='[X]C.TXT;1', new='[Y]', stored=('C.TXT;1', 'C.TXT;1'), dir='[X]', dir2='[Y]', removed=['C.TXT;1'], added=['C.TXT;1'], revision=1, header='changed', status='ok',
+               extra_changed=['Back link file identification'], backlink='moved', after='[Y]C.TXT;1'),
+    'b2': dict(vols=('2', '5', '5h'), old='[X]C2.TXT;1', new='[Y]C3.TXT', stored=('C2.TXT;1', 'C3.TXT;1'), dir='[X]', dir2='[Y]', removed=['C2.TXT;1'], added=['C3.TXT;1'], revision=1, header='changed', status='ok',
+               extra_changed=['Back link file identification'], backlink='moved', after='[Y]C3.TXT;1'),
+    'k2': dict(vols=('2', '5', '5h'), old='[K]P2_AL.TXT;1', new='[Y]', stored=('P2.TXT;1', 'P2.TXT;1'), dir='[K]', dir2='[Y]', removed=['P2_AL.TXT;1'], added=['P2_AL.TXT;1'], revision=0, header='same',
+               status='ok', link=('[K]P2_AL.TXT', '[K]P2.TXT'), file='[K]P2.TXT;1', after='[Y]P2_AL.TXT;1'),
     # an alias renamed in the directory of its primary entry: the header is not touched at all
     'k1': dict(vols=('2', '5', '5h'), old='[K]P1_AL.TXT;1', new='[K]P1_AL2.TXT', stored=('P1.TXT;1', 'P1.TXT;1'), dir='[K]', removed=['P1_AL.TXT;1'], added=['P1_AL2.TXT;1'], revision=0, header='same',
                status='ok', link=('[K]P1_AL.TXT', '[K]P1.TXT'), file='[K]P1.TXT;1'),

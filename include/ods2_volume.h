@@ -180,9 +180,9 @@ ods2_result_t ods2_lookup_name_version(ods2_volume_t *vol, const uint8_t *dir_he
    case (ODS-5): the record's name bytes are replaced in place (info->case_only). A target entry that already names the source's file is an interrupted rename: it is finished, not
    repeated (info->resumed). The header: name, revision +1, the level's date (ODS-2 revision date; ODS-5 attribute change date) when the entry is the file's primary one or the header names
    no entry (back link 0: adopted, name and back link set); an alias entry leaves the header alone; the extension headers are never touched (CORPUS 66.2). The version limit of the target name
-   removes the lowest version as COPY does (CORPUS 66.1). Order of the writes: link count + 1 (HARDLINKS), the new entry, the header, the old entry removed, link count - 1: two names for
-   a moment, never none. Refused, the volume unchanged: a directory (step 3), a reserved file, an entry that is an alias of a directory... Step 1 handles ONE directory: dst_dir_number must be
-   src_dir_number. */
+   removes the lowest version as COPY does (CORPUS 66.1). Order of the writes (HEADER FIRST): the header (name, back link, revision, date; link count + 1 on HARDLINKS), the new entry, the old entry removed, link count - 1: one name or two at every
+   stop, never none; the header's back link names the target directory from the first write on (CORPUS 68.3, 69). Refused, the volume unchanged: a directory (step 3), a reserved file, an entry that is an alias of a directory... dst_dir_number may be another directory of the volume (step 2; info->moved): the
+   entry goes there, the header's back link with it; an alias entry (the header names another directory or name) moves with the header untouched. */
 typedef struct {
     uint16_t version;          /* the version the file has now */
     bool same;                 /* the target is the source: nothing changed */
@@ -192,6 +192,7 @@ typedef struct {
     bool header_current;       /* the file's header already named the new name (the first write of a RENAME that was stopped): not written again */
     bool adopted;              /* the header named no entry: its back link was set */
     unsigned pruned_version;   /* the version the version limit removed, or 0 */
+    bool moved;                /* the new entry is in another directory (step 2) */
 } ods2_rename_info_t;
 ods2_result_t ods2_rename(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
                           unsigned dst_dir_number, const char *dst_name, int dst_version, ods2_rename_info_t *info);
@@ -664,7 +665,7 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
 typedef struct {
     int      kept;
     bool     link_removed;    /* a HARDLINKS volume: one link of a file with others was removed, the file stays */
-    bool     no_entry_left;   /* the entry removed was the file's only one in its header's back link directory and is not the one the header names (a RENAME stopped after its header write, CORPUS 69): the file stays allocated in NO directory (VMS: ANALYZE says LOSTHEADER, /REPAIR puts it in SYSLOST) */
+    bool     no_entry_left;   /* the entry removed was not the one the header names, and the directory the header's back link names has no entry for the file now (a RENAME stopped after its header write, CORPUS 69): the file stays allocated in NO directory (VMS: ANALYZE says LOSTHEADER, /REPAIR puts it in SYSLOST) */
     bool     name_differs;
     char     primary_name[ODS5_MAX_LITERAL_NAME + 8];
     uint16_t primary_version;
