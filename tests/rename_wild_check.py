@@ -136,7 +136,7 @@ def cases(work, kind, level, hl):
         ('a wildcard in the new directory', 'RENAME [W]P*.TXT [*]', 'WILDDIR'),
         ('an ellipsis in the new directory', 'RENAME [W]P*.TXT [Y...]*.TXT', 'WILDDIR'),
         ('an ellipsis in the old directory', 'RENAME [W...]P*.TXT [Y]', 'WILDDIR'),
-        ('many sources, one target name', 'RENAME [W]P*.TXT [W]Z.DAT', 'would both become'),
+        ('many sources, one target name', 'RENAME [W]P*.TXT [W]Z.DAT', 'would all become'),
         ('the target is in the match set', 'RENAME [W]A.* [W]*.BAK', 'also renames'),
         (';* source, a destination version number', 'RENAME [W]Q.TXT;* [W]*.OLD;5', 'not measured'),
         ('a destination ;* with a one-version selector', 'RENAME [W]P*.TXT [W]*.OLD;*', 'not measured'),
@@ -153,6 +153,38 @@ def cases(work, kind, level, hl):
     h1 = sha(im)
     rc, out = R.ods2(im, 'RENAME [W]Q.TXT;* [W]*.OLD')
     check('%s ;* onto a destination name that exists: refused, exit 1, nothing written, the message names the one-version commands to finish it' % kind, (1, h1, True, True), (rc, sha(im), 'one version at a time' in out, 'RENAME [W]Q.TXT;3 [W]Q.OLD;3' in out))
+    # review 76 S1: an explicit new version on the file's own name is renamed, as the single-file command does (CORPUS 67.4), not reported as "already named"
+    im = fresh(base, work, 's1w')
+    imw = im
+    rc, out = R.ods2(imw, 'RENAME [W]P*.TXT;1 [W]*.TXT;5')
+    ims = fresh(base, work, 's1s')
+    for i in (1, 2, 3):
+        R.ods2(ims, 'RENAME [W]P%d.TXT;1 [W]P%d.TXT;5' % (i, i))
+    check('%s S1: RENAME [W]P*.TXT;1 [W]*.TXT;5 renames the versions (no "already named"), exit 0, the three single commands give the same directory' % kind,
+          (0, False, [e for e in entries(ims) if e.startswith('P')]), (rc, 'already named' in out, [e for e in entries(imw) if e.startswith('P')]))
+    check('%s S1: ... and the same headers (name and revision) file by file' % kind, [(R.fields(R.hdr(ims, '[W]P%d.TXT;5' % i), level)['name'], R.fields(R.hdr(ims, '[W]P%d.TXT;5' % i), level)['revision']) for i in (1, 2, 3)],
+          [(R.fields(R.hdr(imw, '[W]P%d.TXT;5' % i), level)['name'], R.fields(R.hdr(imw, '[W]P%d.TXT;5' % i), level)['revision']) for i in (1, 2, 3)] if R.hdr(imw, '[W]P1.TXT;5') is not None else None)
+    # review 76 N1: only directories match, nothing is renamed: exit 1 and a "no files renamed" line, the image unchanged
+    im, rc, out = run('n1', 'RENAME [W]SUB*.* [Y]')
+    check('%s N1: only directories match: SKIPDIR lines, "no files renamed", exit 1, the image unchanged' % kind, (1, True, True, sha(base)), (rc, 'SKIPDIR' in out, 'no files renamed' in out, sha(im)))
+    # review 76 S2: many files to one name: one line for the target name, not one for every pair
+    mw = os.path.join(work, 'many_%d%s.img' % (level, 'h' if hl else ''))
+    rc0, out0 = R.run([INIT, mw, '8192', '--structure=%d' % level, '--label=RMANY'] + (['--hardlinks'] if hl else []))
+    assert rc0 == 0, out0
+    assert R.ods2(mw, 'CREATE/DIRECTORY [M]')[0] == 0
+    hp = os.path.join(work, 'many.txt')
+    open(hp, 'w').write('many\n')
+    for i in range(1, 31):
+        assert R.ods2(mw, 'COPY %s [M]F%02d.TXT' % (hp, i))[0] == 0
+    h0 = sha(mw)
+    rc, out = R.ods2(mw, 'RENAME [M]F*.TXT [M]Z.DAT')
+    lines = [l for l in out.splitlines() if 'would both become' in l or 'would all become' in l]
+    check('%s S2: 30 files to one name: refused, the image unchanged, ONE line for the target name (not 435), it names two sources and the count of the others' % kind, (1, h0, 1, True),
+          (rc, sha(mw), len(lines), bool(lines) and 'and 28 more' in lines[0]))
+    # review 76 N3: on ODS-2 the reported new name is the stored (upper case) one
+    if level == 2:
+        im, rc, out = run('n3', 'RENAME [W]p*.txt [Y]*.old')
+        check('%s N3: ODS-2: the reported new name is upper case (P1.OLD;1), as stored' % kind, (0, True, False), (rc, 'P1.OLD;1' in out, 'P1.old' in out))
     # a failure in the middle: P2.OLD;1 exists, the destination asks for ;1: P1 and P3 are renamed, P2 is refused, exit 1, the TOTAL line says so
     im = fresh(base, work, 'mid')
     assert R.ods2(im, 'RENAME [W]S.DAT [W]P2.OLD')[0] == 0
@@ -201,7 +233,7 @@ def cases(work, kind, level, hl):
         rc, out = R.ods2(im, 'RENAME [W]S.* [W]*.BAK')
         ents = entries(im)
         check('%s C3: an alias entry of the same file under the target name is not a collision: the run is not refused as a whole, S.DAT is finished into S.BAK (one entry left)' % kind,
-              (0, True, False, False), (rc, 'S.BAK;1' in ents, 'S.DAT;1' in ents, 'would both become' in out or 'also renames' in out))
+              (0, True, False, False), (rc, 'S.BAK;1' in ents, 'S.DAT;1' in ents, 'would both become' in out or 'would all become' in out or 'also renames' in out))
     fault_wild(work, kind, level, hl)
     print('%s: %d passes, %d fails so far' % (kind, passes, fails))
 
