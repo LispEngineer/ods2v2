@@ -897,6 +897,26 @@ def review69b_cases(work, level, hl):
         check('%s review 70 recheck %s: refused (the file may be lost otherwise), the image is unchanged' % (kind, tag), (True, h5), ('another entry of this same file' in out2 and '%ODS2-I-RENAMED' not in out2, sha(im2)))
         im3 = fresh()
         return im3
+    if hl:
+        # T1 (review 70 second recheck): the direction that lost the file under the narrowed rule: the PRIMARY entry is renamed onto the name of its own alias (LINK [Y]C.TXT [X]A.TXT, the limit 1 on
+        # [Y]C.TXT) while the header's link count is 1 or 0 with two entries
+        for cnt in (1, 0):
+            im4 = fresh()
+            for c in ('LINK [Y]C.TXT [X]A.TXT', 'SET FILE/VERSION_LIMIT=1 [Y]C.TXT'):
+                assert ods2(im4, c)[0] == 0, c
+            v4 = O.Vol(im4)
+            with open(im4, 'r+b') as f:
+                lbn = E.D.lbn(v4, E.D.fnum(im4, '[X]A.TXT'))
+                f.seek(lbn * 512)
+                hb = bytearray(f.read(512))
+                struct.pack_into('<H', hb, 74, cnt)
+                struct.pack_into('<H', hb, 510, sum(struct.unpack_from('<255H', hb, 0)) & 0xffff)
+                f.seek(lbn * 512)
+                f.write(bytes(hb))
+            h6 = sha(im4)
+            rc4, out4 = ods2(im4, 'RENAME [X]A.TXT [Y]C.TXT;5')
+            check('%s T1 the primary [X]A.TXT onto its alias [Y]C.TXT;5 (limit 1), link count %d with two entries: refused, the image is unchanged, the file reads' % (kind, cnt), (True, h6, True),
+                  ('another entry of this same file' in out4 and '%ODS2-I-RENAMED' not in out4, sha(im4), 'content of the file' in ods2(im4, 'TYPE [X]A.TXT;1')[1]))
     if level == 5:
         patched('G2 a header that is not level 5 (its name cannot be read)', lambda hb: struct.pack_into('<H', hb, 6, 0x0201))
         if not hl:      # (a level-5 header with a link count of 2 on a HARDLINKS volume is the exemption: the prune only lowers the count)
