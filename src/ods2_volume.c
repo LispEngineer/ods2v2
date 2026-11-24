@@ -3687,11 +3687,18 @@ static ods2_result_t next_version(const dir_name_info_t *info, int version_req, 
 
 /* The version the name's version limit removes when version `v` is added: none (*drop_out 0) unless the limit is 1 to 32766 and the count would pass it; exactly ONE goes, the lowest, even
    when the name is over its limit (CORPUS 49.9, 66.1). Refused: a version below all the kept ones (it would go at once). */
-static ods2_result_t version_limit_drop(const dir_name_info_t *info, unsigned v, unsigned removed, unsigned *drop_out)
+static ods2_result_t version_limit_drop(const dir_name_info_t *info, unsigned v, bool has_removed, unsigned removed, unsigned *drop_out)
 {
     /* `removed`: the version a RENAME of this name's own version takes out as it puts `v` in (the count does not grow); 0 for COPY and a RENAME of another name (one more version) */
-    unsigned after = info->count + (removed != 0 ? 0 : 1);
+    unsigned after = info->count + (has_removed ? 0 : 1);
+    unsigned a, b;
     *drop_out = 0;
+    /* a name with a version number that is not usable (0, over 32767, or two alike: a damaged directory) is not pruned: the lowest number is not a version VMS would call lowest (review 67 R1: E.TXT stored
+       ;2 ;1 ;0 with the limit 2 lost ;1 to a COPY, because 0 stood for "nothing removed") */
+    for (a = 0; a < info->count; a++) {
+        if (info->versions[a] == 0 || info->versions[a] > ODS2_MAX_VERSION) return ok();
+        for (b = 0; b < a; b++) if (info->versions[b] == info->versions[a]) return ok();
+    }
     if (info->exists && info->verlimit >= 1 && info->verlimit < ODS2_MAX_VERSION && after > info->verlimit) {
         unsigned lowest = v, k;
         /* H1 (review 66 F1): the version the limit drops is chosen by NUMBER; on a name stored out of order VMS goes by the stored order (CORPUS 66.4), so a number could be the wrong file: refused,
@@ -3703,7 +3710,7 @@ static ods2_result_t version_limit_drop(const dir_name_info_t *info, unsigned v,
         }
         /* exactly ONE goes, the lowest after the change, even when the name is over its limit (CORPUS 49.9, 66.1; 67.4: a rename to another version of the same name prunes the lowest versions
            after the rename when the file's limit is below the count, and nothing while the count is within it) */
-        for (k = 0; k < info->count; k++) if (info->versions[k] != removed && info->versions[k] < lowest) lowest = info->versions[k];
+        for (k = 0; k < info->count; k++) if (!(has_removed && info->versions[k] == removed) && info->versions[k] < lowest) lowest = info->versions[k];
         if (lowest == v) return fail("the version limit of the name would delete this version at once (it is below all the versions kept): not made");
         *drop_out = lowest;
     }
@@ -3760,7 +3767,7 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
         }
     }
     /* the version limit of the entry: 0 and 32767 are no limit */
-    r = version_limit_drop(&info, v, 0, drop_out);
+    r = version_limit_drop(&info, v, false, 0, drop_out);
     if (!r.ok) { free(info.versions); return r; }
     free(info.versions);
     *version_out = v;
@@ -5147,6 +5154,25 @@ static bool fid_equal(ods2_fid_t a, ods2_fid_t b)
     return a.fid_num == b.fid_num && a.fid_seq == b.fid_seq && a.fid_rvn == b.fid_rvn && a.fid_nmx == b.fid_nmx;
 }
 
+/* Is the entry (name;version) of directory `dir_number` the file's PRIMARY entry? The header's back link is this directory and either the header names this entry, or the header names an entry that
+   this directory does not have for this file: a RENAME stopped after its header write (header first: the header already names the new name and the new entry is not there yet) leaves exactly that, and the
+   one entry the directory has is then the file's own. An entry whose header names another entry that IS there (this file's) is an alias. `with_version`: the header's version must be the entry's too. */
+static bool entry_is_primary(ods2_volume_t *vol, unsigned dir_number, const uint8_t *dir_header, const uint8_t *header, const char *name, unsigned version, ods2_fid_t fid, bool with_version)
+{
+    const ods2_head_core_t *core = (const ods2_head_core_t *) header;
+    ods5_ident_t id;
+    const char *why;
+    char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
+    ods2_fid_t f;
+    uint16_t fv;
+    if (ods2_fid_number(core->backlink) != dir_number) return false;
+    if (!ods5_read_ident(header, &id, &why) || !ods5_complete_name(id.name, a, sizeof(a)) || !ods5_complete_name(name, b, sizeof(b))) return false;
+    if (ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0 && (!with_version || id.version == version)) return true;
+    /* the header names another entry: is it there, and is it this file's? */
+    if (ods2_lookup_name_version(vol, dir_header, id.name, (int) id.version, &f, &fv).ok && fid_equal(f, fid)) return false;
+    return true;
+}
+
 /* the header's checksum, then the write (INDEXF.SYS's own header goes through its own writer) */
 static ods2_result_t rename_write_header(ods2_volume_t *vol, unsigned number, ods2_fid_t fid, uint8_t *h)
 {
@@ -5270,12 +5296,30 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             if (out != NULL) *out = inf;
             return ok();
         }
-        /* only the case differs (ODS-5): the record's name bytes are replaced in place, then the header */
+        /* only the case differs (ODS-5): HEADER FIRST when this is the file's primary entry (the new spelling, revision +1, the date), then the record's name bytes replaced in place (one block write) */
+        if (!vol->ods5) return fail("a rename that changes only the case is an ODS-5 matter (an ODS-2 name is upper case)");
+        {
+            ods5_ident_t id;
+            const char *why;
+            if (entry_is_primary(vol, src_dir_number, dir_header, h, src_stored, sv, src_fid, false)) {
+                snprintf(ident_name, sizeof(ident_name), "%s;%u", dst_norm, (unsigned) sv);
+                if (ods5_read_ident(h, &id, &why)) {
+                    char t[ODS5_MAX_LITERAL_NAME + 16];
+                    snprintf(t, sizeof(t), "%s;%u", id.name, id.version);
+                    if (strcmp(t, ident_name) != 0) {                        /* not written already by the run that was stopped */
+                        if (!ods2_header_set_name(h, ident_name)) return fail("the new name does not fit the header's name area: not renamed");
+                        header_revise(h);
+                        r = rename_write_header(vol, number, src_fid, h);
+                        if (!r.ok) return r;
+                        inf.header_changed = true;
+                    }
+                }
+            }
+        }
         {
             uint8_t *blocks = NULL;
             unsigned used, b;
             bool done = false;
-            if (!vol->ods5) return fail("a rename that changes only the case is an ODS-5 matter (an ODS-2 name is upper case)");
             r = dir_name_info(vol, dir_header, src_stored, &si);
             if (!r.ok) return r;
             if (si.count != 1) {
@@ -5304,21 +5348,6 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             if (!r.ok) return r;
             if (!done) return fail("internal error: the entry was not found in its directory block");
             inf.case_only = true;
-        }
-        /* the header follows when this is the file's primary entry */
-        {
-            ods5_ident_t id;
-            const char *why;
-            char a[ODS5_MAX_LITERAL_NAME + 8], bn[ODS5_MAX_LITERAL_NAME + 8];
-            if (ods5_read_ident(h, &id, &why) && ods5_complete_name(id.name, a, sizeof(a)) && ods5_complete_name(src_stored, bn, sizeof(bn)) &&
-                ods2_dir_name_compare(a, strlen(a), bn, strlen(bn)) == 0 && fid_equal(core->backlink, dir_fid)) {
-                snprintf(ident_name, sizeof(ident_name), "%s;%u", dst_norm, (unsigned) sv);
-                if (!ods2_header_set_name(h, ident_name)) return fail("the new name does not fit the header's name area: not renamed");
-                header_revise(h);
-                r = rename_write_header(vol, number, src_fid, h);
-                if (!r.ok) return r;
-                inf.header_changed = true;
-            }
         }
         if (out != NULL) *out = inf;
         return ok();
@@ -5366,7 +5395,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
         }
         /* the limit of the target name: one more version for another name (exactly one goes, the lowest, CORPUS 66.1); for another version of the SAME name the count stays and the file's limit
            prunes only when it is below the count (CORPUS 67.4, review 67 F2): the lowest version after the rename goes */
-        r = version_limit_drop(&di, v, same_name ? sv : 0, &drop_version);
+        r = version_limit_drop(&di, v, same_name, same_name ? sv : 0, &drop_version);
         if (!r.ok) { free(di.versions); return r; }
     }
     free(di.versions);
@@ -5376,28 +5405,38 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     {
         ods5_ident_t id;
         const char *why;
-        char a[ODS5_MAX_LITERAL_NAME + 8], bn[ODS5_MAX_LITERAL_NAME + 8];
+        char a[ODS5_MAX_LITERAL_NAME + 8];
         bool no_primary = (core->backlink.fid_num == 0 && core->backlink.fid_nmx == 0) || (core->backlink.fid_num == 0xFFFF && core->backlink.fid_nmx == 0xFF);
+        primary = entry_is_primary(vol, src_dir_number, dir_header, h, src_stored, sv, src_fid, false);
+        snprintf(ident_name, sizeof(ident_name), "%s;%u", dst_norm, v);
         if (ods5_read_ident(h, &id, &why) && ods5_complete_name(id.name, a, sizeof(a))) {
-            if (ods5_complete_name(src_stored, bn, sizeof(bn)) && ods2_dir_name_compare(a, strlen(a), bn, strlen(bn)) == 0 && fid_equal(core->backlink, dir_fid)) primary = true;
-            snprintf(ident_name, sizeof(ident_name), "%s;%u", dst_norm, v);
-            {
-                char t[ODS5_MAX_LITERAL_NAME + 8];
-                snprintf(t, sizeof(t), "%s;%u", id.name, id.version);
-                header_names_target = ods2_dir_name_compare(t, strlen(t), ident_name, strlen(ident_name)) == 0 && fid_equal(core->backlink, dir_fid);
-            }
+            char t[ODS5_MAX_LITERAL_NAME + 8];
+            snprintf(t, sizeof(t), "%s;%u", id.name, id.version);
+            header_names_target = ods2_dir_name_compare(t, strlen(t), ident_name, strlen(ident_name)) == 0 && fid_equal(core->backlink, dir_fid);
         }
         adopt = no_primary;
         if (adopt) primary = false;
     }
     snprintf(ident_name, sizeof(ident_name), "%s;%u", dst_norm, v);
 
-    /* 1 the link count (a HARDLINKS volume), 2 the new entry, 3 the header, 4 the old entry out, 5 the link count back, 6 the version the limit removes */
-    if (hardlinks && !resumed) {
-        unsigned links = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
-        links++;
-        h[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
-        h[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (links >> 8);
+    /* HEADER FIRST (review 67, the order proposal; CORPUS 67.3): 1 the header (the new name, revision +1, the date, and on a HARDLINKS volume the link count + 1: one write), 2 the new entry, 3 the old entry
+       out, 4 the link count back (HARDLINKS). A stop after 1 leaves one entry (the old name) and a header that names the new one: entry_is_primary() reads that entry as the file's own, so RENAME and DELETE
+       act on the file; VMS's own DELETE of the header-named entry deletes the FILE and leaves the other dangling, which header-last (entry first) would have exposed to the user's intended action (delete the
+       old name). An alias entry leaves the header alone: only the link count is written. */
+    if (((primary || adopt) && !header_names_target) || (hardlinks && !resumed)) {
+        if ((primary || adopt) && !header_names_target) {
+            if (!ods2_header_set_name(h, ident_name)) return fail("the new name does not fit the header's name area (no room to move the map): not renamed");
+            if (adopt) core->backlink = dir_fid;
+            header_revise(h);
+            inf.header_changed = true;
+            inf.adopted = adopt;
+        }
+        if (hardlinks && !resumed) {
+            unsigned links = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
+            links++;
+            h[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
+            h[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (links >> 8);
+        }
         r = rename_write_header(vol, number, src_fid, h);
         if (!r.ok) return r;
     }
@@ -5410,20 +5449,11 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
         else r = insert_into_directory(vol, src_dir_number, dst_norm, (uint16_t) v, src_fid, 0);
         if (!r.ok) return r;
     }
-    if ((primary || adopt) && !header_names_target) {
-        if (!ods2_header_set_name(h, ident_name)) return fail("the new name does not fit the header's name area (the map would have to move): not renamed");
-        if (adopt) core->backlink = dir_fid;
-        header_revise(h);
-        r = rename_write_header(vol, number, src_fid, h);
-        if (!r.ok) return r;
-        inf.header_changed = true;
-        inf.adopted = adopt;
-    }
     r = ods2_read_header(vol, src_dir_number, dir_header);          /* the insert may have changed the directory's header (a split, a larger area) */
     if (!r.ok) return r;
     r = remove_directory_entry(vol, src_dir_number, dir_header, src_stored, sv, src_fid);
     if (!r.ok) return r;
-    if (hardlinks) {                       /* also when an interrupted rename is finished: its first run counted the new entry (step 1), the old entry goes now */
+    if (hardlinks) {                       /* also when an interrupted rename is finished: its first run counted the new entry, the old entry goes now */
         unsigned links = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
         if (links > 0) links--;
         h[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
@@ -5796,14 +5826,9 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
             ods5_ident_t id;
             const char *why;
             char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
-            bool primary = false;
-            if (ods5_read_ident(target_header, &id, &why) &&
-                ods2_fid_number(target_core->backlink) == dir_file_number &&
-                ods5_complete_name(id.name, a, sizeof(a)) && ods5_complete_name(name, b, sizeof(b)) &&
-                ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0 &&
-                id.version == target_version) {
-                primary = true;
-            }
+            /* the file's primary entry: the header names it, or names an entry this directory lacks (a RENAME stopped after its header write: entry_is_primary) */
+            bool primary = entry_is_primary(vol, dir_file_number, dir_header, target_header, name, target_version, target_fid, true);
+            (void) id; (void) why; (void) a; (void) b;
             r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);
             if (!r.ok) return r;
             links--;
@@ -5841,8 +5866,7 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
         if (ods5_read_ident(target_header, &id, &why) &&
             ods5_complete_name(id.name, a, sizeof(a)) && ods5_complete_name(name, b, sizeof(b))) {
             /* the version is not compared: a header may carry another one than the entry's */
-            bool primary = ods2_fid_number(target_core->backlink) == dir_file_number &&
-                           ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0;
+            bool primary = entry_is_primary(vol, dir_file_number, dir_header, target_header, name, target_version, target_fid, false);
             if (!primary) {
                 r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);
                 if (!r.ok) return r;

@@ -82,6 +82,7 @@ SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"versions
 # for delete, a back link directory without an entry): a rename that loses a header or a block must be seen. The two-entry states (one file under two names, in one directory or two) are
 # no error of the checker; the transient duplicates of a split or a shrink are in EXTRA_ALLOWED for the operations that make them.
 RENAME_ALLOWED = []
+HF_NO_WARN_OPS = ('rename_alias', 'rename_hardlink', 'rename_case')     # the header is not rewritten (an alias), or the spelling only differs (no name differs)
 RENAME_PAIRS = {'rename_same_dir': ('A1.TXT;1', 'A9.TXT;1'), 'rename_type': ('B.DAT;1', 'B.TXT;1'), 'rename_newver': ('A1.TXT;1', 'W.TXT;10'),
                 'rename_alias': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'), 'rename_primary_alias': ('L.TXT;1', 'L2.TXT;1'), 'rename_hardlink': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'),
                 'rename_primary_hardlink': ('L.TXT;1', 'L2.TXT;1'), 'rename_split': ('FULL/N00000.TXT;1', 'FULL/%(next)s;1'),
@@ -577,6 +578,18 @@ def main():
                         _any = bool(re.search(r'file %d \([^)]*\): link count' % _fnum, _txt))
                         if _warn != (_lc != _entries) or _any != (_lc != _entries):
                             prob.append('the link count is %d, %d entries name the file: the checker %s' % (_lc, _entries, 'warns' if _any else 'says nothing'))
+                if name in RENAME_PAIRS and mode == 'crash':
+                    # warnings (review 67 recheck): header first leaves ONE state with a warning: one entry (the old name) and a header that names the new one: "header name ... differs from its directory
+                    # entry". It is allowed in THAT state only (the old entry present, the new one not); every other stopped state, and the completed one, has no warning (a HARDLINKS link count warning is
+                    # judged above against the real count)
+                    _okey, _nkey = (x % ctx_op for x in RENAME_PAIRS[name])
+                    _w = [l for l in run(CHECK + [trial])[1].splitlines() if l.startswith('WARN') and 'link count' not in l and 'allocated but owned by no file' not in l]        # (a directory moved to a larger area by the insert shows its old area as lost for a moment: every insert does)
+                    _first_state = (_okey in files and _nkey not in files and not (_okey.lower() == _nkey.lower()))
+                    _bad_w = [l for l in _w if not (_first_state and re.search(r"header name '.*' differs from its directory entry", l))]
+                    if _bad_w:
+                        prob.append('a warning the stopped state may not have: %s' % _bad_w[0].strip()[:150])
+                    if _first_state and name not in HF_NO_WARN_OPS and not any("header name '" in l for l in _w):
+                        prob.append('the state after the header write (one entry, the old name; the header names the new one) has no "header name ... differs from its directory entry" warning: the order is not header first')
                 if name in RENAME_PAIRS and mode == 'crash':
                     # the way back (review 65 C6c): the same RENAME again. A target entry that already points at the source's file ID is an interrupted rename: the run FINISHES it (no new
                     # version). Once the old entry is gone (or the rename completed) the source no longer exists: the run is refused and the image is unchanged (for a rename that changes

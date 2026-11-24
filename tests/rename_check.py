@@ -420,6 +420,89 @@ def review67_cases(work, level):
     check('%s: a fault of the new name is reported as the new name\'s' % kind, True, 'the new name is not valid' in out)
 
 
+def header_first_states(work, level, hl):
+    """the order proposal (review 67 recheck): HEADER FIRST. After the first write the header names the new name and the directory has the old entry only. In that state ods2v2's DELETE of the old name
+    deletes the FILE (the entry is the file's own: the header names an entry the directory does not have), RENAME to a third name works, and the same RENAME run again finishes it; ods5check says
+    exactly one warning (the header name differs from its directory entry). On a HARDLINKS volume the link count was raised in the same write, so a DELETE in that state removes the entry and the
+    file stays (the known leak of the README: a lost file for the checker)."""
+    kind = 'ODS-%d%s' % (level, ' HARDLINKS' if hl else '')
+    img = os.path.join(work, 'hf_%d%s.img' % (level, 'h' if hl else ''))
+    assert run([INIT, img, '8192', '--structure=%d' % level, '--label=HF'] + (['--hardlinks'] if hl else []))[0] == 0
+    src = os.path.join(work, 'hf.txt')
+    open(src, 'w').write('header first\n')
+    for c in ('CREATE/DIRECTORY [D]', 'COPY %s [D]P.TXT' % src):
+        assert ods2(img, c)[0] == 0
+    time.sleep(1.1)
+    base = os.path.join(work, 'hf_base.img')
+    shutil.copyfile(img, base)
+
+    def state():
+        shutil.copyfile(base, img)
+        rc, out = run(['./ods2_fault', img, 'RENAME [D]P.TXT [D]Q.TXT'] if False else ['env', 'ODS2_FAULT_AFTER_WRITES=1', './ods2_fault', img, 'RENAME [D]P.TXT [D]Q.TXT'])
+        return img
+    img = state()
+    ls = listing(img, '[D]')
+    chk = run(['python3', '-I', 'tests/ods5check.py', img])[1]
+    warns = [l for l in chk.splitlines() if l.startswith('WARN') and 'link count' not in l]
+    h = hdr(img, '[D]P.TXT;1')
+    check('%s: after the first write the directory has P.TXT only and the header names Q.TXT;1' % kind, (['P.TXT;1'], 'Q.TXT;1'), (ls, fields(h, level)['name'] if h is not None else None))
+    check('%s: ods5check says exactly one warning, the header name that differs from its entry' % kind, (1, True), (len(warns), bool(warns) and "header name 'Q.TXT;1' differs from its directory entry" in warns[0]))
+    free0 = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
+    # DELETE P: the file goes (non-HARDLINKS); on HARDLINKS the entry goes and the file stays (the count was raised)
+    rc, out = ods2(img, 'DELETE [D]P.TXT')
+    free1 = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
+    errs = checker_errors(img)
+    if hl:
+        check('%s: DELETE P.TXT removes the entry; the file stays allocated in no directory (the link count is one too high: the README\'s known leak)' % kind, ([], free0, True),
+              (listing(img, '[D]'), free1, any('lost file' in e for e in errs)))
+    else:
+        check('%s: DELETE P.TXT deletes the FILE (its header is freed, its blocks returned: the entry was its own), nothing dangles, no lost file' % kind, ([], True, []),
+              (listing(img, '[D]'), free1 > free0, errs))
+    # RENAME P R in that state: the entry is the file's own, the header is updated
+    img = state()
+    rc, out = ods2(img, 'RENAME [D]P.TXT [D]R.TXT')
+    h = hdr(img, '[D]R.TXT;1')
+    check('%s: RENAME P.TXT R.TXT in that state: one entry R.TXT, the header names R.TXT;1, the checker is clean' % kind, (0, ['R.TXT;1'], 'R.TXT;1', []),
+          (rc, listing(img, '[D]'), fields(h, level)['name'] if h is not None else None, checker_errors(img)))
+    # and the same RENAME run again finishes it
+    img = state()
+    rc, out = ods2(img, 'RENAME [D]P.TXT [D]Q.TXT')
+    h = hdr(img, '[D]Q.TXT;1')
+    count = fields(h, level)['linkcount'] if (h is not None and hl) else None
+    warns2 = [w for w in run(['python3', '-I', 'tests/ods5check.py', img])[1].splitlines() if w.startswith('WARN')]
+    if hl:
+        # a stop after the first write (which raised the count) cannot be told from a start: the run again counts once more, one too high for good (the README's first position), and the checker says so
+        check('%s: the same RENAME run again finishes it: Q.TXT;1 only, the header named once; the link count stays one too high (2 for 1 entry: the known leak) and the checker warns of exactly that' % kind,
+              (0, ['Q.TXT;1'], 'Q.TXT;1', [], 2, 1), (rc, listing(img, '[D]'), fields(h, level)['name'] if h is not None else None, checker_errors(img), count, len(warns2)))
+    else:
+        check('%s: the same RENAME run again finishes it: Q.TXT;1 only, the header named once, the checker clean' % kind, (0, ['Q.TXT;1'], 'Q.TXT;1', [], []),
+              (rc, listing(img, '[D]'), fields(h, level)['name'] if h is not None else None, checker_errors(img), warns2))
+
+
+def r1_unusable_number(work, level):
+    """review 67 recheck R1: a name with a version number that is not usable (0) is not pruned: E.TXT stored ;2 ;1 ;0 with the limit 2: COPY and RENAME delete nothing (version 0 was taken for \"nothing removed\")"""
+    kind = 'ODS-%d' % level
+    img = os.path.join(work, 'r1_%d.img' % level)
+    assert run([INIT, img, '8192', '--structure=%d' % level, '--label=R1'])[0] == 0
+    src = os.path.join(work, 'r1.txt')
+    open(src, 'w').write('x\n')
+    cmds = ['CREATE/DIRECTORY [D]'] + ['COPY %s [D]E.TXT' % src] * 3 + ['COPY %s [D]M.TXT' % src, 'SET FILE/VERSION_LIMIT=2 [D]E.TXT']
+    for c in cmds:
+        assert ods2(img, c)[0] == 0
+    dn = E.D.fnum(img, '[000000]D.DIR')
+    for idx, val in ((0, 2), (1, 1), (2, 0)):
+        rc, out = run(['python3', '-I', 'tests/swap_versions.py', img, str(dn), 'E.TXT', 'setver', str(idx), str(val)])
+        assert rc == 0, out
+    base = os.path.join(work, 'r1_base.img')
+    shutil.copyfile(img, base)
+    before = sorted(x for x in listing(img, '[D]') if x.startswith('E.TXT'))
+    for cmd in ('COPY %s [D]E.TXT' % src, 'RENAME [D]M.TXT [D]E.TXT'):
+        shutil.copyfile(base, img)
+        rc, out = ods2(img, cmd)
+        after = sorted(x for x in listing(img, '[D]') if x.startswith('E.TXT'))
+        check('%s: %s on E.TXT stored ;2 ;1 ;0 (limit 2) deletes no version (an unusable number: no pruning)' % (kind, cmd), True, all(x in after for x in before))
+
+
 def list_alias_before(base):
     return listing(base, '[Y]')
 
@@ -444,6 +527,9 @@ def main():
             full_volume(work, level)
             ext_headers_case(work, level)
             review67_cases(work, level)
+            r1_unusable_number(work, level)
+            header_first_states(work, level, False)
+        header_first_states(work, 5, True)
     finally:
         if not keep:
             shutil.rmtree(work, ignore_errors=True)
