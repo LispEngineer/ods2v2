@@ -5891,7 +5891,54 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
         return ok();
     }
 
-    if (vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS) &&
+    if ((target_core->filechar & 0x2000u) && target_core->seg_num == 0) {
+        /* A DIRECTORY file (review 71 C2): never remove the last entry of a directory that is not empty. If the directory the header's back link names holds ANOTHER entry for this whole file ID (the
+           old entry in the second stopped state of a move, or a second entry made on VMS), this entry alone goes: nothing is orphaned and no link count decides. Otherwise this is the last entry
+           known: the generic test below refuses a directory that is not empty and deletes an empty one (the HARDLINKS link branch is not taken for a directory: it removed the entry of a non-empty
+           directory whenever its count was above 1, and orphaned the subtree). */
+        uint8_t bh[512];
+        unsigned bn = ods2_fid_number(target_core->backlink), n_in_bl = 0;
+        if (bn != 0 && bn != 0xFFFF && !(target_core->backlink.fid_num == 0xFFFF && target_core->backlink.fid_nmx == 0xFF) &&
+            ods2_read_header(vol, bn, bh).ok && directory_header_ok(bh, bn).ok && dir_entries_of_file(vol, bh, target_fid, &n_in_bl) &&
+            n_in_bl > (bn == dir_file_number ? 1u : 0u)) {
+            ods5_ident_t id;
+            const char *why;
+            char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
+            bool names_known = ods5_read_ident(target_header, &id, &why) && ods5_complete_name(id.name, a, sizeof(a)) && ods5_complete_name(name, b, sizeof(b));
+            bool hl5 = vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS) && (target_core->struclev >> 8) == ODS5_LEVEL_5;
+            unsigned links = hl5 ? (unsigned) (target_header[ODS5_FH2_LINKCOUNT] | (target_header[ODS5_FH2_LINKCOUNT + 1] << 8)) : 0;
+            if (hl5 && links > 1) {
+                r = header_ok_for_write(target_header, ods2_fid_number(target_fid));
+                if (!r.ok) return r;
+            }
+            r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);
+            if (!r.ok) return r;
+            if (hl5 && links > 1) {
+                uint16_t checksum;
+                links--;
+                target_header[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
+                target_header[ODS5_FH2_LINKCOUNT + 1] = (uint8_t) (links >> 8);
+                checksum = ods2_checksum(target_header, 255);
+                target_header[510] = (uint8_t) (checksum & 0xff);
+                target_header[511] = (uint8_t) (checksum >> 8);
+                r = ods2_write_header(vol, ods2_fid_number(target_fid), target_header);
+                if (!r.ok) return r;
+            }
+            if (version_out != NULL) *version_out = target_version;
+            if (info != NULL) {
+                info->kept = 1;
+                info->name_differs = names_known && ods2_dir_name_compare(a, strlen(a), b, strlen(b)) != 0;
+                if (names_known) {
+                    snprintf(info->primary_name, sizeof(info->primary_name), "%s", id.name);
+                    info->primary_version = id.version;
+                }
+                info->backlink_dir = bn;
+            }
+            return ok();
+        }
+    }
+
+    if (vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS) && !(target_core->filechar & 0x2000u) &&
         (target_core->struclev >> 8) == ODS5_LEVEL_5 && target_core->seg_num == 0) {
         /* A file with several links: deleting one link takes its directory
            entry and one off the count; the file goes with the last. The
@@ -5976,8 +6023,14 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
         r = ods2_count_directory_entries(vol, target_header, &sub_count);
         if (!r.ok) return r;
         if (sub_count > 0) {
-            return fail("directory is not empty - refusing to delete "
-                        "(matches VMS's own DELETE/DIRECTORY behavior)");
+            static char dmsg[320];       /* static: the message outlives this call */
+            unsigned bn2 = ods2_fid_number(target_core->backlink);
+            if (bn2 != 0 && bn2 != dir_file_number && bn2 != 0xFFFF)
+                snprintf(dmsg, sizeof(dmsg), "directory is not empty - refusing to delete (matches VMS's own DELETE/DIRECTORY behavior); this entry is the directory's only one, and its header names another "
+                         "directory (file number %u): a RENAME of this directory that was stopped is finished by running the same RENAME again", bn2);
+            else
+                snprintf(dmsg, sizeof(dmsg), "directory is not empty - refusing to delete (matches VMS's own DELETE/DIRECTORY behavior)");
+            return fail(dmsg);
         }
     }
 

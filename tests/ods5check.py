@@ -734,6 +734,7 @@ def main():
     # --- cross checks: entries -> headers, backlinks ---
     referenced = set()
     dir_of_primary = {}
+    dir_edges = {}            # directory file number -> the directory files entered in it (whole file ID matches the header): the walk for a cycle
     entry_count = {}          # file number -> the entries that name it (one of them for the file's primary name, the others links or aliases)
     for dn, lst in entries.items():
         # An entry whose version limit is 1 makes VMS purge version 1 as soon as it makes version 2: every VMS-made user
@@ -776,9 +777,35 @@ def main():
                     fnd.err('dir %d: %r;%d -> file %d: sequence %d, header has %d' % (dn, nm, ver, fnum, fid[1], u16(hd, 10)))
                 continue
             entry_count[fnum] = entry_count.get(fnum, 0) + 1
+            if (u32(hd, 52) & 0x2000) and fnum != 4:
+                dir_edges.setdefault(dn, []).append(fnum)
             bl = u16(hd, 66) | (hd[71] << 16)
             if bl == dn:
                 dir_of_primary.setdefault(fnum, []).append((nm, ver))
+    # A directory entered more than once (review 71): the second stopped state of a RENAME of a directory (one directory, two entries), or an alias made on VMS. A WARNING, counting only entries whose WHOLE
+    # file ID matches the header. A directory entered inside its own subtree is a CYCLE: an ERROR of its own (VMS's [...] walks never end on it).
+    for n, (b, d) in prim.items():
+        if n > 10 and (u32(b, 52) & 0x2000) and entry_count.get(n, 0) >= 2:
+            fnd.warn('directory %d (%s) is entered %d times (the second stopped state of a RENAME of a directory, or an alias; VMS can make one)' % (n, d['name'] if d else '?', entry_count[n]))
+    colour = {}
+    for root in sorted(dir_edges):
+        if colour.get(root):
+            continue
+        stack = [(root, iter(dir_edges.get(root, [])))]
+        colour[root] = 1
+        while stack:
+            node, it = stack[-1]
+            nxt = next(it, None)
+            if nxt is None:
+                colour[node] = 2
+                stack.pop()
+            elif colour.get(nxt) == 1:
+                nm = prim[nxt][1]['name'] if nxt in prim and prim[nxt][1] else '?'
+                fnd.err('directory %d (%s) is entered inside its own subtree (a cycle: a [...] walk never ends)' % (nxt, nm))
+                colour[nxt] = 2
+            elif not colour.get(nxt):
+                colour[nxt] = 1
+                stack.append((nxt, iter(dir_edges.get(nxt, []))))
     if v.level == 5 and (v.volchar & 0x40):
         # On a HARDLINKS volume a file's link count is the number of entries that name it: equal for all 4,185 files of five volumes VMS wrote (review 67 F4). Unequal: a RENAME that was
         # stopped after its first write (the count + 1, no new entry yet) or after the old entry went and before the count came back (ods2v2 leaves the count too HIGH on purpose: too low
