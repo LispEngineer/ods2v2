@@ -194,6 +194,10 @@ typedef struct {
     unsigned pruned_version;   /* the version the version limit removed, or 0 */
     bool moved;                /* the new entry is in another directory (step 2) */
 } ods2_rename_info_t;
+/* The name `name` of directory `dir_file_number` as the directory STORES it (on an ODS-5 volume the first stored spelling: lower.txt stays lower.txt however it was typed), for a command that fills in what a
+   new name leaves out (RENAME [Y]N takes the type of the source: review 69 recheck R2). Fails when the directory has no such name. `out` holds at least ODS5_MAX_LITERAL_NAME + 8 bytes. */
+ods2_result_t ods2_stored_name(ods2_volume_t *vol, unsigned dir_file_number, const char *name, char *out, size_t out_n);
+
 ods2_result_t ods2_rename(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
                           unsigned dst_dir_number, const char *dst_name, int dst_version, ods2_rename_info_t *info);
 /* Are the versions of `name` stored newest first (descending), across all the records of the name? *in_order_out is false when two neighbouring entries of the name

@@ -2608,14 +2608,16 @@ static void cmd_symlink(ods2_volume_t *vol, const ods2_parsed_path_t *p, const c
    directory and a directory file are later steps and are refused, saying so. */
 /* RENAME's two specifications: the device part (before the first colon that is not ^-escaped and not inside the brackets) is taken off and kept apart, so that it is not part of a name (review 69 S2). `bad` is
    set for a device that does not fit `dev`, one with a quote in it, or a second colon before the directory or name (a node, MOV:MOV:): refused by the caller. */
-static void rename_split_device(const char *arg, char *spec, size_t spec_n, char *dev, size_t dev_n, bool *bad)
+static void rename_split_device(const char *arg, char *spec, size_t spec_n, char *dev, size_t dev_n, bool *bad, bool *junk)
 {
     const char *br = ods5_find_unescaped(arg, '['), *c1 = ods5_find_unescaped(arg, ':'), *p;
     size_t len;
     dev[0] = '\0';
     *bad = false;
+    *junk = false;
     if (c1 != NULL && br != NULL && c1 > br) c1 = NULL;                       /* a colon inside or after the brackets is no device */
     if (c1 == NULL) {
+        if (br != NULL && br > arg) *junk = true;                                 /* junk[Y]N.TXT: text in front of the directory (review 69 recheck R3) */
         snprintf(spec, spec_n, "%s", arg);
         return;
     }
@@ -2623,6 +2625,7 @@ static void rename_split_device(const char *arg, char *spec, size_t spec_n, char
     if (len == 0 || len >= dev_n || memchr(arg, '"', len) != NULL) *bad = true;
     else { memcpy(dev, arg, len); dev[len] = '\0'; }
     for (p = ods5_find_unescaped(c1 + 1, ':'); p != NULL && (br == NULL || p < br); p = ods5_find_unescaped(p + 1, ':')) *bad = true;      /* MOV:MOV:, MOV:: */
+    if (br != NULL && br > c1 + 1) *junk = true;                                  /* MOV:junk[Y]N.TXT: text between the device and the directory (review 69 recheck R3) */
     snprintf(spec, spec_n, "%s", br != NULL ? br : c1 + 1);
 }
 
@@ -2640,7 +2643,7 @@ static bool rename_parse_path(const char *spec, ods2_parsed_path_t *out)
     return ods2_parse_path(spec, out);
 }
 
-static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const ods2_parsed_path_t *dp, const char *src_arg, const char *dst_arg)
+static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const ods2_parsed_path_t *dp, const char *src_arg, const char *dst_arg, bool device_only)
 {
     uint8_t sdir[512], ddir[512];
     ods2_fid_t sfid, dfid;
@@ -2658,7 +2661,7 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
         report_error("%%ODS2-E-NOTYET, %s: RENAME with a wildcard is not available yet (step 4)\n", src_arg);
         return;
     }
-    if (dp->filename[0] == '\0' && !dp->had_brackets) {
+    if (dp->filename[0] == '\0' && !dp->had_brackets && !device_only && !dp->has_version) {
         report_error("%%ODS2-E-BADPATH, %s: RENAME needs a new name or a directory for the file\n", dst_arg);
         return;
     }
@@ -2666,22 +2669,6 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
         ods5_unescape_filename(dp->filename, strlen(dp->filename), dname, sizeof(dname)) == (size_t) -1) {
         report_error("%%ODS2-E-BADNAME, malformed ^ escape in a file name\n");
         return;
-    }
-    if (dp->filename[0] == '\0') {
-        snprintf(dname, sizeof(dname), "%s", sname);          /* RENAME [X]C.TXT [Y]: the same name in the other directory (CORPUS 65.1 b1); [Y];7: the same name, version 7 */
-    } else {
-        /* DCL fills what the new name leaves out from the input (review 69 S3): [Y]N has no type: N.TXT; [Y].DAT has no name: A.DAT (the escaped forms are looked at, so a ^. is no separator) */
-        const char *dot = ods5_find_unescaped(dp->filename, '.'), *sdot = NULL, *q;
-        char full[ODS2_PATH_MAX * 2];
-        for (q = ods5_find_unescaped(sp->filename, '.'); q != NULL; q = ods5_find_unescaped(q + 1, '.')) sdot = q;
-        if (dot == NULL && sdot != NULL) snprintf(full, sizeof(full), "%s%s", dp->filename, sdot);                                        /* the type of the input */
-        else if (dot == dp->filename && sdot != NULL) snprintf(full, sizeof(full), "%.*s%s", (int) (sdot - sp->filename), sp->filename, dp->filename);       /* the name of the input */
-        else if (dot == dp->filename) snprintf(full, sizeof(full), "%s%s", sp->filename, dp->filename);
-        else snprintf(full, sizeof(full), "%s", dp->filename);
-        if (strcmp(full, dp->filename) != 0 && ods5_unescape_filename(full, strlen(full), dname, sizeof(dname)) == (size_t) -1) {
-            report_error("%%ODS2-E-BADNAME, malformed ^ escape in a file name\n");
-            return;
-        }
     }
     resolve_effective_path(sp, sdir_path, sizeof(sdir_path));
     r = resolve_dir(vol, sdir_path, sdir, &sfid);
@@ -2698,6 +2685,25 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
         }
     } else {
         dfid = sfid;                                  /* no directory in the new name: the old file's directory */
+    }
+    {
+        /* what the new name leaves out comes from the STORED name of the file (review 69 recheck R2: on ODS-5 lower.txt stays lower; the typed text may spell it otherwise). dname holds the typed new
+           name as a literal; the escaped form (dp->filename) tells whether it has a type separator of its own (a ^. is no separator) */
+        char stored[ODS2_DIR_MAX_NAME + 8], full[ODS2_PATH_MAX * 2];
+        const char *sfull = sname, *sdot;
+        if (ods2_stored_name(vol, ods2_fid_number(sfid), sname, stored, sizeof(stored)).ok) sfull = stored;
+        sdot = strrchr(sfull, '.');
+        if (dp->filename[0] == '\0') {
+            snprintf(dname, sizeof(dname), "%s", sfull);          /* RENAME [X]C.TXT [Y]: the same name in the other directory (CORPUS 65.1 b1); [Y];7: the same name, version 7 */
+        } else {
+            /* DCL fills what the new name leaves out from the input (review 69 S3): [Y]N has no type: N.TXT; [Y].DAT has no name: A.DAT */
+            const char *dot = ods5_find_unescaped(dp->filename, '.');
+            if (dot == NULL && sdot != NULL) snprintf(full, sizeof(full), "%s%s", dname, sdot);                                          /* the type of the input */
+            else if (dot == dp->filename && sdot != NULL) snprintf(full, sizeof(full), "%.*s%s", (int) (sdot - sfull), sfull, dname);      /* the name of the input */
+            else if (dot == dp->filename) snprintf(full, sizeof(full), "%s%s", sfull, dname);
+            else snprintf(full, sizeof(full), "%s", dname);
+            snprintf(dname, sizeof(dname), "%s", full);
+        }
     }
     memset(&info, 0, sizeof(info));
     r = ods2_rename(vol, ods2_fid_number(sfid), sname, sp->has_version ? sp->version : 0, ods2_fid_number(dfid), dname, dp->has_version ? dp->version : 0, &info);
@@ -4772,13 +4778,21 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
     if (matches(tokens[0], "RENAME") || matches(tokens[0], "MV")) {
         ods2_parsed_path_t sp, dp;
         char s1[ODS2_PATH_MAX], s2[ODS2_PATH_MAX], dev1[64], dev2[64];
-        bool bad1, bad2;
+        bool bad1, bad2, junk1, junk2, device_only = false;
         if (n < 3) {
             report_error("%%ODS2-E-NOPARM, usage: RENAME <old-path> <new-path>\n");
             return true;
         }
-        rename_split_device(tokens[1], s1, sizeof(s1), dev1, sizeof(dev1), &bad1);
-        rename_split_device(tokens[2], s2, sizeof(s2), dev2, sizeof(dev2), &bad2);
+        if (strlen(tokens[1]) >= ODS2_PATH_MAX || strlen(tokens[2]) >= ODS2_PATH_MAX) {            /* review 69 recheck R1: never cut a specification to fit a buffer */
+            report_error("%%ODS2-E-BADPATH, a file specification is too long (%d characters at most)\n", ODS2_PATH_MAX - 1);
+            return true;
+        }
+        rename_split_device(tokens[1], s1, sizeof(s1), dev1, sizeof(dev1), &bad1, &junk1);
+        rename_split_device(tokens[2], s2, sizeof(s2), dev2, sizeof(dev2), &bad2, &junk2);
+        if ((junk1 && !bad1) || (junk2 && !bad2)) {
+            report_error("%%ODS2-E-BADPATH, %s: text between the device and the directory is not part of a file specification\n", junk1 ? tokens[1] : tokens[2]);
+            return true;
+        }
         if (!rename_parse_path(s1, &sp)) {
             report_error("%%ODS2-E-BADPATH, could not parse the paths\n");
             return true;
@@ -4786,8 +4800,8 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
         if (s2[0] == '\0' && dev2[0] != '\0') {
             /* RENAME [X]A.TXT MOV: a device and nothing else: the same name in the same directory */
             memset(&dp, 0, sizeof(dp));
-            snprintf(dp.filename, sizeof(dp.filename), "%s", sp.filename);
-            dp.relative = true;
+            dp.relative = true;                                                  /* no name, no directory: the stored name of the source, in its own directory (R2) */
+            device_only = true;
         } else if (!rename_parse_path(s2, &dp)) {
             report_error("%%ODS2-E-BADPATH, could not parse the paths\n");
             return true;
@@ -4809,7 +4823,7 @@ static bool execute_line_inner(ods2_volume_t *vol, char *line)
             }
         }
         if (refuse_wild_dir(&sp, "RENAME", tokens[1]) || refuse_wild_dir(&dp, "RENAME", tokens[2])) return true;
-        cmd_rename(vol, &sp, &dp, tokens[1], tokens[2]);
+        cmd_rename(vol, &sp, &dp, tokens[1], tokens[2], device_only);
         return true;
     }
     if (matches(tokens[0], "DELETE") || matches(tokens[0], "RM")) {

@@ -804,6 +804,79 @@ def review69_cases(work, level, hl):
         check('%s S3: %s makes %s (DCL fills the missing part from the input)' % (kind, cmd, want), (0, [want], []), (rc, got, checker_errors(im)))
 
 
+def review69b_cases(work, level, hl):
+    """the review 69 recheck (R1 to R3 and the notes), tests first: R1 an over-long specification is refused, not cut; R2 (ODS-5) the part of the new name filled in from the source is the STORED spelling,
+    not the typed one; R3 text between the device and the directory is refused; the F1 refusal says what happens to a pure alias rename; the HARDLINKS exemption needs a level-5 header"""
+    kind = 'ODS-%d%s' % (level, ' HARDLINKS' if hl else '')
+    img = os.path.join(work, 'r69b_%d%s.img' % (level, 'h' if hl else ''))
+    assert run([INIT, img, '8192', '--structure=%d' % level, '--label=R69B'] + (['--hardlinks'] if hl else []))[0] == 0
+    src = os.path.join(work, 'r69b.txt')
+    open(src, 'w').write('content of the file\n')
+    cmds = ['CREATE/DIRECTORY [X]', 'CREATE/DIRECTORY [Y]', 'CREATE/DIRECTORY [Y.KID]', 'COPY %s [X]B.TXT' % src, 'COPY %s [X]B.TXT' % src]
+    if level == 5:
+        cmds += ['COPY %s [X]lower.txt' % src, 'COPY %s [X]UP.TXT' % src]
+    for c in cmds:
+        assert ods2(img, c)[0] == 0, c
+    time.sleep(1.1)
+    base = os.path.join(work, 'r69b_base_%d%s.img' % (level, 'h' if hl else ''))
+    shutil.copyfile(img, base)
+
+    def fresh():
+        shutil.copyfile(base, img)
+        return img
+
+    # R1: a specification of ODS2_PATH_MAX characters or more is refused before it is split: the 2048-character source ending in B.TXT;12 renamed B.TXT;1
+    im = fresh()
+    h0 = sha(im)
+    for cmd in ('RENAME [X]%sB.TXT;12 [Y]' % ('a' * 2040), 'RENAME [X]B.TXT;1 [Y]%sB.TXT' % ('a' * 2040), 'RENAME [X]%sB.TXT;12 MOV:[Y]' % ('a' * 2040), 'RENAME MOV:[X]B.TXT;1 %s:[Y]' % ('a' * 2045)):
+        rc, out = ods2(im, cmd)
+        check('%s R1: %s... is refused, the image is unchanged' % (kind, cmd[:34]), (True, h0), ('too long' in out and '%ODS2-I-RENAMED' not in out, sha(im)))
+    # R3: text between the device and the directory is not dropped
+    for cmd in ('RENAME [X]B.TXT;1 MOV:junk[Y]N.TXT', 'RENAME [X]B.TXT;1 R69B:junk[Y]', 'RENAME R69B:junk[X]B.TXT;1 [Y]'):
+        rc, out = ods2(im, cmd)
+        check('%s R3: %s is refused, the image is unchanged' % (kind, cmd), (True, h0), ('%ODS2-I-RENAMED' not in out and '%ODS2-E' in out + '%RENAME-E', sha(im)))
+    if level == 5:
+        # R2: the missing parts of the new name come from the STORED name (lower.txt, UP.TXT), not from what was typed
+        for cmd, d, want in (('RENAME [X]LOWER.TXT [Y]n', '[Y]', 'n.txt;1'), ('RENAME [X]LOWER.TXT [Y].dat', '[Y]', 'lower.dat;1'), ('RENAME [X]lower.TXT [Y]', '[Y]', 'lower.txt;1'),
+                             ('RENAME [X]up.txt [Y]n', '[Y]', 'n.TXT;1'), ('RENAME [X]up.txt [Y].dat', '[Y]', 'UP.dat;1'), ('RENAME [X]up.txt [Y]', '[Y]', 'UP.TXT;1'), ('RENAME [X]up.txt [Y.KID]', '[Y.KID]', 'UP.TXT;1')):
+            im2 = fresh()
+            rc, out = ods2(im2, cmd)
+            check('%s R2: %s makes %s (the stored spelling fills in what is missing)' % (kind, cmd, want), (0, [want]), (rc, [x for x in listing(im2, d) if x == want]))
+        im2 = fresh()
+        h1 = sha(im2)
+        rc, out = ods2(im2, 'RENAME [X]up.txt R69B:')
+        check('%s R2: RENAME [X]up.txt R69B: leaves the stored UP.TXT alone: nothing is written' % kind, (0, True, h1), (rc, 'already named' in out, sha(im2)))
+    # the F1 refusal on a pure alias rename: only an entry would move, the PRIMARY entry of the target name is what the prune would take out
+    im = fresh()
+    assert ods2(im, 'LINK [X]AL.TXT [X]B.TXT;2') [0] == 0
+    assert ods2(im, 'COPY %s [Y]C.TXT' % src)[0] == 0
+    assert ods2(im, 'LINK [X]ALC.TXT [Y]C.TXT')[0] == 0
+    assert ods2(im, 'SET FILE/VERSION_LIMIT=1 [Y]C.TXT')[0] == 0
+    h2 = sha(im)
+    rc, out = ods2(im, 'RENAME [X]ALC.TXT [Y]C.TXT;5')
+    if hl:
+        check('%s F1 alias: an alias of a file with a link count of 2: the prune only lowers the count: the rename goes on' % kind, (0, True), (rc, '%ODS2-I-RENAMED' in out))
+        # the exemption is for a LEVEL-5 header only, as DELETE has it: the same file with a level-2 header (no link count to lower) is refused like on a volume without HARDLINKS
+        im = fresh()
+        for c in ('COPY %s [Y]C.TXT' % src, 'LINK [X]ALC.TXT [Y]C.TXT', 'SET FILE/VERSION_LIMIT=1 [Y]C.TXT'):
+            assert ods2(im, c)[0] == 0, c
+        v = O.Vol(im)
+        with open(im, 'r+b') as f:
+            lbn = E.D.lbn(v, E.D.fnum(im, '[Y]C.TXT'))
+            f.seek(lbn * 512)
+            hb = bytearray(f.read(512))
+            struct.pack_into('<H', hb, 6, 0x0201)                      # FH2$W_STRUCLEV: level 2
+            struct.pack_into('<H', hb, 510, sum(struct.unpack_from('<255H', hb, 0)) & 0xffff)
+            f.seek(lbn * 512)
+            f.write(bytes(hb))
+        h3 = sha(im)
+        rc, out = ods2(im, 'RENAME [X]ALC.TXT [Y]C.TXT;5')
+        check('%s F1 level-2 header: the HARDLINKS exemption does not apply to a header that is not level 5: refused, the image is unchanged' % kind, (True, h3), ('another entry of this same file' in out and '%ODS2-I-RENAMED' not in out, sha(im)))
+    else:
+        check('%s F1 alias: the message of a refused PURE ALIAS rename says the prune would take out the primary entry, the file would be deleted' % kind,
+              (True, True, h2), ('another entry of this same file' in out and 'primary' in out and 'delete' in out, '%ODS2-I-RENAMED' not in out, sha(im)))
+
+
 def r1_unusable_number(work, level):
     """review 67 recheck R1: a name with a version number that is not usable (0) is not pruned: E.TXT stored ;2 ;1 ;0 with the limit 2: COPY and RENAME delete nothing (version 0 was taken for \"nothing removed\")"""
     kind = 'ODS-%d' % level
@@ -857,10 +930,12 @@ def main():
             g1_aliases(work, level, False)
             move_cases(work, level, False)
             review69_cases(work, level, False)
+            review69b_cases(work, level, False)
         header_first_states(work, 5, True)
         g1_aliases(work, 5, True)
         move_cases(work, 5, True)
         review69_cases(work, 5, True)
+        review69b_cases(work, 5, True)
     finally:
         if not keep:
             shutil.rmtree(work, ignore_errors=True)
