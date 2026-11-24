@@ -141,6 +141,29 @@ def delete_rule(work, name, level, hl):
                           ('not empty' in out, sha(im), readable(im, '[Q.X]'), readable(im, '[P.X]')))
 
 
+def no_hint(work, name, level, hl):
+    """rev2's note on review 72: the refusal of a non-empty directory names the RENAME that finishes a stopped move only when the header names another directory: not for a back link of (16777215,0,0) or 0"""
+    import struct
+    for label, bl in (('(16777215,0,0)', (0xFFFF, 0, 0, 0xFF)), ('(0,0,0)', (0, 0, 0, 0))):
+        im = S.build(work, level, hl, 'none', False, 'nh')
+        num = S.fnum(im, '[P]X.DIR')
+        lbn = S._header_lbn(im, num)
+        with open(im, 'r+b') as f:
+            f.seek(lbn * 512)
+            hb = bytearray(f.read(512))
+            struct.pack_into('<HHBB', hb, 66, *bl)
+            struct.pack_into('<H', hb, 510, sum(struct.unpack_from('<255H', hb, 0)) & 0xffff)
+            f.seek(lbn * 512)
+            f.write(bytes(hb))
+        h0 = sha(im)
+        rc, out = S.ods2(im, 'DELETE [P]X.DIR')
+        check('%s a non-empty directory with the back link %s is refused without the stopped-RENAME hint, the image is unchanged' % (name, label), (True, False, h0), ('not empty' in out, 'RENAME' in out, sha(im)))
+    # and with a back link that names another directory the hint is there
+    im = S.build(work, level, hl, 'first', False, 'nh2')
+    rc, out = S.ods2(im, 'DELETE [P]X.DIR')
+    check('%s a non-empty directory whose header names another directory: the refusal says which RENAME finishes the move' % name, True, 'RENAME' in out and 'not empty' in out)
+
+
 def checker_rules(work, name, level, hl):
     # the second state: one directory, two entries: an INFO line (not a warning: VMS makes such directories and its ANALYZE is silent); the first state and the state before: none
     for state, want in (('none', 0), ('first', 0), ('second', 1), ('twin', 1)):
@@ -169,6 +192,7 @@ def main():
             print('=== %s' % name)
             delete_rule(work, name, level, hl)
             checker_rules(work, name, level, hl)
+            no_hint(work, name, level, hl)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print('dir_delete_check: %d passed, %d FAILED' % (passes, fails))

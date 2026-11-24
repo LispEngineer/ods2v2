@@ -6016,7 +6016,7 @@ static const char *dir_not_empty_message(const ods2_head_core_t *core, unsigned 
 {
     static char dmsg[360];       /* static: the message outlives this call */
     unsigned bn2 = ods2_fid_number(core->backlink);
-    if (bn2 != 0 && bn2 != dir_file_number && bn2 != 0xFFFF)
+    if (bn2 != 0 && bn2 != dir_file_number && bn2 != 0xFFFF && !(core->backlink.fid_num == 0xFFFF && core->backlink.fid_nmx == 0xFF))     /* not for "no back link": 0, or (16777215,0,0) */
         snprintf(dmsg, sizeof(dmsg), "directory is not empty - refusing to delete (matches VMS's own DELETE/DIRECTORY behavior); this entry is the directory's only one, and its header names another "
                  "directory (file number %u): a RENAME of this directory that was stopped is finished by running the same RENAME again", bn2);
     else
