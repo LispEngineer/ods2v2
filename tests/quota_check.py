@@ -58,6 +58,7 @@ def writes(work):
         ('delete_wild', 'DELETE [A]*.TXT;*', False),
         ('purge', 'PURGE [A]F.TXT', False),
         ('rename', 'RENAME [A]G.TXT [A]G2.TXT', False),
+        ('rename_directory', 'RENAME [000000]A.DIR [000000]A2.DIR', False),
         ('link', 'LINK [A]L.TXT [A]F.TXT', True),
         ('symlink', 'SYMLINK [A]S.TXT [A]F.TXT', True),
         ('set_protection', 'SET FILE/PROTECTION=(W:R) [A]F.TXT', False),

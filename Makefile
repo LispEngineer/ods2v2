@@ -392,6 +392,8 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_rm ods2_mkdir ods2_du
 	@sh tests/cli_dir_delete_check.sh
 	@echo "--- cli_quota_check (a volume with active disk quotas, [000000]QUOTA.SYS, is not written unless --ignore-quota; QUOTA.SYS is protected: CORPUS 71/72) ---"
 	@sh tests/cli_quota_check.sh
+	@echo "--- cli_rename_dir_check (RENAME of a directory: within the parent, to another parent, the refusals, the finish of a stopped move: step 3, review 71) ---"
+	@sh tests/cli_rename_dir_check.sh
 	@echo "--- cli_mpoffset_check (ods5check: the map starts at or above what the name needs, the slack zero: CORPUS 67.5) ---"
 	@sh tests/cli_mpoffset_check.sh
 	@echo "--- cli_versorder_check (versions of a name stored out of order: reads as VMS, changes refused, BAD_VERSORDER: H1, CORPUS 66.4) ---"
