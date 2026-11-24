@@ -5446,11 +5446,16 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
                primary one by the rule (no version compared without HARDLINKS), so removing it deletes the file that is being renamed. Refused before any write. */
             ods2_fid_t df;
             unsigned links_now = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
-            /* on a HARDLINKS volume with a link count of 2 or more the prune only takes the entry out and lowers the count (VMS too, CORPUS 70): the file stays and the rename goes on */
-            if (!(hardlinks && links_now >= 2) && ods2_lookup_name_version(vol, dst_header, dst_norm, (int) drop_version, &df, NULL).ok && fid_equal(df, src_fid)) {
+            /* on a HARDLINKS volume with a link count of 2 or more the prune only takes the entry out and lowers the count (VMS too, CORPUS 70): the file stays and the rename goes on. As DELETE does, only
+               for a level-5 header (a level-2 header on such a volume has no link count: its delete takes the whole file) */
+            /* the broad rule (review 70 recheck G1, G2): whenever the pruned entry is another entry of this file the rename is refused, except where the prune provably only lowers a link count (a HARDLINKS
+               volume, a level-5 header, a count of 2 or more). Whether the pruned entry would be the file's primary one is not asked: a count that is too low or a name that cannot be read made the narrower
+               rule lose files */
+            bool hl5 = hardlinks && (core->struclev >> 8) == ODS5_LEVEL_5;
+            if (!(hl5 && links_now >= 2) && ods2_lookup_name_version(vol, dst_header, dst_norm, (int) drop_version, &df, NULL).ok && fid_equal(df, src_fid)) {
                 static char msg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
                 free(di.versions);
-                snprintf(msg, sizeof(msg), "the version limit of %s would remove version %u, which is another entry of this same file (renaming onto %s;%u would delete the file): not renamed", dst_norm, drop_version, dst_norm, v);
+                snprintf(msg, sizeof(msg), "the version limit of %s would remove version %u, which is another entry of this same file; refused to keep the file safe (removing it can delete the file, and the entry this rename makes (%s;%u) would point at nothing): not renamed", dst_norm, drop_version, dst_norm, v); 
                 return fail(msg);
             }
         }
@@ -5529,6 +5534,23 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     inf.resumed = resumed;
     inf.moved = cross;
     if (out != NULL) *out = inf;
+    return ok();
+}
+
+ods2_result_t ods2_stored_name(ods2_volume_t *vol, unsigned dir_file_number, const char *name, char *out, size_t out_n)
+{
+    uint8_t dh[512];
+    dir_name_info_t info;
+    ods2_result_t r = ods2_read_header(vol, dir_file_number, dh);
+    if (!r.ok) return r;
+    r = directory_header_ok(dh, dir_file_number);
+    if (!r.ok) return r;
+    r = dir_name_info(vol, dh, name, &info);
+    if (!r.ok) return r;
+    free(info.versions);
+    if (!info.exists) return fail(ODS2_NAME_NOT_FOUND);
+    if (strlen(info.stored) >= out_n) return fail("file name too long");
+    memcpy(out, info.stored, strlen(info.stored) + 1);
     return ok();
 }
 
