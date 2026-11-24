@@ -83,6 +83,10 @@ SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"versions
 # no error of the checker; the transient duplicates of a split or a shrink are in EXTRA_ALLOWED for the operations that make them.
 RENAME_ALLOWED = []
 HF_NO_WARN_OPS = ('rename_move_limit', 'rename_alias', 'rename_hardlink', 'rename_case', 'rename_move', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_ext')     # the header is not rewritten (an alias), or the spelling only differs (no name differs)
+# RENAME of a directory (step 3): operation -> (the directory's path before, after). The files below must read under at least one of the two paths at every stop.
+DIRMOVE_PATHS = {'rename_dir_move': ('DMA/X', 'DMB/X'), 'rename_dir_move_name': ('DMA/X', 'DMB/Z'), 'rename_dir_rename': ('DMA/X', 'DMA/X2'), 'rename_dir_move_hardlink': ('DMA/X', 'DMB/X')}
+DIRMOVE_OPS = list(DIRMOVE_PATHS)
+DIRMOVE_SUB = ('', '/S')
 MOVE_OPS = ['rename_move', 'rename_move_name', 'rename_move_exist', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_split', 'rename_move_ext', 'rename_move_limit']
 MOVE_ALIAS_OPS = ('rename_move_alias', 'rename_move_hardlink')               # the header is not written: no header-first state
 MOVE_FIRST_STATE_ERROR = r'its back link directory \d+ has no entry for it'     # the ONE warning of the checker the first state of a primary move has (the header names the target directory, which has no entry yet; VMS: W-BACKLINK)
@@ -126,7 +130,7 @@ def check(img, op=None, transient=True):
         for a in extra:
             if re.search(a, l):
                 SEEN[a] = SEEN.get(a, 0) + 1
-        if any(re.search(a, l) for a in (RENAME_ALLOWED if op in RENAME_PAIRS else ALLOWED) + extra):
+        if any(re.search(a, l) for a in (RENAME_ALLOWED if (op in RENAME_PAIRS or op in DIRMOVE_OPS) else ALLOWED) + extra):
             leaks.append(l)
         else:
             bad.append(l)
@@ -334,6 +338,14 @@ def setup(level, hardlinks, fill_for=None, cluster=None):
                     return img
                 assert ods2(img, 'DELETE [SH]%s' % name)[0] == 0
             raise AssertionError('no delete shrinks the directory')
+        if fill_for == 'dirmove':
+            # RENAME of a DIRECTORY (step 3): [DMA] holds X (F.TXT, the subdirectory S with G.TXT) and a bystander; [DMB] a bystander; both parents with bystanders, X with a file of two blocks
+            for c in ('CREATE/DIRECTORY [DMA]', 'CREATE/DIRECTORY [DMB]', 'CREATE/DIRECTORY [DMA.X]', 'CREATE/DIRECTORY [DMA.X.S]'):
+                assert ods2(img, c)[0] == 0, c
+            for dst, src in (('[DMA.X]F.TXT', small), ('[DMA.X.S]G.TXT', mid), ('[DMA]B1.TXT', small), ('[DMB]B2.TXT', small), ('[DMA]B3.TXT', mid)):
+                rc, out = ods2(img, 'COPY %s %s' % (src, dst))
+                assert rc == 0, out
+            return img
         if fill_for == 'caseonly':
             assert ods2(img, 'COPY %s [000000]abc.txt' % small)[0] == 0      # a lower-case name (ODS-5 keeps the case)
             return img
@@ -460,6 +472,12 @@ OPS = {
     'rename_move_split': ('RENAME [000000]A1.TXT [FULL]%(next)s', ['A1.TXT;1', 'FULL/%(next)s;1'], False, False, 'split'),
     'rename_move_ext': ('RENAME [F]A.DAT [000000]A2.DAT', ['F/A.DAT;1', 'A2.DAT;1'], False, False, 'sfext'),
     # a move onto a name at its version limit (review 69 F1, N6): V.TXT;1 ;2 with the limit 2: the rename makes V.TXT;3 and the lowest, V.TXT;1, goes; the moved file must survive every stop
+    # RENAME of a directory (step 3, review 71 C6d): the whole subtree (X, its subdirectory S, F.TXT and G.TXT) reads back with its bytes under the old or the new path at every stop; the same RENAME again
+    # finishes; DELETE of either entry never loses the subtree; the checker's warnings only where the state has them
+    'rename_dir_move': ('RENAME [DMA]X.DIR [DMB]', ['dir:DMA/X', 'dir:DMA/X/S', 'DMA/X/F.TXT;1', 'DMA/X/S/G.TXT;1', 'dir:DMB/X', 'dir:DMB/X/S', 'DMB/X/F.TXT;1', 'DMB/X/S/G.TXT;1'], False, False, 'dirmove'),
+    'rename_dir_move_name': ('RENAME [DMA]X.DIR [DMB]Z.DIR', ['dir:DMA/X', 'dir:DMA/X/S', 'DMA/X/F.TXT;1', 'DMA/X/S/G.TXT;1', 'dir:DMB/Z', 'dir:DMB/Z/S', 'DMB/Z/F.TXT;1', 'DMB/Z/S/G.TXT;1'], False, False, 'dirmove'),
+    'rename_dir_rename': ('RENAME [DMA]X.DIR [DMA]X2.DIR', ['dir:DMA/X', 'dir:DMA/X/S', 'DMA/X/F.TXT;1', 'DMA/X/S/G.TXT;1', 'dir:DMA/X2', 'dir:DMA/X2/S', 'DMA/X2/F.TXT;1', 'DMA/X2/S/G.TXT;1'], False, False, 'dirmove'),
+    'rename_dir_move_hardlink': ('RENAME [DMA]X.DIR [DMB]', ['dir:DMA/X', 'dir:DMA/X/S', 'DMA/X/F.TXT;1', 'DMA/X/S/G.TXT;1', 'dir:DMB/X', 'dir:DMB/X/S', 'DMB/X/F.TXT;1', 'DMB/X/S/G.TXT;1'], True, True, 'dirmove'),
     'rename_move_limit': ('RENAME [SUB]D.TXT [000000]V.TXT', ['SUB/D.TXT;1', 'V.TXT;3', 'V.TXT;1'], False, False, None),
     # a case-only rename at ODS-5 (C3): the record's name bytes are replaced in place; the insert of a spelling that differs only in case is blind to case and would make a new version
     'rename_case': ('RENAME [000000]abc.txt [000000]ABC.txt', ['abc.txt;1', 'ABC.txt;1'], True, False, 'caseonly'),
@@ -652,6 +670,83 @@ def main():
                             prob.append('RENAME of the old name to a third name in the first state failed or did not move the entry: %s' % _out.strip()[:120])
                         elif not (_hdr0 and _hdr1 and _hdr0[0][1] == _hdr1[0][1]):
                             prob.append('RENAME of the old name to a third name in the first state wrote the header (VMS: an alias, the header is untouched)')
+                if name in DIRMOVE_OPS and mode == 'crash':
+                    _old, _new = DIRMOVE_PATHS[name]
+                    _o_ent = 'dir:' + _old in files
+                    _n_ent = 'dir:' + _new in files
+                    # (1) the whole subtree reads back with its own bytes under the old or the new path
+                    for _p, _h in base_files.items():
+                        if _p.startswith(_old + '/') and not _p.startswith('dir:'):
+                            _alt = _new + _p[len(_old):]
+                            if files.get(_p) != _h and files.get(_alt) != _h:
+                                prob.append('the subtree file %s reads back neither under %s nor under %s' % (_p, _old, _new))
+                    if not (_o_ent or _n_ent):
+                        prob.append('the directory is listed under neither %s nor %s' % (_old, _new))
+                    # CORPUS 72.3: VMS's RENAME of a directory leaves its link count UNCHANGED on HARDLINKS: in every stopped state (and after the end) the directory's count is what the base had
+                    if need_hl:
+                        import ext_headers as _eh
+                        _lcs = {}
+                        for _lbl, _img in (('base', base), ('trial', trial)):
+                            _hh = None
+                            for _pth in (_old, _new):
+                                _hh = _eh.chain(_img, '[%s]%s.DIR;1' % (_pth.rpartition('/')[0].replace('/', '.'), _pth.rpartition('/')[2]))
+                                if _hh:
+                                    break
+                            _lcs[_lbl] = int.from_bytes(_hh[0][1][74:76], 'little') if _hh else None
+                        if _lcs['base'] is None or _lcs['trial'] != _lcs['base']:
+                            prob.append('the directory\'s link count is %s, the base had %s (CORPUS 72.3: a directory RENAME does not write the link count)' % (_lcs['trial'], _lcs['base']))
+                    # (2) the checker's warnings: only the ones this state has (the first state: the back link (move) or the header name (rename); the second: the directory entered twice); none after the end
+                    _ct = [l for l in run(CHECK + [trial])[1].splitlines() if l.startswith('WARN') and 'allocated but owned by no file' not in l]
+                    _first = _o_ent and not _n_ent
+                    _second = _o_ent and _n_ent
+                    _ok_w = []
+                    if _first:
+                        _ok_w = [r"its back link directory \d+ has no entry for it", r"header name '.*' differs from its directory entry", r"link count \d+ but \d+ directory entr"]
+                    elif _second:
+                        _ok_w = [r"link count \d+ but \d+ directory entr"]
+                    if need_hl and k < n:
+                        _ok_w = _ok_w + [r"link count \d+ but \d+ directory entr"]      # (the stop between the old entry's removal and the count written back: the known leak)
+                    _bad = [l for l in _ct if not any(re.search(a, l) for a in _ok_w)]
+                    if _bad:
+                        prob.append('a warning the %s state may not have: %s' % ('first' if _first else 'second' if _second else 'final', _bad[0].strip()[:140]))
+                    # the directory entered twice is an INFO line of ods5check -v (review 72 S2: VMS makes such directories and its ANALYZE is silent): present in the second state, absent after the end
+                    _inf = [l for l in run(CHECK + ['-v', trial])[1].splitlines() if l.startswith('info') and 'is entered' in l and 'times' in l]
+                    if _second and len(_inf) != 1:
+                        prob.append('the second state (two entries) should show one "entered 2 times" INFO line, it shows %d' % len(_inf))
+                    if not _second and _inf:
+                        prob.append('a state that is not the second shows an "entered k times" INFO line: %s' % _inf[0].strip()[:120])
+                    if k == n and _ct:
+                        prob.append('the completed rename leaves a warning: %s' % _ct[0].strip()[:140])
+                    # (3) the same RENAME again finishes it (the old entry gone, the subtree under the new path, the checker clean)
+                    if _o_ent:
+                        _rr = os.path.join(WORK, 'rerun_dir.img')
+                        shutil.copyfile(trial, _rr)
+                        _rc, _ro = ods2(_rr, cmd, openv)
+                        _rc2, _rf, _ = tree(_rr, 'rerun_dir')
+                        if _rc != 0 or '%ODS2-E' in _ro:
+                            prob.append('the RENAME run again after the stop at write %d failed: %s' % (k, _ro.strip()[:120]))
+                        if 'dir:' + _old in _rf or 'dir:' + _new not in _rf:
+                            prob.append('after the RENAME run again the directory is not under %s only' % _new)
+                        for _p, _h in base_files.items():
+                            if _p.startswith(_old + '/') and not _p.startswith('dir:') and _rf.get(_new + _p[len(_old):]) != _h:
+                                prob.append('after the RENAME run again %s is not under %s' % (_p, _new))
+                        _bw = [l for l in run(CHECK + [_rr])[1].splitlines() if l.startswith('WARN') and 'allocated but owned by no file' not in l]
+                        _be = [l for l in run(CHECK + [_rr])[1].splitlines() if l.startswith('ERROR')]
+                        if _bw or _be:
+                            prob.append('after the RENAME run again the checker says: %s' % (_be + _bw)[0].strip()[:140])
+                    # (4) DELETE of either entry of the directory never loses the subtree (the directory is not empty): refused, or this entry alone
+                    for _ent in (_old, _new):
+                        if 'dir:' + _ent not in files:
+                            continue
+                        _dp, _, _dn = _ent.rpartition('/')
+                        _di = os.path.join(WORK, 'del_dir.img')
+                        shutil.copyfile(trial, _di)
+                        _dc, _do = ods2(_di, 'DELETE [%s]%s.DIR' % (_dp, _dn), openv)
+                        _df = tree(_di, 'del_dir')[1]
+                        for _p, _h in base_files.items():
+                            if _p.startswith(_old + '/') and not _p.startswith('dir:') and _df.get(_p) != _h and _df.get(_new + _p[len(_old):]) != _h:
+                                prob.append('after DELETE of [%s]%s.DIR the file %s is gone (the subtree must never be lost)' % (_dp, _dn, _p))
+                                break
                 if name in MOVE_OPS and mode == 'crash':
                     # DELETE of each name that exists in this state (CORPUS 68.3 and 69): VMS's rule says the FILE goes only through the entry that is in the header's BACK LINK directory AND carries the
                     # header's name (the version too, and only a link count of 1, on a HARDLINKS volume); through any other entry only that entry goes and the file stays. Restated here from the

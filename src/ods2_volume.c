@@ -5212,8 +5212,161 @@ static ods2_result_t rename_write_header(ods2_volume_t *vol, unsigned number, od
     return ods2_write_header(vol, number, h);
 }
 
+/* ---- RENAME of a directory (step 3; CORPUS 65.3, 66.3; reviews 65 C4, 71) ---- */
+
+#define IDR_MESSAGE "%RENAME-E-OPENIN, error opening the directory as input; -RMS-E-IDR, invalid directory rename operation (a directory cannot be moved under itself)"
+
+typedef struct { ods2_fid_t *fid; unsigned count, cap; } fid_set_t;
+
+static bool fid_set_has(const fid_set_t *s, ods2_fid_t f)
+{
+    unsigned i;
+    for (i = 0; i < s->count; i++) if (fid_equal(s->fid[i], f)) return true;
+    return false;
+}
+
+static bool fid_set_add(fid_set_t *s, ods2_fid_t f)
+{
+    if (s->count == s->cap) {
+        ods2_fid_t *n = realloc(s->fid, (s->cap ? s->cap * 2 : 64) * sizeof(*n));
+        if (n == NULL) return false;
+        s->fid = n;
+        s->cap = s->cap ? s->cap * 2 : 64;
+    }
+    s->fid[s->count++] = f;
+    return true;
+}
+
+/* does the name end in .DIR (case-blind) with something in front of it? */
+static bool name_is_dir_name(const char *name)
+{
+    size_t n = strlen(name);
+    return n > 4 && strcasecmp(name + n - 4, ".DIR") == 0;
+}
+
+typedef struct { ods2_fid_t *fid; char (*name)[ODS5_MAX_LITERAL_NAME + 8]; unsigned count, cap; bool oom; } child_list_t;
+
+static bool visit_dir_children(const ods2_dir_entry_t *entry, void *ctx_)
+{
+    child_list_t *c = (child_list_t *) ctx_;
+    if (!name_is_dir_name(entry->name) || entry->version != 1) return true;
+    if (c->count == c->cap) {
+        ods2_fid_t *nf = realloc(c->fid, (c->cap ? c->cap * 2 : 16) * sizeof(*nf));
+        char (*nn)[ODS5_MAX_LITERAL_NAME + 8];
+        if (nf == NULL) { c->oom = true; return false; }
+        c->fid = nf;
+        nn = realloc(c->name, (c->cap ? c->cap * 2 : 16) * sizeof(*nn));
+        if (nn == NULL) { c->oom = true; return false; }
+        c->name = nn;
+        c->cap = c->cap ? c->cap * 2 : 16;
+    }
+    c->fid[c->count] = entry->fid;
+    snprintf(c->name[c->count], ODS5_MAX_LITERAL_NAME + 8, "%s", entry->name);
+    c->count++;
+    return true;
+}
+
+typedef struct { ods2_fid_t fid; child_list_t kids; unsigned next; } dir_frame_t;
+
+static ods2_result_t dir_frame_push(ods2_volume_t *vol, dir_frame_t **st, unsigned *sp, unsigned *cap, ods2_fid_t fid)
+{
+    uint8_t hdr[512];
+    dir_frame_t *f;
+    if (*sp == *cap) {
+        dir_frame_t *n = realloc(*st, (*cap ? *cap * 2 : 32) * sizeof(*n));
+        if (n == NULL) return fail("out of memory");
+        *st = n;
+        *cap = *cap ? *cap * 2 : 32;
+    }
+    f = &(*st)[*sp];
+    memset(f, 0, sizeof(*f));
+    f->fid = fid;
+    if (!ods2_read_header_fid(vol, fid, hdr).ok || !walk_directory(vol, hdr, visit_dir_children, &f->kids).ok || f->kids.oom) {
+        free(f->kids.fid);
+        free(f->kids.name);
+        return fail("a directory below the one renamed cannot be read: not renamed");
+    }
+    (*sp)++;
+    return ok();
+}
+
+/* The directories below the directory `src_fid` (iterative: no recursion; depth bounded by `limit`), compared with the target (whole file ID): *target_inside when it is met; *height the depth of the
+   deepest below the source (0: none). A directory met twice (an alias, an unfinished move, a loop) is refused, naming the entry. Entries whose header is not a directory, is dangling or has another
+   sequence are skipped (a plain file named .DIR too). */
+static ods2_result_t dir_subtree_walk(ods2_volume_t *vol, ods2_fid_t src_fid, ods2_fid_t target_fid, unsigned limit, unsigned *height, bool *target_inside, const char *src_name)
+{
+    dir_frame_t *st = NULL;
+    unsigned sp = 0, cap = 0, maxd = 0;
+    fid_set_t seen = {NULL, 0, 0};
+    ods2_result_t res;
+    *height = 0;
+    *target_inside = false;
+    fid_set_add(&seen, src_fid);
+    res = dir_frame_push(vol, &st, &sp, &cap, src_fid);
+    maxd = sp;
+    while (res.ok && sp > 0) {
+        dir_frame_t *top = &st[sp - 1];
+        ods2_fid_t cf;
+        uint8_t ch[512];
+        unsigned idx;
+        if (top->next >= top->kids.count) {
+            free(top->kids.fid);
+            free(top->kids.name);
+            sp--;
+            continue;
+        }
+        idx = top->next++;
+        cf = top->kids.fid[idx];
+        if (ods2_fid_number(cf) == 4 || !ods2_check_fid(cf).ok || !ods2_read_header_fid(vol, cf, ch).ok || !ods2_header_is_file(ch, cf) ||
+            !(((const ods2_head_core_t *) ch)->filechar & 0x2000u)) continue;               /* stale, dangling, a plain file named .DIR: skipped */
+        if (fid_equal(cf, target_fid)) { *target_inside = true; break; }
+        if (fid_set_has(&seen, cf)) {
+            static char msg[ODS5_MAX_LITERAL_NAME + 240];       /* static: the message outlives this call */
+            snprintf(msg, sizeof(msg), "the directory %s is entered twice below %s (an unfinished RENAME of it, or an alias): run the RENAME that was stopped again, or DELETE the alias entry, then this one: not renamed", top->kids.name[idx], src_name);
+            res = fail(msg);
+            break;
+        }
+        if (!fid_set_add(&seen, cf)) { res = fail("out of memory"); break; }
+        if (sp + 1 > limit + 1) { maxd = sp + 1; break; }                              /* deeper than any depth allowed: the caller refuses */
+        res = dir_frame_push(vol, &st, &sp, &cap, cf);
+        if (sp > maxd) maxd = sp;
+    }
+    while (sp > 0) { sp--; free(st[sp].kids.fid); free(st[sp].kids.name); }
+    free(st);
+    free(seen.fid);
+    *height = maxd > 0 ? maxd - 1 : 0;
+    return res;
+}
+
+/* Is `fid` on the back-link chain of the directory `start` (whole file IDs, bounded, up to the master directory)? A chain that does not end at the MFD is a damaged structure. */
+static ods2_result_t dir_chain_contains(ods2_volume_t *vol, ods2_fid_t start, ods2_fid_t fid, bool *found)
+{
+    ods2_fid_t cur = start;
+    fid_set_t seen = {NULL, 0, 0};
+    unsigned steps = 0;
+    uint8_t hdr[512];
+    ods2_result_t res = ok();
+    *found = false;
+    for (;;) {
+        if (fid_equal(cur, fid)) { *found = true; break; }
+        if (ods2_fid_number(cur) == 4) break;
+        if (ods2_fid_number(cur) == 0 || (cur.fid_num == 0xFFFF && cur.fid_nmx == 0xFF)) {
+            res = fail("the target directory (or one of its parents) has no back link (0 or (16777215,0,0): the primary link of a hard-linked directory was removed): nothing can be moved into it until it is adopted: RENAME that directory first (to another name, or into another directory), which writes its name and back link: not renamed");
+            break;
+        }
+        if (++steps > ODS2_MAX_DIR_DEPTH + 1u || fid_set_has(&seen, cur) || !fid_set_add(&seen, cur)) { res = fail("the back links of the target directory do not lead to the master directory (a loop or a damaged directory structure): not renamed"); break; }
+        if (!ods2_check_fid(cur).ok || !ods2_read_header_fid(vol, cur, hdr).ok || !ods2_header_is_file(hdr, cur) || !(((const ods2_head_core_t *) hdr)->filechar & 0x2000u)) {
+            res = fail("the back links of the target directory lead to something that is not a directory (a damaged directory structure): not renamed");
+            break;
+        }
+        cur = ((const ods2_head_core_t *) hdr)->backlink;
+    }
+    free(seen.fid);
+    return res;
+}
+
 static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
-                                 unsigned dst_dir_number, const char *dst_name, int dst_version, ods2_rename_info_t *out)
+                                 unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia, ods2_rename_info_t *out)
 {
     ods2_rename_info_t inf;
     uint8_t dir_header[512], h[512], dst_header[512];
@@ -5226,7 +5379,8 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     bool cross;
     uint16_t sv = 0;
     unsigned number, v = 0, drop_version = 0, i;
-    bool resumed = false, same_name, hardlinks, primary = false, adopt = false, header_names_target = false;
+    bool resumed = false, same_name, hardlinks, primary = false, adopt = false, header_names_target = false, is_dir = false, dir_adopt = false;
+    const char *dir_alias_msg = NULL;
     ods2_result_t r;
 
     memset(&inf, 0, sizeof(inf));
@@ -5303,13 +5457,67 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     r = ods2_read_header_fid(vol, src_fid, h);
     if (!r.ok) return r;
     if (!ods2_header_is_file(h, src_fid)) return fail("the entry's file header is not a file header: damaged, not renamed");
+    if (number == 4 && (core->filechar & 0x2000u)) return fail(IDR_MESSAGE);                 /* the master directory: IDR on VMS (CORPUS 66.3) */
     if (is_reserved_file(vol, src_dir_number, src_stored, number)) {
         return fail("%RENAME-E-OPENIN, error opening the file as input; -RMS-F-RMV, ACP remove function failed; -SYSTEM-F-NOPRIV, insufficient privilege or object protection violation "
                     "(a reserved file: V8.4 refuses it; the VAX allows the volume owner)");
     }
-    if (core->filechar & 0x2000u) return fail("RENAME of a directory is not available yet (step 3)");
     if (core->seg_num != 0) return fail("the entry names an extension header: damaged, not renamed");
     hardlinks = vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS);
+    if (core->filechar & 0x2000u) {
+        /* a DIRECTORY (step 3). Nothing is written for its children: their back links hold this directory's whole file ID, which does not change. */
+        const char *dwhy = NULL;
+        unsigned depth_new = 0, height = 0;
+        bool inside = false, found = false, no_primary_dir, prim_dir;
+        char base[ODS5_MAX_LITERAL_NAME + 8];
+        is_dir = true;
+        inf.is_dir = true;
+        /* the new name: NAME.DIR;1 with a NAME CREATE/DIRECTORY would accept; the type is stored .DIR (C4) */
+        if (dst_version != 0 && dst_version != 1) return fail("a directory is renamed to NAME.DIR;1 only (a directory has one version): not renamed");
+        if (!name_is_dir_name(dst_norm)) return fail("a directory is renamed to NAME.DIR;1 only (a name with another type would hide its files from every path command: VMS accepts it, ods2v2 does not): not renamed");
+        memcpy(base, dst_norm, strlen(dst_norm) - 4);
+        base[strlen(dst_norm) - 4] = '\0';
+        if (!vol->ods5) {
+            if (!ods2_valid_dir_name(base, &dwhy)) { static char dm[200]; snprintf(dm, sizeof(dm), "the new name is not a valid directory name: %s: not renamed", dwhy); return fail(dm); }
+        } else {
+            dwhy = ods5_check_new_name(dst_norm);
+            if (dwhy != NULL) { static char dm2[200]; snprintf(dm2, sizeof(dm2), "the new name is not a valid directory name: %s: not renamed", dwhy); return fail(dm2); }
+        }
+        snprintf(dst_norm + strlen(base), sizeof(dst_norm) - strlen(base), ".DIR");
+        /* the master directory: IDR (66.3); the other reserved files were refused above */
+        if (number == 4) return fail(IDR_MESSAGE);
+        /* the entry: the primary one, an alias entry (refused) or the only entry of a directory whose back link is dead (adopted, review 71 C2) */
+        prim_dir = entry_is_primary(src_dir_number, h, src_stored, sv, false);
+        no_primary_dir = (core->backlink.fid_num == 0 && core->backlink.fid_nmx == 0) || (core->backlink.fid_num == 0xFFFF && core->backlink.fid_nmx == 0xFF);
+        if (!prim_dir && !no_primary_dir) {
+            uint8_t bh[512];
+            unsigned bn = ods2_fid_number(core->backlink), n_in_bl = 0;
+            bool bl_ok = bn != 0 && ods2_read_header(vol, bn, bh).ok && directory_header_ok(bh, bn).ok && dir_entries_of_file(vol, bh, src_fid, &n_in_bl);
+            if (bl_ok && n_in_bl > (bn == src_dir_number ? 1u : 0u)) {
+                static char am[ODS5_MAX_LITERAL_NAME + 260];       /* static: the message outlives this call */
+                snprintf(am, sizeof(am), "this entry is an ALIAS entry of the directory (its header names directory file %u, which holds another entry for it): rename that entry, or finish the interrupted RENAME of the directory by running it again: not renamed", bn);
+                dir_alias_msg = am;               /* refused below unless the target already names this directory (the finish of a stopped move) */
+            } else {
+                dir_adopt = true;                 /* its only entry, the back link names nothing that enters it: renamed and adopted */
+            }
+        }
+        /* a move under itself, and the depth: only when the parent changes (a rename within the parent leaves the ancestry and the depth as they are) */
+        if (cross) {
+            unsigned vi;
+            if (fid_equal(dst_fid, src_fid)) return fail(IDR_MESSAGE);
+            for (vi = 0; via != NULL && vi < nvia; vi++) if (fid_equal(via[vi], src_fid)) return fail(IDR_MESSAGE);
+            r = dir_chain_contains(vol, dst_fid, src_fid, &found);
+            if (!r.ok) return r;
+            if (found) return fail(IDR_MESSAGE);
+            r = ods2_directory_depth(vol, dst_header, &depth_new);
+            if (!r.ok) return r;
+            r = dir_subtree_walk(vol, src_fid, dst_fid, ODS2_MAX_DIR_DEPTH, &height, &inside, src_stored);
+            if (!r.ok) return r;
+            if (inside) return fail(IDR_MESSAGE);
+            if (depth_new + 1 + height > ODS2_MAX_DIR_DEPTH) return fail("directories can be nested at most 2048 levels deep (the depth DIR [...] and EXPORT read back): not renamed");
+            inf.deepest_names = depth_new + 1 + height;
+        }
+    }
 
     same_name = !cross && ods2_dir_name_compare(src_stored, strlen(src_stored), dst_norm, strlen(dst_norm)) == 0;      /* in another directory the name is a new name there */
     if (same_name && (dst_version == 0 || dst_version == (int) sv)) {
@@ -5427,6 +5635,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     if (!resumed) {
         bool exists;
         /* the target name is held by a directory or is a reserved file: no new version of it (review 67 F1; the same two refusals as COPY) */
+        if (is_dir && di.exists) { free(di.versions); return fail("this name exists in the target directory: a directory is not given another version of a name: not renamed"); }
         r = version_target_ok(vol, dst_dir_number, dst_norm, &di);
         if (!r.ok) { free(di.versions); return r; }
         r = next_version(&di, dst_version, &v, &exists);               /* the one rule of COPY: 1 for a new name, highest + 1, a typed version kept */
@@ -5476,8 +5685,9 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             snprintf(t, sizeof(t), "%s;%u", id.name, id.version);
             header_names_target = ods2_dir_name_compare(t, strlen(t), ident_name, strlen(ident_name)) == 0 && fid_equal(core->backlink, dst_fid);
         }
-        adopt = no_primary;
+        adopt = no_primary || dir_adopt;
         if (adopt) primary = false;
+        if (dir_alias_msg != NULL && !resumed && !header_names_target) return fail(dir_alias_msg);
     }
     snprintf(ident_name, sizeof(ident_name), "%s;%u", dst_norm, v);
 
@@ -5486,8 +5696,13 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
        header_names_target (the header is not written again: no revision bump), RENAME P R leaves the header alone, and a DELETE of P removes the entry only and leaves the file allocated in no directory (a
        leak that ANALYZE/REPAIR recovers). Header last (entry first) would have left a state in which VMS's DELETE of the old name, the user's natural action, deletes the FILE (CORPUS 67.3) and the new entry
        dangles: header first leaks at worst. An alias entry leaves the header alone: only the link count is written. */
+    /* CORPUS 72.3 (V8.4 HARDLINKS; the VAX has no HARDLINKS): VMS's own RENAME of a DIRECTORY leaves its link count as it was (1 stays 1), so a directory's rename writes no count: no count + 1 in the first
+       write, none to take back, and no state with a count of 2 for one entry. Why a directory needs none and a file does: VMS's DELETE on HARDLINKS decides by the count (CORPUS 72.2: count 1, the entry is the
+       only name, so the directory goes if it is EMPTY and DIRNOTEMPTY otherwise, through either entry), so with the count left at 1 no stopped state can orphan a subtree; a file's count is the number of its
+       names and a DELETE of one name must not free a file another still enters (CORPUS 67), so a file's rename keeps counting. */
+    const bool count_links = hardlinks && !is_dir;
     if (header_names_target) inf.header_current = true;
-    if (((primary || adopt) && !header_names_target) || (hardlinks && !resumed && !header_names_target)) {
+    if (((primary || adopt) && !header_names_target) || (count_links && !resumed && !header_names_target)) {
         if ((primary || adopt) && !header_names_target) {
             if (!ods2_header_set_name(h, ident_name)) return fail("the new name does not fit the header's name area (no room to move the map): not renamed");
             core->backlink = dst_fid;                    /* a move: the back link goes with the name, in the one header write (CORPUS 65.1: the back link, the name if it changes, revision, date); an adopted header too */
@@ -5495,7 +5710,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             inf.header_changed = true;
             inf.adopted = adopt;
         }
-        if (hardlinks && !resumed && !header_names_target) {
+        if (count_links && !resumed && !header_names_target) {
             unsigned links = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
             links++;
             h[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
@@ -5517,7 +5732,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     if (!r.ok) return r;
     r = remove_directory_entry(vol, src_dir_number, dir_header, src_stored, sv, src_fid);
     if (!r.ok) return r;
-    if (hardlinks) {                       /* also when an interrupted rename is finished: its first run counted the new entry, the old entry goes now */
+    if (count_links) {                     /* also when an interrupted rename is finished: its first run counted the new entry, the old entry goes now */
         unsigned links = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
         if (links > 0) links--;
         h[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
@@ -5554,13 +5769,19 @@ ods2_result_t ods2_stored_name(ods2_volume_t *vol, unsigned dir_file_number, con
     return ok();
 }
 
-ods2_result_t ods2_rename(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
-                          unsigned dst_dir_number, const char *dst_name, int dst_version, ods2_rename_info_t *info)
+ods2_result_t ods2_rename_ex(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
+                             unsigned dst_dir_number, const char *dst_name, int dst_version, const ods2_fid_t *via, unsigned nvia, ods2_rename_info_t *info)
 {
     ods2_result_t r;
     TXN_BEGIN_OR_RETURN(vol);
-    r = rename_impl(vol, src_dir_number, src_name, src_version, dst_dir_number, dst_name, dst_version, info);
+    r = rename_impl(vol, src_dir_number, src_name, src_version, dst_dir_number, dst_name, dst_version, via, nvia, info);
     return txn_end(vol, r);
+}
+
+ods2_result_t ods2_rename(ods2_volume_t *vol, unsigned src_dir_number, const char *src_name, int src_version,
+                          unsigned dst_dir_number, const char *dst_name, int dst_version, ods2_rename_info_t *info)
+{
+    return ods2_rename_ex(vol, src_dir_number, src_name, src_version, dst_dir_number, dst_name, dst_version, NULL, 0, info);
 }
 
 ods2_result_t ods2_delete(ods2_volume_t *vol, unsigned dir_file_number, const char *name)
@@ -5804,7 +6025,7 @@ static const char *dir_not_empty_message(const ods2_head_core_t *core, unsigned 
 {
     static char dmsg[360];       /* static: the message outlives this call */
     unsigned bn2 = ods2_fid_number(core->backlink);
-    if (bn2 != 0 && bn2 != dir_file_number && bn2 != 0xFFFF)
+    if (bn2 != 0 && bn2 != dir_file_number && bn2 != 0xFFFF && !(core->backlink.fid_num == 0xFFFF && core->backlink.fid_nmx == 0xFF))     /* not for "no back link": 0, or (16777215,0,0) */
         snprintf(dmsg, sizeof(dmsg), "directory is not empty - refusing to delete (matches VMS's own DELETE/DIRECTORY behavior); this entry is the directory's only one, and its header names another "
                  "directory (file number %u): a RENAME of this directory that was stopped is finished by running the same RENAME again", bn2);
     else
@@ -5997,7 +6218,10 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
             }
             r = ods2_write_header(vol, ods2_fid_number(target_fid), target_header);
             if (!r.ok) return r;
-            if (info != NULL) info->link_removed = true;     /* the file stays for its other links (PURGE does not say it freed blocks) */
+            if (info != NULL) {
+                info->link_removed = true;     /* the file stays for its other links (PURGE does not say it freed blocks) */
+                info->dir_link = (target_core->filechar & 0x2000u) != 0;
+            }
             if (version_out != NULL) *version_out = target_version;
             return ok();
         }

@@ -693,8 +693,8 @@ check "F8: DELETE of the stale alias removes the entry" "removed 0" "$msg $rc"
 check "F8: the new file is untouched" "new file content" "$($ODS2 "$img" "TYPE [000000]Q.TXT" 2>&1)"
 check "F8: after removing the alias ods5check is clean" "0 error(s), 0 warning(s)" "$(python3 -I tests/ods5check.py "$img" 2>&1 | tail -1)"
 
-# ---- depth (operator's choice, via the project's coordinator): OpenVMS VAX V7.3 reaches 7 levels below [000000] on an ODS-2 volume;
-# CREATE/DIRECTORY (and IMPORT) deeper than that works but warns; ODS-5 volumes never warn.
+# ---- depth: OpenVMS VAX V7.3 opens a path of 8 names on an ODS-2 volume and fails on the 9th (CORPUS 12.3, 65.3, 66.3); CREATE/DIRECTORY, IMPORT and RENAME of a directory warn ABOVE 8 (one shared
+# constant, ODS2_VAX_V73_MAX_NAMES); ODS-5 volumes never warn. (Before: 7, from an earlier measurement the CORPUS 65.3 and 66.3 runs contradict: the operator's choice via the coordinator, 24-NOV-2026.)
 for level in 2 5; do
     img="$TMP/dp$level.img"
     $INIT "$img" 8192 --structure=$level --label=DEPTH >/dev/null 2>&1
@@ -705,18 +705,28 @@ for level in 2 5; do
         [ $rc -eq 0 ] && made=$((made + 1))
         case "$out" in *DEEPDIR*) warned="$warned $n" ;; esac
     done
-    if [ $level = 2 ]; then exp="9| 8 9"; else exp="9|"; fi
-    check "ODS-$level: CREATE/DIRECTORY to 9 levels: all made (exit 0); the warning (ODS-2 only) from level 8 up" \
+    if [ $level = 2 ]; then exp="9| 9"; else exp="9|"; fi
+    check "ODS-$level: CREATE/DIRECTORY to 9 levels: all made (exit 0); no warning at exactly 8 names, the warning (ODS-2 only) at the 9th" \
         "$exp" "$made|$warned"
 done
 out=$($ODS2 "$TMP/dp2.img" "CREATE/DIRECTORY [L1.L2.L3.L4.L5.L6.L7.L8.L9.L10]" 2>&1)
 case "$out" in *"10 levels below [000000]"*"RMS-F-DIR"*"Alpha V7.3-2"*) msg=text ;; *) msg="$out" ;; esac
 check "ODS-2: the warning names the level, the VAX error and Alpha V7.3-2" text "$msg"
-mkdir -p "$TMP/impdeep/a/b/c/d/e/f/g/h/i"; echo x > "$TMP/impdeep/a/b/c/d/e/f/g/h/i/f.txt"
+mkdir -p "$TMP/impdeep/a/b/c/d/e/f/g/h/i/j"; echo x > "$TMP/impdeep/a/b/c/d/e/f/g/h/i/j/f.txt"
+mkdir -p "$TMP/imp8/a/b/c/d/e/f/g/h"; echo x > "$TMP/imp8/a/b/c/d/e/f/g/h/f.txt"
+mkdir -p "$TMP/imp9/a/b/c/d/e/f/g/h/i"; echo x > "$TMP/imp9/a/b/c/d/e/f/g/h/i/f.txt"
+$INIT "$TMP/dpi8.img" 8192 --structure=2 --label=IMP8 >/dev/null 2>&1
+out=$($ODS2 "$TMP/dpi8.img" "IMPORT $TMP/imp8 [000000]" 2>&1); rc=$?
+case "$out" in *DEEPDIR*) msg=warned ;; *) msg=silent ;; esac
+check "ODS-2: IMPORT of a tree 8 levels deep (a..h) does not warn" "silent 0" "$msg $rc"
+$INIT "$TMP/dpi9.img" 8192 --structure=2 --label=IMP9 >/dev/null 2>&1
+out=$($ODS2 "$TMP/dpi9.img" "IMPORT $TMP/imp9 [000000]" 2>&1); rc=$?
+case "$out" in *"1 directory deeper than 8 levels"*) msg=warned ;; *) msg="$out" ;; esac
+check "ODS-2: IMPORT of a tree 9 levels deep (a..i) warns once, with the count" "warned 0" "$msg $rc"
 $INIT "$TMP/dpi.img" 8192 --structure=2 --label=IMPDEEP >/dev/null 2>&1
 out=$($ODS2 "$TMP/dpi.img" "IMPORT $TMP/impdeep [000000]" 2>&1); rc=$?
-case "$out" in *"2 directories deeper than 7 levels"*) msg=warned ;; *) msg="$out" ;; esac
-check "ODS-2: IMPORT of a tree 10 levels deep warns once, with the count" "warned 0" "$msg $rc"
+case "$out" in *"2 directories deeper than 8 levels"*) msg=warned ;; *) msg="$out" ;; esac
+check "ODS-2: IMPORT of a tree 10 levels deep (a..j) warns once, with the count of the two below 8" "warned 0" "$msg $rc"
 
 # ---- version limits (R1, physical VAX96, B320): ods2v2 wrote a version limit of 1 in the directory entries of ODS-2
 # volumes, so VMS purged version 1 of a file as soon as COPY or EDIT made version 2 (the F8 aliases of run 1 dangled

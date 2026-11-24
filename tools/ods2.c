@@ -1706,13 +1706,13 @@ static void cmd_set_record_sizes(ods2_volume_t *vol, const ods2_parsed_path_t *p
     }
 }
 
-/* Warnings for a directory made deep. The deepest directory OpenVMS VAX V7.3 reaches on an ODS-2 volume is 7 levels below
-   [000000] (measured: deeper ones give %RMS-F-DIR and DIRECTORY [...] silently stops at 7); Alpha V7.3-2 and later create
+/* Warnings for a directory made deep. OpenVMS VAX V7.3 opens a path of 8 directory names on an ODS-2 volume and fails on the 9th (CORPUS 12.3 and 65.3: 8 names work; 66.3: a directory renamed to a 9th
+   name cannot be opened, %RMS-F-DIR); the one constant below serves CREATE/DIRECTORY, IMPORT and RENAME of a directory (it was 7 for the first two, from an earlier measurement). Alpha V7.3-2 and later create
    10,000 levels without refusal. But VMS's own wildcard descent [...] stops at 256 directories on V7.3-2 and 512 on V8.4 and
    V8.4-2L2 (%RMS-F-DIR), and BACKUP cannot save files that deep (FTLNTSAVED). ods2v2 creates up to 2,048 levels (the depth
-   its own DIR [...] and EXPORT read back) and says so past 256, and past 7 on an ODS-2 volume. Counts what it warned
+   its own DIR [...] and EXPORT read back) and says so past 256, and past 8 names on an ODS-2 volume. Counts what it warned
    about in *vax_warned and *deep_warned; prints when `print`. */
-#define ODS2_VAX_V73_MAX_LEVELS 7u
+#define ODS2_VAX_V73_MAX_NAMES 8u
 #define ODS2_VMS_WILDCARD_LEVELS 256u
 static void warn_deep(ods2_volume_t *vol, const uint8_t *parent_header, const char *shown, bool print, int *vax_warned,
                       int *deep_warned)
@@ -1721,12 +1721,12 @@ static void warn_deep(ods2_volume_t *vol, const uint8_t *parent_header, const ch
 
     if (!ods2_directory_depth(vol, parent_header, &depth).ok) return;
     depth += 1;     /* the level of the directory being made */
-    if (!vol->ods5 && depth > ODS2_VAX_V73_MAX_LEVELS) {
+    if (!vol->ods5 && depth > ODS2_VAX_V73_MAX_NAMES) {
         if (vax_warned != NULL) (*vax_warned)++;
         if (print) {
             fprintf(stderr, "%%ODS2-W-DEEPDIR, [%s] is %u levels below [000000]: OpenVMS VAX V7.3 cannot reach a "
                             "directory deeper than %u levels on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
-                            "later can\n", shown, depth, ODS2_VAX_V73_MAX_LEVELS);
+                            "later can\n", shown, depth, ODS2_VAX_V73_MAX_NAMES);
         }
     }
     if (depth > ODS2_VMS_WILDCARD_LEVELS) {
@@ -2710,7 +2710,36 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
         }
     }
     memset(&info, 0, sizeof(info));
-    r = ods2_rename(vol, ods2_fid_number(sfid), sname, sp->has_version ? sp->version : 0, ods2_fid_number(dfid), dname, dp->has_version ? dp->version : 0, &info);
+    {
+        /* the directories the typed target path passes through, by whole file ID (a directory is not moved under itself by a path that goes through a second entry of it: review 71 C1) */
+        ods2_fid_t *via = NULL;
+        unsigned nvia = 0;
+        if (dp->had_brackets && ddir_path[0] != '\0') {
+            char pre[ODS2_PATH_MAX];
+            const char *dot = ddir_path;
+            size_t cap = 0;
+            for (;;) {
+                const char *nx = ods5_find_unescaped(dot, '.');
+                size_t len = nx != NULL ? (size_t) (nx - ddir_path) : strlen(ddir_path);
+                ods2_fid_t f;
+                memcpy(pre, ddir_path, len);
+                pre[len] = '\0';
+                if (ods2_lookup_path(vol, pre, &f).ok) {
+                    if (nvia == cap) {
+                        ods2_fid_t *nv = realloc(via, (cap ? cap * 2 : 16) * sizeof(*nv));
+                        if (nv == NULL) break;
+                        via = nv;
+                        cap = cap ? cap * 2 : 16;
+                    }
+                    via[nvia++] = f;
+                }
+                if (nx == NULL) break;
+                dot = nx + 1;
+            }
+        }
+        r = ods2_rename_ex(vol, ods2_fid_number(sfid), sname, sp->has_version ? sp->version : 0, ods2_fid_number(dfid), dname, dp->has_version ? dp->version : 0, via, nvia, &info);
+        free(via);
+    }
     snprintf(what, sizeof(what), "%s", src_arg);
     if (!r.ok) {
         report_error("%%ODS2-E-RENAME, %s: %s\n", what, r.problem);
@@ -2728,6 +2757,10 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
                    (info.header_changed || info.header_current) ? "" : " (an alias entry: the file's header is not changed)");
         }
         if (info.pruned_version != 0) printf("%%ODS2-I-DELETED, deleted %s;%u (the version limit)\n", shown, info.pruned_version);
+        if (info.is_dir && !vol->ods5 && info.deepest_names > ODS2_VAX_V73_MAX_NAMES) {
+            fprintf(stderr, "%%ODS2-W-DEEPDIR, the directory is now %u names deep below [000000]: OpenVMS VAX V7.3 cannot open a path of more than %u names on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and later can\n",
+                    info.deepest_names, ODS2_VAX_V73_MAX_NAMES);
+        }
     }
 }
 
@@ -2979,7 +3012,7 @@ static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods
     if (st.deep > 0) {
         fprintf(stderr, "%%ODS2-W-DEEPDIR, %d director%s deeper than %u levels below [000000] created: OpenVMS "
                         "VAX V7.3 cannot reach them on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
-                        "later can\n", st.deep, st.deep == 1 ? "y" : "ies", ODS2_VAX_V73_MAX_LEVELS);
+                        "later can\n", st.deep, st.deep == 1 ? "y" : "ies", ODS2_VAX_V73_MAX_NAMES);
     }
     if (st.deep256 > 0) {
         fprintf(stderr, "%%ODS2-W-DEEPDIR256, %d director%s deeper than %u levels below [000000] created: VMS's own wildcard "
@@ -3318,6 +3351,9 @@ static void report_deletion(const char *name, uint16_t version, const ods2_delet
         /* the first state of a stopped RENAME (CORPUS 69): not "deleted": the entry went, the file did not */
         printf("%%ODS2-W-FILEKEPT, removed the entry %s;%u only: the file stays allocated with no entry left in its directory (its header names a name or a directory that has no entry for it: a RENAME that was stopped; another directory may still enter it). "
                "ANALYZE/DISK_STRUCTURE/REPAIR on VMS puts it in SYSLOST; it is not deleted\n", name, version);
+    } else if (info->link_removed && info->dir_link) {
+        /* a directory taken off a HARDLINKS count that was above 1 (review 73 S3): not plainly "deleted": the entry went, the directory file stays; with no other entry it is in no directory */
+        printf("%%ODS2-W-FILEKEPT, removed the entry %s;%u only (the directory's link count was above 1): the directory file stays allocated; if no other entry names it, it is now in no directory (ANALYZE/DISK_STRUCTURE/REPAIR on VMS); it is not deleted\n", name, version);
     } else if (info->kept == 1 && info->name_differs) {
         char shown[ODS2_PATH_MAX];
         display_name(info->primary_name, shown, sizeof(shown));
