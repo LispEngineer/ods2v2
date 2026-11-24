@@ -5448,31 +5448,14 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             unsigned links_now = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
             /* on a HARDLINKS volume with a link count of 2 or more the prune only takes the entry out and lowers the count (VMS too, CORPUS 70): the file stays and the rename goes on. As DELETE does, only
                for a level-5 header (a level-2 header on such a volume has no link count: its delete takes the whole file) */
-            /* only an entry that counts as the file's PRIMARY one at that moment takes the file with it: the header as this rename leaves it (a primary or adopted entry's header gets the target directory and the
-               new name; an alias entry's header stays) names the entry (its directory, its name; on HARDLINKS the version too). A pruned entry that is an alias goes alone, the file stays (review 70). */
-            bool pruned_primary = false, hl5 = hardlinks && (core->struclev >> 8) == ODS5_LEVEL_5;       /* HARDLINKS as DELETE sees it: a level-5 header */
-            if (hardlinks && !hl5) {
-                pruned_primary = true;          /* a header that is not level 5 on a HARDLINKS volume has no link count and its name cannot be read as a level-5 one: a delete takes the whole file: in doubt, refuse */
-            } else {
-                ods5_ident_t pid;
-                const char *pwhy;
-                char pa[ODS5_MAX_LITERAL_NAME + 8];
-                unsigned pbl = ods2_fid_number(core->backlink);
-                bool pno = (core->backlink.fid_num == 0 && core->backlink.fid_nmx == 0) || (core->backlink.fid_num == 0xFFFF && core->backlink.fid_nmx == 0xFF);
-                bool will_write = (pno || entry_is_primary(src_dir_number, h, src_stored, sv, false));
-                if (will_write) {
-                    pruned_primary = true;                                  /* the header names dst_norm in dst_dir_number from the first write on: the same name, any version of it counts (not compared without HARDLINKS) */
-                    if (hl5) pruned_primary = (drop_version == v);
-                } else if (pbl == dst_dir_number) {
-                    char pb[ODS5_MAX_LITERAL_NAME + 8];
-                    if (!ods5_read_ident(h, &pid, &pwhy) || !ods5_complete_name(pid.name, pa, sizeof(pa))) pruned_primary = true;       /* a name that cannot be read: in doubt, refuse */
-                    else pruned_primary = ods5_complete_name(dst_norm, pb, sizeof(pb)) && ods2_dir_name_compare(pa, strlen(pa), pb, strlen(pb)) == 0 && (!hl5 || pid.version == drop_version);
-                }
-            }
-            if (pruned_primary && !(hl5 && links_now >= 2) && ods2_lookup_name_version(vol, dst_header, dst_norm, (int) drop_version, &df, NULL).ok && fid_equal(df, src_fid)) {
+            /* the broad rule (review 70 recheck G1, G2): whenever the pruned entry is another entry of this file the rename is refused, except where the prune provably only lowers a link count (a HARDLINKS
+               volume, a level-5 header, a count of 2 or more). Whether the pruned entry would be the file's primary one is not asked: a count that is too low or a name that cannot be read made the narrower
+               rule lose files */
+            bool hl5 = hardlinks && (core->struclev >> 8) == ODS5_LEVEL_5;
+            if (!(hl5 && links_now >= 2) && ods2_lookup_name_version(vol, dst_header, dst_norm, (int) drop_version, &df, NULL).ok && fid_equal(df, src_fid)) {
                 static char msg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
                 free(di.versions);
-                snprintf(msg, sizeof(msg), "the version limit of %s would remove version %u, which is another entry of this same file; it counts as the file's primary entry of that name (the version is not compared), so removing it would delete the file, and the entry this rename makes (%s;%u) would point at nothing: not renamed", dst_norm, drop_version, dst_norm, v); 
+                snprintf(msg, sizeof(msg), "the version limit of %s would remove version %u, which is another entry of this same file; refused to keep the file safe (removing it can delete the file, and the entry this rename makes (%s;%u) would point at nothing): not renamed", dst_norm, drop_version, dst_norm, v); 
                 return fail(msg);
             }
         }

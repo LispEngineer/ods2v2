@@ -853,14 +853,16 @@ def review69b_cases(work, level, hl):
         h1 = sha(im2)
         rc, out = ods2(im2, 'RENAME [X]up.txt R69B:')
         check('%s R2: RENAME [X]up.txt R69B: leaves the stored UP.TXT alone: nothing is written' % kind, (0, True, h1), (rc, 'already named' in out, sha(im2)))
-    # review 70: the pruned entry is itself an ALIAS (the header names [X]A.TXT): the prune takes an entry out and the file stays: the rename is not refused
+    # review 70 recheck (G1, G2): the broad rule: a pruned entry that is another entry of the same file is refused WHATEVER it is (an alias too: a header, a link count or a name may not tell the
+    # truth), except on a HARDLINKS volume with a level-5 header and a link count of 2 or more
     if not hl:
         im = fresh()
         for c in ('LINK [Y]D.TXT [X]A.TXT', 'LINK [Y]C.TXT [X]A.TXT', 'SET FILE/VERSION_LIMIT=1 [Y]C.TXT'):
             assert ods2(im, c)[0] == 0, c
+        h4 = sha(im)
         rc, out = ods2(im, 'RENAME [Y]D.TXT [Y]C.TXT;5')
-        check('%s review 70: RENAME [Y]D.TXT [Y]C.TXT;5 with the pruned [Y]C.TXT;1 an alias (the header names [X]A.TXT) goes through: C.TXT;5 only, the file reads, the checker is clean' % kind,
-              (0, ['C.TXT;5'], True, []), (rc, [x for x in listing(im, '[Y]') if x.startswith('C.TXT')], 'content of the file' in ods2(im, 'TYPE [X]A.TXT;1')[1], checker_errors(im)))
+        check('%s review 70 recheck: RENAME [Y]D.TXT [Y]C.TXT;5 with the pruned [Y]C.TXT;1 an alias is refused too (the broad rule), the image is unchanged, the file reads' % kind,
+              (True, h4, True), ('another entry of this same file' in out and '%ODS2-I-RENAMED' not in out, sha(im), 'content of the file' in ods2(im, 'TYPE [X]A.TXT;1')[1]))
     # the F1 refusal on a pure alias rename: only an entry would move, the PRIMARY entry of the target name is what the prune would take out
     im = fresh()
     assert ods2(im, 'LINK [X]AL.TXT [X]B.TXT;2') [0] == 0
@@ -871,25 +873,37 @@ def review69b_cases(work, level, hl):
     rc, out = ods2(im, 'RENAME [X]ALC.TXT [Y]C.TXT;5')
     if hl:
         check('%s F1 alias: an alias of a file with a link count of 2: the prune only lowers the count: the rename goes on' % kind, (0, True), (rc, '%ODS2-I-RENAMED' in out))
-        # the exemption is for a LEVEL-5 header only, as DELETE has it: the same file with a level-2 header (no link count to lower) is refused like on a volume without HARDLINKS
-        im = fresh()
+    else:
+        check('%s F1 alias: a refused PURE ALIAS rename says the prune can delete the file and that it is refused to keep it safe' % kind,
+              (True, True, h2), ('another entry of this same file' in out and 'keep the file safe' in out, '%ODS2-I-RENAMED' not in out, sha(im)))
+
+    def patched(tag, patch, expect_refused_all=True):
+        """a HARDLINKS-volume file whose header does not tell the truth (review 70 recheck G1: the link count 1 or 0 with two entries; G2: a header that is not level 5, whose name cannot be read): the
+        rename onto the name whose limit prunes the file's other entry is refused and the image is unchanged"""
+        im2 = fresh()
         for c in ('COPY %s [Y]C.TXT' % src, 'LINK [X]ALC.TXT [Y]C.TXT', 'SET FILE/VERSION_LIMIT=1 [Y]C.TXT'):
-            assert ods2(im, c)[0] == 0, c
-        v = O.Vol(im)
-        with open(im, 'r+b') as f:
-            lbn = E.D.lbn(v, E.D.fnum(im, '[Y]C.TXT'))
+            assert ods2(im2, c)[0] == 0, c
+        v = O.Vol(im2)
+        with open(im2, 'r+b') as f:
+            lbn = E.D.lbn(v, E.D.fnum(im2, '[Y]C.TXT'))
             f.seek(lbn * 512)
             hb = bytearray(f.read(512))
-            struct.pack_into('<H', hb, 6, 0x0201)                      # FH2$W_STRUCLEV: level 2
+            patch(hb)
             struct.pack_into('<H', hb, 510, sum(struct.unpack_from('<255H', hb, 0)) & 0xffff)
             f.seek(lbn * 512)
             f.write(bytes(hb))
-        h3 = sha(im)
-        rc, out = ods2(im, 'RENAME [X]ALC.TXT [Y]C.TXT;5')
-        check('%s F1 level-2 header: the HARDLINKS exemption does not apply to a header that is not level 5: refused, the image is unchanged' % kind, (True, h3), ('another entry of this same file' in out and '%ODS2-I-RENAMED' not in out, sha(im)))
-    else:
-        check('%s F1 alias: the message of a refused PURE ALIAS rename says the prune would take out the primary entry, the file would be deleted' % kind,
-              (True, True, h2), ('another entry of this same file' in out and 'primary' in out and 'delete' in out, '%ODS2-I-RENAMED' not in out, sha(im)))
+        h5 = sha(im2)
+        rc2, out2 = ods2(im2, 'RENAME [X]ALC.TXT [Y]C.TXT;5')
+        check('%s review 70 recheck %s: refused (the file may be lost otherwise), the image is unchanged' % (kind, tag), (True, h5), ('another entry of this same file' in out2 and '%ODS2-I-RENAMED' not in out2, sha(im2)))
+        im3 = fresh()
+        return im3
+    if level == 5:
+        patched('G2 a header that is not level 5 (its name cannot be read)', lambda hb: struct.pack_into('<H', hb, 6, 0x0201))
+        if not hl:      # (a level-5 header with a link count of 2 on a HARDLINKS volume is the exemption: the prune only lowers the count)
+            patched('G2 a header with the name area damaged (name length 0)', lambda hb: hb.__setitem__(hb[0] * 2 + 1, 0))
+    if hl:
+        patched('G1 link count 1 with two entries', lambda hb: struct.pack_into('<H', hb, 74, 1))
+        patched('G1 link count 0 with two entries', lambda hb: struct.pack_into('<H', hb, 74, 0))
 
 
 def r1_unusable_number(work, level):
