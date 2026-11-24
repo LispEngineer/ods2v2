@@ -82,8 +82,14 @@ SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"versions
 # for delete, a back link directory without an entry): a rename that loses a header or a block must be seen. The two-entry states (one file under two names, in one directory or two) are
 # no error of the checker; the transient duplicates of a split or a shrink are in EXTRA_ALLOWED for the operations that make them.
 RENAME_ALLOWED = []
-HF_NO_WARN_OPS = ('rename_alias', 'rename_hardlink', 'rename_case')     # the header is not rewritten (an alias), or the spelling only differs (no name differs)
-RENAME_PAIRS = {'rename_same_dir': ('A1.TXT;1', 'A9.TXT;1'), 'rename_type': ('B.DAT;1', 'B.TXT;1'), 'rename_newver': ('A1.TXT;1', 'W.TXT;10'),
+HF_NO_WARN_OPS = ('rename_alias', 'rename_hardlink', 'rename_case', 'rename_move', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_ext')     # the header is not rewritten (an alias), or the spelling only differs (no name differs)
+MOVE_OPS = ['rename_move', 'rename_move_name', 'rename_move_exist', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_split', 'rename_move_ext']
+MOVE_ALIAS_OPS = ('rename_move_alias', 'rename_move_hardlink')               # the header is not written: no header-first state
+MOVE_FIRST_STATE_ERROR = r'its back link directory \d+ has no entry for it'     # the ONE error of the checker the first state of a primary move has (the header names the target directory, which has no entry yet)
+RENAME_PAIRS = {'rename_move': ('A1.TXT;1', 'SUB/A1.TXT;1'), 'rename_move_name': ('A1.TXT;1', 'SUB/A9.TXT;1'), 'rename_move_exist': ('A1.TXT;1', 'SUB/D.TXT;2'),
+                'rename_move_alias': ('SUB/LNKA.TXT;1', 'EMPTY/LNKA.TXT;1'), 'rename_move_primary': ('L.TXT;1', 'EMPTY/L.TXT;1'), 'rename_move_hardlink': ('SUB/LNKA.TXT;1', 'EMPTY/LNKA.TXT;1'),
+                'rename_move_primary_hardlink': ('L.TXT;1', 'EMPTY/L.TXT;1'), 'rename_move_split': ('A1.TXT;1', 'FULL/%(next)s;1'), 'rename_move_ext': ('F/A.DAT;1', 'A2.DAT;1'),
+                'rename_same_dir': ('A1.TXT;1', 'A9.TXT;1'), 'rename_type': ('B.DAT;1', 'B.TXT;1'), 'rename_newver': ('A1.TXT;1', 'W.TXT;10'),
                 'rename_alias': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'), 'rename_primary_alias': ('L.TXT;1', 'L2.TXT;1'), 'rename_hardlink': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'),
                 'rename_primary_hardlink': ('L.TXT;1', 'L2.TXT;1'), 'rename_split': ('FULL/N00000.TXT;1', 'FULL/%(next)s;1'),
                 'rename_case': ('abc.txt;1', 'ABC.txt;1'), 'rename_ext': ('F/A.DAT;1', 'F/A2.DAT;1'), 'rename_shrink_last': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1'), 'rename_shrink_mid': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1')}
@@ -92,7 +98,7 @@ SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"BAD_VERS
 SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big', 'newver_split']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
                  'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT, 'newver_split': SPLIT_TRANSIENT,
-                 'delete_dirshrink_mid': SPLIT_TRANSIENT, 'rename_split': SPLIT_TRANSIENT, 'rename_shrink_last': SPLIT_TRANSIENT, 'rename_shrink_mid': SPLIT_TRANSIENT}   # the blocks after the emptied one move up one at a time: a name is listed twice for a moment, never missing
+                 'delete_dirshrink_mid': SPLIT_TRANSIENT, 'rename_split': SPLIT_TRANSIENT, 'rename_move_split': SPLIT_TRANSIENT, 'rename_shrink_last': SPLIT_TRANSIENT, 'rename_shrink_mid': SPLIT_TRANSIENT}   # the blocks after the emptied one move up one at a time: a name is listed twice for a moment, never missing
 
 
 # Growing INDEXF.SYS when its last header is an extension header changes two blocks that cannot be written as one: the
@@ -441,6 +447,18 @@ OPS = {
     'rename_hardlink': ('RENAME [SUB]LNKA.TXT [SUB]LNKB.TXT', ['SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'], True, True, None),
     'rename_primary_hardlink': ('RENAME [000000]L.TXT [000000]L2.TXT', ['L.TXT;1', 'L2.TXT;1'], True, True, None),
     'rename_split': ('RENAME [FULL]N00000.TXT [FULL]%(next)s', ['FULL/N00000.TXT;1', 'FULL/%(next)s;1'], False, False, 'split'),
+    # RENAME into ANOTHER directory (step 2; CORPUS 65.1 b, 66.2 k2, 68.3): header first (the back link, and the name if it changes, revision, date: one write), then the entry in the target directory, then the
+    # old entry out; an alias entry moves with its header untouched. At every stop the file reads back under one of its names, and a DELETE of either name does what VMS's rule says (the file goes only through
+    # the entry that is in the header's back link directory AND carries the header's name)
+    'rename_move': ('RENAME [000000]A1.TXT [SUB]', ['A1.TXT;1', 'SUB/A1.TXT;1'], False, False, None),
+    'rename_move_name': ('RENAME [000000]A1.TXT [SUB]A9.TXT', ['A1.TXT;1', 'SUB/A9.TXT;1'], False, False, None),
+    'rename_move_exist': ('RENAME [000000]A1.TXT [SUB]D.TXT', ['A1.TXT;1', 'SUB/D.TXT;2'], False, False, None),
+    'rename_move_alias': ('RENAME [SUB]LNKA.TXT [EMPTY]', ['SUB/LNKA.TXT;1', 'EMPTY/LNKA.TXT;1'], False, False, None),
+    'rename_move_primary': ('RENAME [000000]L.TXT [EMPTY]', ['L.TXT;1', 'EMPTY/L.TXT;1'], False, False, None),
+    'rename_move_hardlink': ('RENAME [SUB]LNKA.TXT [EMPTY]', ['SUB/LNKA.TXT;1', 'EMPTY/LNKA.TXT;1'], True, True, None),
+    'rename_move_primary_hardlink': ('RENAME [000000]L.TXT [EMPTY]', ['L.TXT;1', 'EMPTY/L.TXT;1'], True, True, None),
+    'rename_move_split': ('RENAME [000000]A1.TXT [FULL]%(next)s', ['A1.TXT;1', 'FULL/%(next)s;1'], False, False, 'split'),
+    'rename_move_ext': ('RENAME [F]A.DAT [000000]A2.DAT', ['F/A.DAT;1', 'A2.DAT;1'], False, False, 'sfext'),
     # a case-only rename at ODS-5 (C3): the record's name bytes are replaced in place; the insert of a spelling that differs only in case is blind to case and would make a new version
     'rename_case': ('RENAME [000000]abc.txt [000000]ABC.txt', ['abc.txt;1', 'ABC.txt;1'], True, False, 'caseonly'),
     # the remove that empties a block (C6b): the old name is alone in the LAST, then a MIDDLE, block of its directory and the new name sorts first, so the insert is in the first block
@@ -474,7 +492,7 @@ OPS = {
 }
 # the operations that are also run with an I/O error at the k-th write of the commit (the process goes on and says so), not only killed
 ERROR_MODE_OPS = ['newver_limit', 'newver_limit3_big', 'newver_limit1_big', 'newver_front', 'purge_names', 'setfile_prot', 'setfile_wild', 'setfile_owner_ext']
-QUICK = ['rename_same_dir', 'rename_newver', 'rename_alias', 'rename_primary_alias', 'rename_split', 'rename_case', 'rename_shrink_last', 'rename_shrink_mid', 'delete_dirshrink', 'delete_dirshrink_mid', 'index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
+QUICK = ['rename_move_name', 'rename_move_primary', 'rename_move_alias', 'rename_move_split', 'rename_same_dir', 'rename_newver', 'rename_alias', 'rename_primary_alias', 'rename_split', 'rename_case', 'rename_shrink_last', 'rename_shrink_mid', 'delete_dirshrink', 'delete_dirshrink_mid', 'index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
          'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split', 'newver_limit3_big', 'newver_limit1_big',
          'purge_names', 'purge_keep2', 'setfile_prot', 'setfile_owner', 'setfile_dir', 'setfile_reserved', 'setfile_wild', 'setfile_owner_ext']
 
@@ -536,14 +554,27 @@ def main():
                 faultenv = {'ODS2_FAULT_AFTER_WRITES': str(k)} if mode == 'crash' else {'ODS2_FAULT_ERROR_AT_WRITE': str(k)}
                 rc, out = ods2(trial, cmd, dict(openv, **faultenv))
                 prob = []
+                _mv_first = False
                 # the run that completes (k = n) must be clean: no duplicate allowance (R9-3)
                 allow = name if (k < n or mode == 'error') else None
                 bad, leaks = check(trial, allow)
-                prob += ['checker: ' + b for b in bad]
+                _bad0 = bad
                 if name in SHRINK_OPS:
                     prob += ['checker warns: ' + l.strip()[:140] for l in run(CHECK + [trial])[1].splitlines() if l.startswith('WARN') and 'end-of-records' in l]
                 counts['leak' if leaks else 'clean'] += 1
                 rc2, files, text = tree(trial, 'after')
+                if name in MOVE_OPS and name not in MOVE_ALIAS_OPS and mode == 'crash':
+                    # header first: the state after the header write (the old entry only) has the header naming the target directory, which has no entry yet: exactly ONE such error is allowed there, and
+                    # it must be there (otherwise the order is not header first); no other state has any
+                    _mo, _mn = (x % ctx_op for x in RENAME_PAIRS[name])
+                    _first = _mo in files and _mn not in files
+                    _mv_first = _first
+                    _bl = [b for b in _bad0 if re.search(MOVE_FIRST_STATE_ERROR, b)]
+                    if _first:
+                        if len(_bl) != 1:
+                            prob.append('the state after the header write of a move should show exactly one "back link directory has no entry" error, it shows %d: not header first?' % len(_bl))
+                        _bad0 = [b for b in _bad0 if b not in _bl]
+                prob += ['checker: ' + b for b in _bad0]
                 for p, h in base_files.items():
                     if p in files and files[p] != h:         # a target may be gone (a removed version), never changed (review 40 F1)
                         prob.append('file %s changed' % p)
@@ -588,7 +619,7 @@ def main():
                     _bad_w = [l for l in _w if not (_first_state and re.search(r"header name '.*' differs from its directory entry", l))]
                     if _bad_w:
                         prob.append('a warning the stopped state may not have: %s' % _bad_w[0].strip()[:150])
-                    if _first_state and name not in HF_NO_WARN_OPS and not any("header name '" in l for l in _w):
+                    if _first_state and name not in HF_NO_WARN_OPS and name not in MOVE_OPS and not any("header name '" in l for l in _w):
                         prob.append('the state after the header write (one entry, the old name; the header names the new one) has no "header name ... differs from its directory entry" warning: the order is not header first')
                     if _first_state and name not in HF_NO_WARN_OPS:
                         # CORPUS 69 (V8.4 both levels, VAX V7.3): in this state VMS reads the entry as an ALIAS (the header names the new name, which is not there): DELETE removes the ENTRY only (the file stays
@@ -619,6 +650,48 @@ def main():
                             prob.append('RENAME of the old name to a third name in the first state failed or did not move the entry: %s' % _out.strip()[:120])
                         elif not (_hdr0 and _hdr1 and _hdr0[0][1] == _hdr1[0][1]):
                             prob.append('RENAME of the old name to a third name in the first state wrote the header (VMS: an alias, the header is untouched)')
+                if name in MOVE_OPS and mode == 'crash':
+                    # DELETE of each name that exists in this state (CORPUS 68.3 and 69): VMS's rule says the FILE goes only through the entry that is in the header's BACK LINK directory AND carries the
+                    # header's name (the version too, and only a link count of 1, on a HARDLINKS volume); through any other entry only that entry goes and the file stays. Restated here from the
+                    # image's own header, independently of the code under test.
+                    import ext_headers as _E2
+                    import rename_check as _RC
+                    _ko, _kn = (x % ctx_op for x in RENAME_PAIRS[name])
+                    for _vk in (_ko, _kn):
+                        if _vk not in files:
+                            continue
+                        _vp, _, _vv = _vk.rpartition(';')
+                        _vd, _, _vn = _vp.rpartition('/')
+                        _vspec = '[%s]%s;%s' % (_vd if _vd else '000000', _vn, _vv)
+                        _vdirnum = 4 if not _vd else fid_of(trial, '[000000]%s.DIR' % _vd)
+                        _ch = _E2.chain(trial, _vspec)
+                        if not _ch:
+                            prob.append('DELETE oracle: no header for %s' % _vspec)
+                            continue
+                        _h = _ch[0][1]
+                        _f = _RC.fields(_h, level)
+                        _hn, _, _hv = _f['name'].partition(';')
+                        _primary = _RC.backlink_num(_h) == _vdirnum and _hn.upper() == _vn.upper()
+                        if need_hl:
+                            _primary = _primary and _hv == _vv
+                        _expect_file = _primary and not (need_hl and _f['linkcount'] > 1)
+                        _dimg = os.path.join(WORK, 'dele.img')
+                        shutil.copyfile(trial, _dimg)
+                        _rcd, _outd = ods2(_dimg, 'DELETE ' + _vspec, openv)
+                        SEEN['DELETE oracle: ' + ('file' if _expect_file else 'entry only')] = SEEN.get('DELETE oracle: ' + ('file' if _expect_file else 'entry only'), 0) + 1
+                        _fr = lambda im: int(re.search(r'Free blocks:\s+(\d+)', ods2(im, 'SHOW VOLUME')[1]).group(1))
+                        _plain = (_fr(_dimg) > _fr(trial)) if need_hl else ('%ODS2-I-DELETED' in _outd)       # (a HARDLINKS link removal says "deleted" too: the blocks tell whether the file went)
+                        if _rcd != 0 or '%ODS2-E' in _outd:
+                            prob.append('DELETE %s in this state failed: %s' % (_vspec, _outd.strip()[:120]))
+                        elif _plain != _expect_file:
+                            prob.append('DELETE %s: VMS\'s rule (back link directory %s, header name %s) says the %s, ods2v2 said: %s' % (_vspec, _RC.backlink_num(_h), _f['name'], 'FILE goes' if _expect_file else 'ENTRY only goes', _outd.strip()[:100]))
+                        if not _expect_file and not _rcd:
+                            _errs = [l for l in run(CHECK + [_dimg])[1].splitlines() if l.startswith('ERROR')]
+                            _odd = [l for l in _errs if not re.search(r'is in no directory \(lost file\)|' + MOVE_FIRST_STATE_ERROR, l)]
+                            if _odd:
+                                prob.append('after DELETE %s (entry only): the checker says more than a lost file: %s' % (_vspec, _odd[0].strip()[:120]))
+                            if _vn + ';' + _vv in _RC.listing(_dimg, '[%s]' % (_vd if _vd else '000000')):
+                                prob.append('DELETE %s left the entry in its directory' % _vspec)
                 if name in RENAME_PAIRS and mode == 'crash':
                     # the way back (review 65 C6c): the same RENAME again. A target entry that already points at the source's file ID is an interrupted rename: the run FINISHES it (no new
                     # version). Once the old entry is gone (or the rename completed) the source no longer exists: the run is refused and the image is unchanged (for a rename that changes
@@ -707,6 +780,8 @@ def main():
                         if rcx != 0:
                             prob.append('the COPY of %s after the fault failed: %s' % (extra, outx.strip()[:120]))
                 bad2, leaks2 = check(trial, allow, False)
+                if _mv_first:             # the state is still the one the move was stopped in (a COPY does not change it): its one error stays
+                    bad2 = [b for b in bad2 if not re.search(MOVE_FIRST_STATE_ERROR, b)]
                 prob += ['after COPY, checker: ' + b for b in bad2]
                 rc4, files2, text = tree(trial, 'after2')
                 for p, h in base_files.items():

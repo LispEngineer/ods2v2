@@ -2624,15 +2624,42 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
         report_error("%%ODS2-E-NOTYET, %s: RENAME with a wildcard is not available yet (step 4)\n", src_arg);
         return;
     }
-    if (dp->filename[0] == '\0') {
-        report_error("%%ODS2-E-NOTYET, %s: RENAME into another directory (a target with no file name) is not available yet (step 2)\n", dst_arg);
+    if (dp->filename[0] == '\0' && !dp->had_brackets) {
+        report_error("%%ODS2-E-BADPATH, %s: RENAME needs a new name or a directory for the file\n", dst_arg);
         return;
+    }
+    /* another device: the one volume of this session is the only one a file can go to (VMS: NOTSAMEDEV, CORPUS 65.6, nothing changed). The device parts typed (the parser leaves them out of the path) must
+       be the same, or, when only the new name has one, name this volume by its label */
+    {
+        char sdev[64], ddev[64];
+        const char *sb = ods5_find_unescaped(src_arg, '['), *db = ods5_find_unescaped(dst_arg, '[');
+        const char *sc = ods5_find_unescaped(src_arg, ':'), *dc = ods5_find_unescaped(dst_arg, ':');
+        if (sc != NULL && sb != NULL && sc > sb) sc = NULL;               /* a colon after the bracket is not a device */
+        if (dc != NULL && db != NULL && dc > db) dc = NULL;
+        sdev[0] = ddev[0] = '\0';
+        if (sc != NULL && (size_t) (sc - src_arg) < sizeof(sdev)) { memcpy(sdev, src_arg, (size_t) (sc - src_arg)); sdev[sc - src_arg] = '\0'; }
+        if (dc != NULL && (size_t) (dc - dst_arg) < sizeof(ddev)) { memcpy(ddev, dst_arg, (size_t) (dc - dst_arg)); ddev[dc - dst_arg] = '\0'; }
+        if (dc != NULL) {
+            char label[13];
+            size_t k, len = 12;
+            memcpy(label, vol->home.volname, 12);
+            label[12] = '\0';
+            while (len > 0 && label[len - 1] == ' ') label[--len] = '\0';
+            for (k = 0; ddev[k] != '\0'; k++) ddev[k] = (char) toupper((unsigned char) ddev[k]);
+            for (k = 0; sdev[k] != '\0'; k++) sdev[k] = (char) toupper((unsigned char) sdev[k]);
+            for (k = 0; label[k] != '\0'; k++) label[k] = (char) toupper((unsigned char) label[k]);
+            if (strcmp(ddev, sdev) != 0 && !(sdev[0] == '\0' && strcmp(ddev, label) == 0)) {
+                report_error("%%RENAME-E-NOTRENAMED, %s not renamed\n-RENAME-E-NOTSAMEDEV, Cannot RENAME to a different device\n", src_arg);
+                return;
+            }
+        }
     }
     if (ods5_unescape_filename(sp->filename, strlen(sp->filename), sname, sizeof(sname)) == (size_t) -1 ||
         ods5_unescape_filename(dp->filename, strlen(dp->filename), dname, sizeof(dname)) == (size_t) -1) {
         report_error("%%ODS2-E-BADNAME, malformed ^ escape in a file name\n");
         return;
     }
+    if (dp->filename[0] == '\0') snprintf(dname, sizeof(dname), "%s", sname);          /* RENAME [X]C.TXT [Y]: the same name in the other directory (CORPUS 65.1 b1) */
     resolve_effective_path(sp, sdir_path, sizeof(sdir_path));
     r = resolve_dir(vol, sdir_path, sdir, &sfid);
     if (!r.ok) {
@@ -2648,10 +2675,6 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
         }
     } else {
         dfid = sfid;                                  /* no directory in the new name: the old file's directory */
-    }
-    if (!(sfid.fid_num == dfid.fid_num && sfid.fid_seq == dfid.fid_seq && sfid.fid_rvn == dfid.fid_rvn && sfid.fid_nmx == dfid.fid_nmx)) {
-        report_error("%%ODS2-E-NOTYET, %s: RENAME into another directory is not available yet (step 2)\n", dst_arg);
-        return;
     }
     memset(&info, 0, sizeof(info));
     r = ods2_rename(vol, ods2_fid_number(sfid), sname, sp->has_version ? sp->version : 0, ods2_fid_number(dfid), dname, dp->has_version ? dp->version : 0, &info);
@@ -3260,7 +3283,7 @@ static void report_deletion(const char *name, uint16_t version, const ods2_delet
 {
     if (info->no_entry_left) {
         /* the first state of a stopped RENAME (CORPUS 69): not "deleted": the entry went, the file did not */
-        printf("%%ODS2-W-FILEKEPT, removed the entry %s;%u only: the file stays allocated with no entry left in its directory (its header names another entry that is not there: a RENAME that was stopped; another directory may still enter it). "
+        printf("%%ODS2-W-FILEKEPT, removed the entry %s;%u only: the file stays allocated with no entry left in its directory (its header names a name or a directory that has no entry for it: a RENAME that was stopped; another directory may still enter it). "
                "ANALYZE/DISK_STRUCTURE/REPAIR on VMS puts it in SYSLOST; it is not deleted\n", name, version);
     } else if (info->kept == 1 && info->name_differs) {
         char shown[ODS2_PATH_MAX];

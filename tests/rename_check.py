@@ -153,7 +153,7 @@ def build(work, level, hl, link, noprimary=False):
     files = [('[X]A.TXT', 'content of A'), ('[X2]M.TXT', 'content of M'), ('[X2]M2.TXT', 'content of M2'),
              ('[X2]T.TXT', 'T version 1'), ('[X2]T.TXT', 'T version 2'), ('[X2]T.TXT', 'T version 3'), ('[X2]FILE.TXT', 'content of FILE'), ('[X2]H3.TXT', 'content of H3'),
              # CORPUS 66 groups K and L
-             ('[K]P1.TXT', 'P1'), ('[K]F3.TXT', 'F3'), ('[K]A6.TXT', 'A6'), ('[K]S7.TXT', 'S7'), ('[K]Q5.TXT', 'Q5'), ('[K]T.TXT', 'K T1'), ('[K]T.TXT', 'K T2'), ('[K]T.TXT', 'K T3'),
+             ('[K]P1.TXT', 'P1'), ('[K]P2.TXT', 'P2'), ('[X]C.TXT', 'content of C'), ('[X]C2.TXT', 'content of C2'), ('[K]F3.TXT', 'F3'), ('[K]A6.TXT', 'A6'), ('[K]S7.TXT', 'S7'), ('[K]Q5.TXT', 'Q5'), ('[K]T.TXT', 'K T1'), ('[K]T.TXT', 'K T2'), ('[K]T.TXT', 'K T3'),
              ('[K]L.TXT', 'L1'), ('[K]L.TXT', 'L2'), ('[K]L.TXT', 'L3'), ('[K]N8.TXT', 'N8'),
              ('[L]M.TXT;5', 'M v5'), ('[L]T.TXT', 'L T1'), ('[L]T.TXT', 'L T2'), ('[L]T.TXT', 'L T3'), ('[L]U.TXT;5', 'U v5'), ('[L]F5.TXT', 'F5'),
              ('[VL]A.TXT', 'A1'), ('[VL]A.TXT', 'A2'), ('[VL]A.TXT', 'A3'), ('[VL]A.TXT', 'A4'), ('[VL]A.TXT', 'A5'), ('[VL]D.TXT', 'D1'),
@@ -214,6 +214,7 @@ def run_case(cid, t, kind, level, hl, kname, base, work, start=None):
     before = hdr(img, hspec)
     others = {u: hdr(img, t['dir'] + u) for u in t.get('untouched', []) + t.get('untouched_extra', [])}
     list_before = listing(img, t['dir'])
+    list_before2 = listing(img, t['dir2']) if t.get('dir2') else None
     rc, out = ods2(img, 'RENAME %s %s' % (t['old'], t['new']))
     if t['status'] == 'refused':
         msgs = t.get('ods2v2_msgs', t.get('msgs', []))
@@ -243,8 +244,10 @@ def run_case(cid, t, kind, level, hl, kname, base, work, start=None):
             extra.append((1, 2))                                                  # MPOFFSET
             if t['mpoffset'][1] > t['mpoffset'][0]:
                 extra.append((before[0] * 2, t['mpoffset'][1] * 2 + before[58] * 2))   # the ident area grows over the old map; the map moves up
-        check('%s: no byte outside name, revision, the date field and the checksum changed%s' % (tag, ' (and the back link, which is set)' if t.get('backlink') == 'adopted' else ''), [],
-              other_bytes_same(before, after, level, t.get('backlink') == 'adopted', extra))
+        check('%s: no byte outside name, revision, the date field and the checksum changed%s' % (tag, ' (and the back link, which is set)' if t.get('backlink') in ('adopted', 'moved') else ''), [],
+              other_bytes_same(before, after, level, t.get('backlink') in ('adopted', 'moved'), extra))
+        if t.get('backlink') == 'moved':
+            check('%s: the back link is now the directory %s' % (tag, t['dir2']), E.D.fnum(img, '[000000]%s.DIR' % t['dir2'].strip('[]')), backlink_num(after))
         if t.get('mpoffset'):
             mp0, mp1 = t['mpoffset']
             mb = before[58] * 2
@@ -269,8 +272,13 @@ def run_case(cid, t, kind, level, hl, kname, base, work, start=None):
     for u, h in others.items():
         check('%s: the header of %s is untouched' % (tag, u), h, hdr(img, t['dir'] + u))
     if t['removed'] is not None and all(PLAIN.match(x) for x in t['removed'] + t['added']):
-        lb, la = set(list_before), set(listing(img, t['dir']))
-        check('%s: the directory loses %s and gains %s' % (tag, t['removed'], t['added']), (sorted(t['removed']), sorted(t['added'])), (sorted(lb - la), sorted(la - lb)))
+        if t.get('dir2'):
+            lb, la = set(list_before), set(listing(img, t['dir']))
+            lb2, la2 = set(list_before2), set(listing(img, t['dir2']))
+            check('%s: %s loses %s and %s gains %s' % (tag, t['dir'], t['removed'], t['dir2'], t['added']), (sorted(t['removed']), [], [], sorted(t['added'])), (sorted(lb - la), sorted(la - lb), sorted(lb2 - la2), sorted(la2 - lb2)))
+        else:
+            lb, la = set(list_before), set(listing(img, t['dir']))
+            check('%s: the directory loses %s and gains %s' % (tag, t['removed'], t['added']), (sorted(t['removed']), sorted(t['added'])), (sorted(lb - la), sorted(la - lb)))
     check('%s: the checker finds nothing wrong' % tag, [], checker_errors(img))
     if cid == 'g2':
         check('%s: the alias entry stays as it was and reads the same data' % tag, (list_alias_before(base), 'content of FILE'),
@@ -544,6 +552,178 @@ def g1_aliases(work, level, hl):
     check('%s: the checker finds no error after DELETE X.TXT in that state' % kind, [], [e for e in checker_errors(img) if 'lost file' not in e or not hl])
 
 
+def free_blocks(img):
+    return int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
+
+
+def backlink_num(h):
+    return struct.unpack_from('<H', h, 66)[0]
+
+
+def move_cases(work, level, hl):
+    """RENAME step 2 (review 67 / orch 21:47): a file into ANOTHER directory (CORPUS 65.1 b1 b2, 65.2, 65.5, 66.1, 66.2 k2, 68.3): the header's back link changes (and the name if it changes), revision +1, the
+    date; the directories' own headers are not touched; the other versions, the other entries, the bystanders of both directories stay; an alias entry moves with its header untouched."""
+    kind = 'ODS-%d%s' % (level, ' HARDLINKS' if hl else '')
+    img = os.path.join(work, 'mv_%d%s.img' % (level, 'h' if hl else ''))
+    assert run([INIT, img, '16384', '--structure=%d' % level, '--label=MOVE'] + (['--hardlinks'] if hl else []))[0] == 0
+    n = [0]
+
+    def put(text):
+        n[0] += 1
+        p = os.path.join(work, 'mv%d.txt' % n[0])
+        open(p, 'w').write(text + '\n')
+        return p
+    cmds = ['CREATE/DIRECTORY [X]', 'CREATE/DIRECTORY [Y]', 'CREATE/DIRECTORY [Z]', 'CREATE/DIRECTORY [Y.SUBD]']
+    files = [('[X]C.TXT', 'content of C'), ('[X]C2.TXT', 'content of C2'), ('[X]M.TXT', 'content of M'), ('[X]M2.TXT', 'content of M2'), ('[X]N.TXT', 'content of N'), ('[X]V.TXT', 'content of V'),
+             ('[X]P.TXT', 'content of P'), ('[X]Q.TXT', 'content of Q'), ('[X]R.TXT', 'content of R'), ('[X]RS.TXT', 'content of RS'),
+             ('[X]MF.TXT', 'content of MF'), ('[X]BY1.TXT', 'bystander 1'), ('[X]BY2.TXT', 'bystander 2'), ('[Y]BY3.TXT', 'bystander 3'), ('[Y]BY4.TXT', 'bystander 4'), ('[Z]BY5.TXT', 'bystander 5'),
+             ('[Y]T.TXT', 'Y T1'), ('[Y]T.TXT', 'Y T2'), ('[Y]T.TXT', 'Y T3'), ('[Y]L.TXT', 'Y L1'), ('[Y]L.TXT', 'Y L2'), ('[Y]L.TXT', 'Y L3')]
+    for i, (dst, text) in enumerate(files):
+        cmds.append('COPY %s %s' % (put(text), dst))
+    cmds += ['SET FILE/VERSION_LIMIT=3 [Y]L.TXT;3', 'LINK [Z]AL.TXT [X]P.TXT', 'LINK [X]QAL.TXT [X]Q.TXT', 'LINK [Z]ALR.TXT [X]R.TXT', 'LINK [Y]RS.TXT [X]RS.TXT']
+    for c in cmds:
+        rc, out = ods2(img, c)
+        assert rc == 0 and '%ODS2-E' not in out, (c, out)
+    # the header of R gets back link (0,0,0): no primary entry (what VMS's SET FILE/REMOVE leaves)
+    v = O.Vol(img)
+    with open(img, 'r+b') as f:
+        lbn = E.D.lbn(v, E.D.fnum(img, '[X]R.TXT'))
+        f.seek(lbn * 512)
+        hb = bytearray(f.read(512))
+        hb[66:72] = bytes(6)
+        struct.pack_into('<H', hb, 510, sum(struct.unpack_from('<255H', hb, 0)) & 0xffff)
+        f.seek(lbn * 512)
+        f.write(bytes(hb))
+    time.sleep(1.1)
+    base = os.path.join(work, 'mv_base_%d%s.img' % (level, 'h' if hl else ''))
+    shutil.copyfile(img, base)
+    xnum, ynum, znum = (E.D.fnum(base, '[000000]%s.DIR' % d) for d in ('X', 'Y', 'Z'))
+    xdir0, ydir0 = hdr(base, '[000000]X.DIR;1'), hdr(base, '[000000]Y.DIR;1')
+
+    def fresh_img(tag):
+        shutil.copyfile(base, img)
+        return img
+
+    def moved(tag, cmd, old, new, new_name_expect, rev, expect_bl, header_same=False):
+        """one successful move: the entry goes from the directory of `old` to that of `new`; the header as VMS makes it"""
+        im = fresh_img(tag)
+        before = hdr(im, old)
+        lx, ly, lz = listing(im, '[X]'), listing(im, '[Y]'), listing(im, '[Z]')
+        by = {s: hdr(im, s) for s in ('[X]BY1.TXT;1', '[X]BY2.TXT;1', '[Y]BY3.TXT;1', '[Y]BY4.TXT;1', '[Z]BY5.TXT;1')}
+        rc, out = ods2(im, cmd)
+        check('%s: %s succeeds' % (tag, cmd), (0, True), (rc, '%ODS2-E' not in out and '%RENAME-E' not in out and 'ILLCMD' not in out))
+        after = hdr(im, new)
+        if after is None:
+            check('%s: the file is found under %s' % (tag, new), True, False)
+            return im, out
+        fb, fa = fields(before, level), fields(after, level)
+        if header_same:
+            check('%s: an alias entry moved: the header is byte for byte the same (CORPUS 66.2 k2)' % tag, before, after)
+        else:
+            check('%s: the stored name is %s' % (tag, new_name_expect), new_name_expect, fa['name'])
+            check('%s: revision number +%d' % (tag, rev), fb['revision'] + rev, fa['revision'])
+            check('%s: the back link is now the directory of the new entry (%s)' % (tag, expect_bl), expect_bl, backlink_num(after))
+            check('%s: no byte outside the back link, the name, the revision, the date field and the checksum changed' % tag, [], other_bytes_same(before, after, level, True, ()))
+            check('%s: the header checksum is right' % tag, True, cksum_ok(after))
+            if level == 2:
+                check('%s: ODS-2: the revision date is set to the time of the RENAME' % tag, (True, True), (fa['revdate'] > fb['revdate'], abs(fa['revdate'] - vms_now()) < 864000000000))
+            else:
+                check('%s: ODS-5: the last attribute change date is set, the revision date is not changed' % tag, (True, True, fb['revdate']), (fa['attdate'] > fb['attdate'], abs(fa['attdate'] - vms_now()) < 864000000000, fa['revdate']))
+        if hl:
+            check('%s: the link count is as it was (%d)' % (tag, fb['linkcount']), fb['linkcount'], fa['linkcount'])
+        check('%s: the directories own headers are not touched (CORPUS 65.1)' % tag, (xdir0, ydir0), (hdr(im, '[000000]X.DIR;1'), hdr(im, '[000000]Y.DIR;1')))
+        check('%s: the bystanders of both directories keep their headers' % tag, by, {s: hdr(im, s) for s in by})
+        check('%s: the checker finds nothing wrong' % tag, [], [e for e in checker_errors(im) if tag == 'ma' or 'back link 0 is not a directory' not in e])      # (the base keeps R.TXT with back link 0 until it is moved)
+        return im, out
+
+    # b1: the same name into another directory (the target with no file name)
+    im, out = moved('mb1', 'RENAME [X]C.TXT;1 [Y]', '[X]C.TXT;1', '[Y]C.TXT;1', 'C.TXT;1', 1, ynum)
+    lx, ly = listing(im, '[X]'), listing(im, '[Y]')
+    check('mb1 %s: [X] loses C.TXT;1, [Y] gains it, nothing else moves' % kind, (True, True, True),
+          ('C.TXT;1' not in lx and len(lx) == len(listing(base, '[X]')) - 1, 'C.TXT;1' in ly and len(ly) == len(listing(base, '[Y]')) + 1, set(lx) | {'C.TXT;1'} == set(listing(base, '[X]'))))
+    check('mb1 %s: the data reads back under the new directory' % kind, 'content of C', ods2(im, 'TYPE [Y]C.TXT')[1].strip().splitlines()[-1])
+    # the file now belongs to [Y]: its DELETE deletes the file (the entry is in the back link directory and names the header's name)
+    f0 = free_blocks(im)
+    rc, out = ods2(im, 'DELETE [Y]C.TXT')
+    check('mb1 %s: DELETE [Y]C.TXT deletes the file (blocks come back, no error from the checker)' % kind, (True, []), (free_blocks(im) > f0, [e for e in checker_errors(im) if 'back link 0 is not' not in e]))
+    # b2: moved and renamed at once
+    moved('mb2', 'RENAME [X]C2.TXT [Y]C3.TXT', '[X]C2.TXT;1', '[Y]C3.TXT;1', 'C3.TXT;1', 1, ynum)
+    # the target name exists: the next version in the TARGET directory (CORPUS 65.2)
+    im, out = moved('mb3', 'RENAME [X]M.TXT [Y]T.TXT', '[X]M.TXT;1', '[Y]T.TXT;4', 'T.TXT;4', 1, ynum)
+    check('mb3 %s: [Y]T.TXT keeps its three versions and gains ;4' % kind, ['T.TXT;1', 'T.TXT;2', 'T.TXT;3', 'T.TXT;4'], [x for x in listing(im, '[Y]') if x.startswith('T.TXT')])
+    # an explicit version that exists in the target: refused, the volume unchanged (VMS bumps the source header: ods2v2 does not, an intended difference)
+    im = fresh_img('mb4')
+    h0 = sha(im)
+    rc, out = ods2(im, 'RENAME [X]M2.TXT [Y]T.TXT;2')
+    check('mb4 %s: an explicit version that exists in the target directory is refused (DUPFILENAME) and the image is unchanged' % kind, (True, h0), ('DUPFILENAME' in out, sha(im)))
+    moved('mb5', 'RENAME [X]N.TXT [Y]N.TXT;7', '[X]N.TXT;1', '[Y]N.TXT;7', 'N.TXT;7', 1, ynum)
+    # the version limit of the target name (CORPUS 66.1: the lowest goes)
+    im, out = moved('mb6', 'RENAME [X]V.TXT [Y]L.TXT', '[X]V.TXT;1', '[Y]L.TXT;4', 'L.TXT;4', 1, ynum)
+    check('mb6 %s: the target name limit of 3 removes its lowest version: [Y]L.TXT is ;2 ;3 ;4' % kind, ['L.TXT;2', 'L.TXT;3', 'L.TXT;4'], [x for x in listing(im, '[Y]') if x.startswith('L.TXT')])
+    # an alias entry (here in the primary's own directory): the entry moves, the header is untouched (CORPUS 66.2 k2)
+    im, out = moved('mk2', 'RENAME [X]QAL.TXT [Y]', '[X]Q.TXT;1', '[Y]QAL.TXT;1', None, 0, None, True)
+    check('mk2 %s: the alias is in [Y] now and the primary [X]Q.TXT is as it was' % kind, ('QAL.TXT;1' in listing(im, '[Y]'), 'Q.TXT;1' in listing(im, '[X]'), 'QAL.TXT;1' in listing(im, '[X]')),
+          (True, True, False))
+    im2 = im
+    f0 = free_blocks(im2)
+    ods2(im2, 'DELETE [Y]QAL.TXT')
+    check('mk2 %s: DELETE of the moved alias removes the entry only (the back link directory is [X]): the file stays under [X]Q.TXT, no blocks freed' % kind, (['Q.TXT;1'], True, f0),
+          ([x for x in listing(im2, '[X]') if x.startswith('Q.')], 'content of Q' in ods2(im2, 'TYPE [X]Q.TXT')[1], free_blocks(im2)))
+    # an alias in a third directory moved and renamed: the header is untouched, the primary stays
+    moved('mk2b', 'RENAME [Z]AL.TXT [Y]AL2.TXT', '[X]P.TXT;1', '[Y]AL2.TXT;1', None, 0, None, True)
+    # the primary entry that has an alias elsewhere: the header follows the entry, the alias entry is not touched (CORPUS 65.5)
+    im, out = moved('mp', 'RENAME [X]P.TXT [Y]', '[X]P.TXT;1', '[Y]P.TXT;1', 'P.TXT;1', 1, ynum)
+    check('mp %s: the alias [Z]AL.TXT is as it was and now points at a file whose back link is [Y]; DELETE of it removes the entry only' % kind, (True, True), ('AL.TXT;1' in listing(im, '[Z]'), 'content of P' in ods2(im, 'TYPE [Z]AL.TXT')[1]))
+    ods2(im, 'DELETE [Z]AL.TXT')
+    check('mp %s: ... the file stays under [Y]P.TXT' % kind, ('content of P', []), (ods2(im, 'TYPE [Y]P.TXT')[1].strip().splitlines()[-1], [e for e in checker_errors(im) if 'back link 0 is not' not in e]))
+    # a header with no primary entry (back link 0): the entry moved is adopted (name, back link set), as the same-directory rename does (CORPUS 66.2)
+    im, out = moved('ma', 'RENAME [Z]ALR.TXT [Y]ALR2.TXT', '[X]R.TXT;1', '[Y]ALR2.TXT;1', 'ALR2.TXT;1', 1, ynum)
+    # the target entry already names the file (a LINK, or a move that was stopped after its new entry): finished, no new version
+    im = fresh_img('mresume')
+    rc, out = ods2(im, 'RENAME [X]RS.TXT [Y]RS.TXT')
+    h = hdr(im, '[Y]RS.TXT;1')
+    check('mresume %s: the target entry [Y]RS.TXT already names the file: the move finishes it (one entry [Y]RS.TXT;1, [X] has none, the back link is [Y], the checker is clean)' % kind,
+          (0, ['RS.TXT;1'], [], ynum, []), (rc, [x for x in listing(im, '[Y]') if x.startswith('RS.')], [x for x in listing(im, '[X]') if x.startswith('RS.')], backlink_num(h) if h is not None else None, [e for e in checker_errors(im) if 'back link 0 is not' not in e]))
+    # errors: the target directory does not exist, another device (VMS: DNF, NOTSAMEDEV; nothing changes)
+    im = fresh_img('mdnf')
+    h0 = sha(im)
+    rc, out = ods2(im, 'RENAME [X]C.TXT [NOSUCH]')
+    check('mdnf %s: the target directory does not exist: DNF, the image is unchanged' % kind, (True, h0), ('directory not found' in out and '%RENAME-E-OPENOUT' in out, sha(im)))
+    rc, out = ods2(im, 'RENAME [X]C.TXT OTHER:[Y]')
+    check('mdev %s: another device: NOTSAMEDEV, the image is unchanged' % kind, (True, h0), ('NOTSAMEDEV' in out, sha(im)))
+    rc, out = ods2(im, 'RENAME DKA0:[X]C.TXT DKB0:[Y]')
+    check('mdev %s: two different devices typed: NOTSAMEDEV, the image is unchanged' % kind, (True, h0), ('NOTSAMEDEV' in out, sha(im)))
+    rc, out = ods2(im, 'RENAME DKA0:[X]C.TXT DKA0:[Y]')
+    check('mdev %s: the same device typed twice is fine' % kind, (0, True), (rc, 'C.TXT;1' in listing(im, '[Y]')))
+    im = fresh_img('mdev2')
+    rc, out = ods2(im, 'RENAME [X]C.TXT MOVE:[Y]')
+    check('mdev %s: the volume own label as the device is fine' % kind, (0, True), (rc, 'C.TXT;1' in listing(im, '[Y]')))
+    # a target name held by a directory, and a reserved file: refused, unchanged (the same two refusals as in one directory)
+    im = fresh_img('mdir')
+    h0 = sha(im)
+    rc, out = ods2(im, 'RENAME [X]C.TXT [Y]SUBD.DIR')
+    check('mdir %s: the target name is held by a directory: refused, the image is unchanged' % kind, (True, h0), ('RENAME' in out and 'ILLCMD' not in out and '%ODS2-E' in out, sha(im)))
+    rc, out = ods2(im, 'RENAME [000000]BITMAP.SYS [X]')
+    check('mres %s: a reserved file is not moved: refused, the image is unchanged' % kind, (True, h0), ('reserved' in out.lower() or 'NOPRIV' in out, sha(im)))
+    # into the master directory and out of it
+    im, out = moved('mmfd', 'RENAME [X]MF.TXT [000000]', '[X]MF.TXT;1', '[000000]MF.TXT;1', 'MF.TXT;1', 1, 4)
+    # a target directory that must split its block: a name in the front, the middle, the end (the entries stay in order, the checker is clean)
+    for where, name in (('front', 'AAAAAA.TXT'), ('middle', 'M000020.TXT'), ('end', 'ZZZZZZ.TXT')):
+        im = fresh_img('msplit')
+        assert ods2(im, 'CREATE/DIRECTORY [T]')[0] == 0
+        for i in range(45):
+            assert ods2(im, 'COPY %s [T]M%06d_LONGNAME_FILL_BLOCKS.TXT' % (put('fill'), i * 2))[0] == 0
+        before_t = listing(im, '[T]')
+        tn = name if where != 'middle' else 'M000021_LONGNAME_FILL_BLOCKS.TXT'
+        assert ods2(im, 'COPY %s [X]%s' % (put('moved ' + where), tn))[0] == 0
+        rc, out = ods2(im, 'RENAME [X]%s [T]' % tn)
+        lt = listing(im, '[T]')
+        check('msplit %s %s: the move into a full directory (%d names): all names listed in order, the new one among them, the checker clean' % (kind, where, len(before_t)),
+              (0, sorted(before_t + ['%s;1' % tn]), []), (rc, lt, [e for e in checker_errors(im) if 'back link 0 is not' not in e]))
+        check('msplit %s %s: the data reads back' % (kind, where), 'moved ' + where, ods2(im, 'TYPE [T]%s' % tn)[1].strip().splitlines()[-1])
+    return None
+
+
 def r1_unusable_number(work, level):
     """review 67 recheck R1: a name with a version number that is not usable (0) is not pruned: E.TXT stored ;2 ;1 ;0 with the limit 2: COPY and RENAME delete nothing (version 0 was taken for \"nothing removed\")"""
     kind = 'ODS-%d' % level
@@ -595,8 +775,10 @@ def main():
             r1_unusable_number(work, level)
             header_first_states(work, level, False)
             g1_aliases(work, level, False)
+            move_cases(work, level, False)
         header_first_states(work, 5, True)
         g1_aliases(work, 5, True)
+        move_cases(work, 5, True)
     finally:
         if not keep:
             shutil.rmtree(work, ignore_errors=True)
