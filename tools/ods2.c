@@ -2698,7 +2698,11 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
         } else {
             /* DCL fills what the new name leaves out from the input (review 69 S3): [Y]N has no type: N.TXT; [Y].DAT has no name: A.DAT */
             const char *dot = ods5_find_unescaped(dp->filename, '.');
-            if (dot == NULL && sdot != NULL) snprintf(full, sizeof(full), "%s%s", dname, sdot);                                          /* the type of the input */
+            if (dot == NULL && sdot != NULL) {                                                                                              /* the type of the input */
+                size_t dl = strlen(dname);
+                if (dl > 0 && dname[dl - 1] == '.') dname[dl - 1] = '\0';          /* an escaped dot gives the literal a trailing no-type dot (n^.m is n.m.): it goes before the type is added (review 70 F1) */
+                snprintf(full, sizeof(full), "%s%s", dname, sdot);
+            }
             else if (dot == dp->filename && sdot != NULL) snprintf(full, sizeof(full), "%.*s%s", (int) (sdot - sfull), sfull, dname);      /* the name of the input */
             else if (dot == dp->filename) snprintf(full, sizeof(full), "%s%s", sfull, dname);
             else snprintf(full, sizeof(full), "%s", dname);

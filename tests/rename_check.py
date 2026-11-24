@@ -812,9 +812,9 @@ def review69b_cases(work, level, hl):
     assert run([INIT, img, '8192', '--structure=%d' % level, '--label=R69B'] + (['--hardlinks'] if hl else []))[0] == 0
     src = os.path.join(work, 'r69b.txt')
     open(src, 'w').write('content of the file\n')
-    cmds = ['CREATE/DIRECTORY [X]', 'CREATE/DIRECTORY [Y]', 'CREATE/DIRECTORY [Y.KID]', 'COPY %s [X]B.TXT' % src, 'COPY %s [X]B.TXT' % src]
+    cmds = ['CREATE/DIRECTORY [X]', 'CREATE/DIRECTORY [Y]', 'CREATE/DIRECTORY [Y.KID]', 'COPY %s [X]B.TXT' % src, 'COPY %s [X]B.TXT' % src, 'COPY %s [X]A.TXT' % src]
     if level == 5:
-        cmds += ['COPY %s [X]lower.txt' % src, 'COPY %s [X]UP.TXT' % src]
+        cmds += ['COPY %s [X]lower.txt' % src, 'COPY %s [X]UP.TXT' % src, 'COPY %s [X]NOTYPE.' % src, 'COPY %s [X]a^.b.c' % src]
     for c in cmds:
         assert ods2(img, c)[0] == 0, c
     time.sleep(1.1)
@@ -842,10 +842,25 @@ def review69b_cases(work, level, hl):
             im2 = fresh()
             rc, out = ods2(im2, cmd)
             check('%s R2: %s makes %s (the stored spelling fills in what is missing)' % (kind, cmd, want), (0, [want]), (rc, [x for x in listing(im2, d) if x == want]))
+        # review 70 F1: an escaped dot and no type: the source's type is added to the name WITHOUT the literal's no-type dot (c5df84a stored n^.m.TXT; c5d458e stored n^.m^..TXT)
+        for cmd, want in (('RENAME [X]A.TXT [Y]n^.m', 'n^.m.TXT;1'), ('RENAME [X]A.TXT [Y]^.m', '^.m.TXT;1'), ('RENAME [X]NOTYPE. [Y]n^.m', 'n^.m.;1'), ('RENAME [X]a^.b.c [Y]n^.m', 'n^.m.c;1'),
+                          ('RENAME [X]A.TXT [Y]n^.m.', 'n^.m.;1'), ('RENAME [X]A.TXT [Y]n^.m.dat', 'n^.m.dat;1'), ('RENAME [X]a^.b.c [Y].DAT', 'a^.b.DAT;1'), ('RENAME [X]NOTYPE. [Y].DAT', 'NOTYPE.DAT;1')):
+            im2 = fresh()
+            rc, out = ods2(im2, cmd)
+            got = [x for x in listing(im2, '[Y]')]
+            check('%s review 70 F1: %s makes %s' % (kind, cmd, want), (0, [want]), (rc, [x for x in got if x == want]))
         im2 = fresh()
         h1 = sha(im2)
         rc, out = ods2(im2, 'RENAME [X]up.txt R69B:')
         check('%s R2: RENAME [X]up.txt R69B: leaves the stored UP.TXT alone: nothing is written' % kind, (0, True, h1), (rc, 'already named' in out, sha(im2)))
+    # review 70: the pruned entry is itself an ALIAS (the header names [X]A.TXT): the prune takes an entry out and the file stays: the rename is not refused
+    if not hl:
+        im = fresh()
+        for c in ('LINK [Y]D.TXT [X]A.TXT', 'LINK [Y]C.TXT [X]A.TXT', 'SET FILE/VERSION_LIMIT=1 [Y]C.TXT'):
+            assert ods2(im, c)[0] == 0, c
+        rc, out = ods2(im, 'RENAME [Y]D.TXT [Y]C.TXT;5')
+        check('%s review 70: RENAME [Y]D.TXT [Y]C.TXT;5 with the pruned [Y]C.TXT;1 an alias (the header names [X]A.TXT) goes through: C.TXT;5 only, the file reads, the checker is clean' % kind,
+              (0, ['C.TXT;5'], True, []), (rc, [x for x in listing(im, '[Y]') if x.startswith('C.TXT')], 'content of the file' in ods2(im, 'TYPE [X]A.TXT;1')[1], checker_errors(im)))
     # the F1 refusal on a pure alias rename: only an entry would move, the PRIMARY entry of the target name is what the prune would take out
     im = fresh()
     assert ods2(im, 'LINK [X]AL.TXT [X]B.TXT;2') [0] == 0
