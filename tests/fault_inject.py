@@ -76,12 +76,23 @@ def tree(img, tag):
 # A block that splits inside a directory with blocks after it is rewritten so that every name stays listed at
 # every write, a name being listed twice for a moment (F2): the checker reports that as duplicate entries and
 # a block out of order. Allowed for those operations only; a name missing is never allowed (the tree compare).
+SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"versions not descending"]
+# operation -> (old key, new key) of the renamed file as tree() names it (the keys of OPS' targets, with the version); the check is in main()
+# the checker's errors a stopped RENAME may show, BY NAME (review 65 C6): none of the generic leak classes of ALLOWED (a lost file, a header or bitmap bit with no counterpart, a file marked
+# for delete, a back link directory without an entry): a rename that loses a header or a block must be seen. The two-entry states (one file under two names, in one directory or two) are
+# no error of the checker; the transient duplicates of a split or a shrink are in EXTRA_ALLOWED for the operations that make them.
+RENAME_ALLOWED = []
+HF_NO_WARN_OPS = ('rename_alias', 'rename_hardlink', 'rename_case')     # the header is not rewritten (an alias), or the spelling only differs (no name differs)
+RENAME_PAIRS = {'rename_same_dir': ('A1.TXT;1', 'A9.TXT;1'), 'rename_type': ('B.DAT;1', 'B.TXT;1'), 'rename_newver': ('A1.TXT;1', 'W.TXT;10'),
+                'rename_alias': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'), 'rename_primary_alias': ('L.TXT;1', 'L2.TXT;1'), 'rename_hardlink': ('SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'),
+                'rename_primary_hardlink': ('L.TXT;1', 'L2.TXT;1'), 'rename_split': ('FULL/N00000.TXT;1', 'FULL/%(next)s;1'),
+                'rename_case': ('abc.txt;1', 'ABC.txt;1'), 'rename_ext': ('F/A.DAT;1', 'F/A2.DAT;1'), 'rename_shrink_last': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1'), 'rename_shrink_mid': ('SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1')}
+SHRINK_OPS = ['delete_dirshrink', 'delete_dirshrink_mid', 'rename_shrink_last', 'rename_shrink_mid']     # operations after which no directory block may be all zeros inside the end of file (a WARN of the checker)
 SPLIT_TRANSIENT = [r'two entries for', r'block \d+: .* out of order', r"BAD_VERSORDER"]
-SHRINK_OPS = ['delete_dirshrink', 'delete_dirshrink_mid']     # operations after which no directory block may be all zeros inside the end of file (a WARN of the checker)
 SPLIT_OPS = ['insert_split', 'insert_split_mid', 'insert_move', 'insert_split_big', 'insert_move_big', 'newver_split']
 EXTRA_ALLOWED = {'insert_split': SPLIT_TRANSIENT, 'insert_split_mid': SPLIT_TRANSIENT, 'insert_move': SPLIT_TRANSIENT,
                  'insert_split_big': SPLIT_TRANSIENT, 'insert_move_big': SPLIT_TRANSIENT, 'newver_split': SPLIT_TRANSIENT,
-                 'delete_dirshrink_mid': SPLIT_TRANSIENT}   # the blocks after the emptied one move up one at a time: a name is listed twice for a moment, never missing
+                 'delete_dirshrink_mid': SPLIT_TRANSIENT, 'rename_split': SPLIT_TRANSIENT, 'rename_shrink_last': SPLIT_TRANSIENT, 'rename_shrink_mid': SPLIT_TRANSIENT}   # the blocks after the emptied one move up one at a time: a name is listed twice for a moment, never missing
 
 
 # Growing INDEXF.SYS when its last header is an extension header changes two blocks that cannot be written as one: the
@@ -109,7 +120,7 @@ def check(img, op=None, transient=True):
         for a in extra:
             if re.search(a, l):
                 SEEN[a] = SEEN.get(a, 0) + 1
-        if any(re.search(a, l) for a in ALLOWED + extra):
+        if any(re.search(a, l) for a in (RENAME_ALLOWED if op in RENAME_PAIRS else ALLOWED) + extra):
             leaks.append(l)
         else:
             bad.append(l)
@@ -317,6 +328,9 @@ def setup(level, hardlinks, fill_for=None, cluster=None):
                     return img
                 assert ods2(img, 'DELETE [SH]%s' % name)[0] == 0
             raise AssertionError('no delete shrinks the directory')
+        if fill_for == 'caseonly':
+            assert ods2(img, 'COPY %s [000000]abc.txt' % small)[0] == 0      # a lower-case name (ODS-5 keeps the case)
+            return img
         if fill_for == 'dirshrinkmid':
             # [SH] of six or more blocks; the names around the middle one are deleted (cleanly), pair by pair, until the delete of the middle name would empty ITS block, which has
             # blocks after it: the shrink moves those blocks up (review 64 S1: the last block was cleared before the end of file moved back on this path too)
@@ -417,6 +431,24 @@ OPS = {
     'insert_move_big': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'movebig'),
     'insert_move': ('COPY %(small)s [FULL]%(next)s', ['FULL/%(next)s;1'], False, False, 'move'),
     # COPY makes a new version of a name that exists (PLAN_WRITE_OPS item 1)
+    # RENAME within one directory (PLAN_WRITE_OPS item 5, step 1; CORPUS 65): the file must read back with its original bytes under at least ONE of its two names at every
+    # interruption, and under the new name once the command completed (RENAME_PAIRS); never under none
+    'rename_same_dir': ('RENAME [000000]A1.TXT [000000]A9.TXT', ['A1.TXT;1', 'A9.TXT;1'], False, False, None),
+    'rename_type': ('RENAME [000000]B.DAT [000000]B.TXT', ['B.DAT;1', 'B.TXT;1'], False, False, None),
+    'rename_newver': ('RENAME [000000]A1.TXT [000000]W.TXT', ['A1.TXT;1', 'W.TXT;10'], False, False, None),
+    'rename_alias': ('RENAME [SUB]LNKA.TXT [SUB]LNKB.TXT', ['SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'], False, False, None),
+    'rename_primary_alias': ('RENAME [000000]L.TXT [000000]L2.TXT', ['L.TXT;1', 'L2.TXT;1'], False, False, None),
+    'rename_hardlink': ('RENAME [SUB]LNKA.TXT [SUB]LNKB.TXT', ['SUB/LNKA.TXT;1', 'SUB/LNKB.TXT;1'], True, True, None),
+    'rename_primary_hardlink': ('RENAME [000000]L.TXT [000000]L2.TXT', ['L.TXT;1', 'L2.TXT;1'], True, True, None),
+    'rename_split': ('RENAME [FULL]N00000.TXT [FULL]%(next)s', ['FULL/N00000.TXT;1', 'FULL/%(next)s;1'], False, False, 'split'),
+    # a case-only rename at ODS-5 (C3): the record's name bytes are replaced in place; the insert of a spelling that differs only in case is blind to case and would make a new version
+    'rename_case': ('RENAME [000000]abc.txt [000000]ABC.txt', ['abc.txt;1', 'ABC.txt;1'], True, False, 'caseonly'),
+    # the remove that empties a block (C6b): the old name is alone in the LAST, then a MIDDLE, block of its directory and the new name sorts first, so the insert is in the first block
+    # and the remove empties the old name's block (the blocks after it move up, the last is dropped: review 48 N10, review 64 S1)
+    # a file in several headers (a primary header and extension headers): the extension headers are not touched (CORPUS 66.2); the file reads back under one of its names at every stop
+    'rename_ext': ('RENAME [F]A.DAT [F]A2.DAT', ['F/A.DAT;1', 'F/A2.DAT;1'], False, False, 'sfext'),
+    'rename_shrink_last': ('RENAME [SH]%(next)s [SH]AAA_FIRST.TXT', ['SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1'], False, False, 'dirshrink'),
+    'rename_shrink_mid': ('RENAME [SH]%(next)s [SH]AAA_FIRST.TXT', ['SH/%(next)s;1', 'SH/AAA_FIRST.TXT;1'], False, False, 'dirshrinkmid'),
     # DELETE of the only name in the last block of a directory: the directory shrinks by a block; no block of zeros inside the end of file at any write (review 48 N10)
     'delete_dirshrink': ('DELETE [SH]%(next)s', ['SH/%(next)s;1'], False, False, 'dirshrink'),
     'delete_dirshrink_mid': ('DELETE [SH]%(next)s', ['SH/%(next)s;1'], False, False, 'dirshrinkmid'),
@@ -442,7 +474,7 @@ OPS = {
 }
 # the operations that are also run with an I/O error at the k-th write of the commit (the process goes on and says so), not only killed
 ERROR_MODE_OPS = ['newver_limit', 'newver_limit3_big', 'newver_limit1_big', 'newver_front', 'purge_names', 'setfile_prot', 'setfile_wild', 'setfile_owner_ext']
-QUICK = ['delete_dirshrink', 'delete_dirshrink_mid', 'index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
+QUICK = ['rename_same_dir', 'rename_newver', 'rename_alias', 'rename_primary_alias', 'rename_split', 'rename_case', 'rename_shrink_last', 'rename_shrink_mid', 'delete_dirshrink', 'delete_dirshrink_mid', 'index_ext1', 'index_tail', 'index_ext2', 'delete_small', 'delete_fragmented', 'delete_alias', 'copy_small', 'create_directory', 'set_label',
          'insert_split', 'insert_split_mid', 'insert_move', 'newver_front', 'newver_limit', 'newver_mid', 'newver_split', 'newver_limit3_big', 'newver_limit1_big',
          'purge_names', 'purge_keep2', 'setfile_prot', 'setfile_owner', 'setfile_dir', 'setfile_reserved', 'setfile_wild', 'setfile_owner_ext']
 
@@ -517,6 +549,129 @@ def main():
                         prob.append('file %s changed' % p)
                     if p not in files and p not in targets:
                         prob.append('file %s lost' % p)
+                if name in RENAME_PAIRS:
+                    old_key, new_key = (x % ctx_op for x in RENAME_PAIRS[name])
+                    orig = base_files.get(old_key)
+                    if orig is None:
+                        prob.append('the base has no %s' % old_key)
+                    elif files.get(old_key) != orig and files.get(new_key) != orig:
+                        prob.append('the file reads back under neither %s nor %s' % (old_key, new_key))
+                    if mode == 'crash' and k == n and (files.get(new_key) != orig or old_key in files):
+                        prob.append('the completed rename: the file is not under the new name only')
+                if name in RENAME_PAIRS and need_hl and mode == 'crash':
+                    # review 67 F4: on a HARDLINKS volume, in EVERY stopped state (the old entry gone as well) the checker says it when the file's link count is not the number of entries that name it,
+                    # and says nothing when they agree: the count is read from the header, the entries are counted from DIR/FULL of the whole volume, neither by the checker
+                    import ext_headers as _E
+                    _ok, _nk = (x % ctx_op for x in RENAME_PAIRS[name])
+                    _key = _ok if _ok in files else _nk
+                    _path, _, _ver = _key.rpartition(';')
+                    _d, _, _nm = _path.rpartition('/')
+                    _spec = '[%s]%s;%s' % (_d.replace('/', '.') if _d else '000000', _nm, _ver)
+                    _ch = _E.chain(trial, _spec)
+                    if _ch:
+                        _fnum = _ch[0][0]
+                        _lc = int.from_bytes(_ch[0][1][74:76], 'little')
+                        _rc, _full = ods2(trial, 'DIR/FULL [000000...]*.*;*')
+                        _entries = len(re.findall(r'File ID:\s+\(%d,' % _fnum, _full))
+                        _txt = run(CHECK + [trial])[1]
+                        _warn = bool(re.search(r'file %d \([^)]*\): link count %d but %d directory entr' % (_fnum, _lc, _entries), _txt))
+                        _any = bool(re.search(r'file %d \([^)]*\): link count' % _fnum, _txt))
+                        if _warn != (_lc != _entries) or _any != (_lc != _entries):
+                            prob.append('the link count is %d, %d entries name the file: the checker %s' % (_lc, _entries, 'warns' if _any else 'says nothing'))
+                if name in RENAME_PAIRS and mode == 'crash':
+                    # warnings (review 67 recheck): header first leaves ONE state with a warning: one entry (the old name) and a header that names the new one: "header name ... differs from its directory
+                    # entry". It is allowed in THAT state only (the old entry present, the new one not); every other stopped state, and the completed one, has no warning (a HARDLINKS link count warning is
+                    # judged above against the real count)
+                    _okey, _nkey = (x % ctx_op for x in RENAME_PAIRS[name])
+                    _w = [l for l in run(CHECK + [trial])[1].splitlines() if l.startswith('WARN') and 'link count' not in l and 'allocated but owned by no file' not in l]        # (a directory moved to a larger area by the insert shows its old area as lost for a moment: every insert does)
+                    _first_state = (_okey in files and _nkey not in files and not (_okey.lower() == _nkey.lower()))
+                    _bad_w = [l for l in _w if not (_first_state and re.search(r"header name '.*' differs from its directory entry", l))]
+                    if _bad_w:
+                        prob.append('a warning the stopped state may not have: %s' % _bad_w[0].strip()[:150])
+                    if _first_state and name not in HF_NO_WARN_OPS and not any("header name '" in l for l in _w):
+                        prob.append('the state after the header write (one entry, the old name; the header names the new one) has no "header name ... differs from its directory entry" warning: the order is not header first')
+                    if _first_state and name not in HF_NO_WARN_OPS:
+                        # CORPUS 69 (V8.4 both levels, VAX V7.3): in this state VMS reads the entry as an ALIAS (the header names the new name, which is not there): DELETE removes the ENTRY only (the file stays
+                        # allocated in no directory: the checker's lost file, nothing else), and RENAME to a third name leaves the header untouched. ods2v2 does the same.
+                        import ext_headers as _eh
+                        _path, _, _ver = _okey.rpartition(';')
+                        _d, _, _nm = _path.rpartition('/')
+                        _spec = '[%s]%s;%s' % (_d.replace('/', '.') if _d else '000000', _nm, _ver)
+                        _third = '[%s]ZZ3.TXT' % (_d.replace('/', '.') if _d else '000000')
+                        _third_key = ((_d + '/') if _d else '') + 'ZZ3.TXT;1'
+                        _hdr0 = _eh.chain(trial, _spec)
+                        _timg = os.path.join(WORK, 'cp69.img')
+                        shutil.copyfile(trial, _timg)
+                        _rc, _out = ods2(_timg, 'DELETE ' + _spec, openv)
+                        _rc2, _files2, _ = tree(_timg, 'cp69')
+                        _errs = [l for l in run(CHECK + [_timg])[1].splitlines() if l.startswith('ERROR')]
+                        if _okey in _files2 or any(k2 not in _files2 for k2 in files if k2 != _okey):
+                            prob.append('DELETE of the old name in the first state (CORPUS 69: VMS removes the entry only) changed more than that entry')
+                        if '%ODS2-I-DELETED' in _out or 'no entry left in its directory' not in _out:
+                            prob.append('DELETE of the old name in the first state printed a plain deleted, not that the file stays allocated with no entry left in its directory: %s' % _out.strip()[:120])
+                        if not _errs or any('lost file' not in l and 'back link directory' not in l for l in _errs):          # (a file with no entry anywhere: lost; one with an alias elsewhere: its back link directory has no entry)
+                            prob.append('DELETE of the old name in the first state: the checker should say a lost file (or a back link directory with no entry for it) and nothing else: %s' % (_errs[:2],))
+                        shutil.copyfile(trial, _timg)
+                        _rc, _out = ods2(_timg, 'RENAME %s %s' % (_spec, _third), openv)
+                        _rc2, _files2, _ = tree(_timg, 'cp69')
+                        _hdr1 = _eh.chain(_timg, '[%s]ZZ3.TXT;1' % (_d.replace('/', '.') if _d else '000000'))
+                        if _rc != 0 or '%ODS2-E' in _out or _third_key not in _files2 or _okey in _files2:
+                            prob.append('RENAME of the old name to a third name in the first state failed or did not move the entry: %s' % _out.strip()[:120])
+                        elif not (_hdr0 and _hdr1 and _hdr0[0][1] == _hdr1[0][1]):
+                            prob.append('RENAME of the old name to a third name in the first state wrote the header (VMS: an alias, the header is untouched)')
+                if name in RENAME_PAIRS and mode == 'crash':
+                    # the way back (review 65 C6c): the same RENAME again. A target entry that already points at the source's file ID is an interrupted rename: the run FINISHES it (no new
+                    # version). Once the old entry is gone (or the rename completed) the source no longer exists: the run is refused and the image is unchanged (for a rename that changes
+                    # only the case the name is still found: "already named", the image unchanged unless the header still has the old spelling: then it is finished).
+                    old_k, new_k = (x % ctx_op for x in RENAME_PAIRS[name])
+                    case_pair = old_k.lower() == new_k.lower()
+                    import ext_headers
+                    rerun = os.path.join(WORK, 'rerun.img')
+                    shutil.copyfile(trial, rerun)
+                    h_before = md5(rerun)
+                    rcr, outr = ods2(rerun, cmd, openv)
+                    rr_rc, rr_files, _ = tree(rerun, 'rerun')
+                    orig = base_files.get(old_k)
+                    badr, leakr = check(rerun, name, False)
+                    if 'ILLCMD' in outr:
+                        prob.append('the RENAME run again: unrecognized command')
+                    elif case_pair:
+                        if rr_files.get(new_k) != orig or (k == n and md5(rerun) != h_before):
+                            prob.append('the RENAME (case only) run again: the file is not under the new spelling, or the completed rename was changed')
+                    elif old_k in files:
+                        # the old entry is still there: the run finishes the rename
+                        if rcr != 0 or '%ODS2-E' in outr:
+                            prob.append('the RENAME run again after the stop at write %d failed: %s' % (k, outr.strip()[:120]))
+                        if rr_files.get(new_k) != orig or old_k in rr_files:
+                            prob.append('after the RENAME run again the file is not under the new name only')
+                        extra_keys = sorted(x for x in rr_files if x not in base_files and x != new_k)
+                        if extra_keys:
+                            prob.append('after the RENAME run again there is an extra entry (a new version?): %s' % extra_keys[:3])
+                        prob += ['after the RENAME run again, checker: ' + b for b in badr + leakr]
+                        if need_hl:
+                            # HARDLINKS: the link count is what it was before the rename (the entries are as many as before); the checker only warns about a wrong count
+                            def spec_of(key):
+                                path, _, ver = key.rpartition(';')
+                                d, _, nm = path.rpartition('/')
+                                return '[%s]%s;%s' % (d.replace('/', '.') if d else '000000', nm, ver)
+                            hb0 = ext_headers.chain(base, spec_of(old_k))
+                            hr = ext_headers.chain(rerun, spec_of(new_k))
+                            lc0 = int.from_bytes(hb0[0][1][74:76], 'little') if hb0 else None
+                            lcr = int.from_bytes(hr[0][1][74:76], 'little') if hr else None
+                            # a stop right after the first write (the link count + 1, before any entry) cannot be told from the start: the run again counts once more, one too high for good
+                            # (a leak, never too little; the checker warns about it); every other stop ends with the count as it was
+                            # (third recheck: when the first write also named the file's header, the run again sees the header name the target with no target entry, knows the count was taken, and does not count
+                            # again: the count ends right. An ALIAS entry leaves the header alone, so nothing shows the count was taken: that stop still leaves it one too high.)
+                            leak1 = 1 if (k == 1 and 'primary' not in name) else 0
+                            if lc0 is not None and lcr is not None and lcr != lc0 + leak1:
+                                prob.append('after the RENAME run again the link count is %d, it was %d%s' % (lcr, lc0, ' (a stop after the first write of an alias rename may leave one too many)' if leak1 else ''))
+                    else:
+                        # the old name is gone: refused, nothing changed
+                        if '%ODS2-E' not in outr:
+                            prob.append('the RENAME run again after the old entry was removed did not refuse (the source is gone): %s' % outr.strip()[:100])
+                        if md5(rerun) != h_before:
+                            prob.append('the RENAME run again after the old entry was removed changed the image')
+                        prob += ['after the RENAME run again, checker: ' + b for b in badr]
                 if name in INDEX_OPS:
                     # the first change of any kind repairs an interrupted growth, not only a create (review 28 a): a
                     # relabel, then the checker must show nothing of the transient

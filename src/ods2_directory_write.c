@@ -526,6 +526,27 @@ int ods2_dir_name_records(const uint8_t *block, size_t block_size, const char *n
 /* The largest a record can be: its size word, then the rest, and the block's end marker still fits (2 bytes) */
 #define DIR_RECORD_MAX_TOTAL 510
 
+bool ods2_dir_record_set_name_same_length(uint8_t *block, size_t block_size, size_t rec_pos, const char *name, unsigned level)
+{
+    size_t nc, size;
+    if (rec_pos + 6 > block_size || !record_ok(block, rec_pos, block_size)) return false;
+    nc = block[rec_pos + 5];
+    size = (size_t) read_word(block + rec_pos) + 2;
+    if (rec_pos + size > block_size) return false;
+    if (level == ODS5_LEVEL_5) {
+        uint8_t stored[2 * ODS5_MAX_LITERAL_NAME + 4];
+        size_t namecount;
+        unsigned type;
+        if (!ods5_stored_name(name, stored, sizeof(stored), &namecount, &type)) return false;
+        if (namecount != nc || type != (unsigned) ((block[rec_pos + 4] & ODS5_DIR_NAMETYPE_MASK) >> ODS5_DIR_NAMETYPE_SHIFT)) return false;
+        memcpy(block + rec_pos + 6, stored, nc);
+    } else {
+        if (strlen(name) != nc) return false;
+        memcpy(block + rec_pos + 6, name, nc);
+    }
+    return true;
+}
+
 int ods2_dir_record_add_version(uint8_t *block, size_t block_size, size_t rec_pos, unsigned index,
                                 uint16_t version, ods2_fid_t fid)
 {

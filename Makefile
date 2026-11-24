@@ -384,6 +384,12 @@ test: $(TESTS) $(BUILD)/ods2_make_loop tools ods2_put ods2_dump_header ods2_faul
 	@sh tests/cli_maxfiles_check.sh
 	@echo "--- cli_notmp_check (no C source names /tmp: review 61 F2) ---"
 	@sh tests/cli_notmp_check.sh
+	@echo "--- cli_rename_check (RENAME within one directory against what VMS does: CORPUS 65, PLAN_WRITE_OPS item 5 step 1) ---"
+	@sh tests/cli_rename_check.sh
+	@echo "--- cli_linkcount_check (ods5check: a link count that is not the number of entries, HARDLINKS: review 67 F4) ---"
+	@sh tests/cli_linkcount_check.sh
+	@echo "--- cli_mpoffset_check (ods5check: the map starts at or above what the name needs, the slack zero: CORPUS 67.5) ---"
+	@sh tests/cli_mpoffset_check.sh
 	@echo "--- cli_versorder_check (versions of a name stored out of order: reads as VMS, changes refused, BAD_VERSORDER: H1, CORPUS 66.4) ---"
 	@sh tests/cli_versorder_check.sh
 	@echo "--- cli_commaesc_check (an escaped comma in a file name is no list separator: review 66) ---"

@@ -87,6 +87,50 @@ static bool level5_name(const char *ident_name, uint8_t *out, size_t cap, size_t
     return !ucs2 || *type == ODS5_NAME_UCS2;
 }
 
+bool ods2_header_set_name(uint8_t *header, const char *ident_name)
+{
+    ods2_head_core_t *core = (ods2_head_core_t *) header;
+    uint8_t *ident = header + (size_t) core->idoffset * 2;
+    size_t avail = (size_t) core->mpoffset * 2 - (size_t) core->idoffset * 2;      /* the ident area the header has */
+
+    if ((core->struclev >> 8) == ODS5_LEVEL_5) {
+        uint8_t name[2 * ODS5_MAX_LITERAL_NAME + 4];
+        size_t name_len = 0, need;
+        unsigned name_type = ODS5_NAME_ODS2;
+        if (!level5_name(ident_name, name, sizeof(name), &name_len, &name_type) || name_len > 255) return false;
+        need = ODS5_FI5_FILENAME + name_len > 120 ? ODS5_FI5_FILENAME + name_len : 120;
+        if (need > avail) {
+            /* a longer name: the ident area grows and the map area moves up with MPOFFSET (CORPUS 67.5, V8.4: MPOFFSET 100 to 109 for a 62-byte name, to 149 for 142 bytes; ACOFFSET and RSOFFSET stay).
+               No room above the map (the ACL, or the end of the header): refused, the header untouched */
+            size_t new_mp = (size_t) core->idoffset + (need + 1) / 2, map_bytes = (size_t) core->map_inuse * 2;
+            size_t limit = core->acoffset != 255 ? (size_t) core->acoffset * 2 : 510;
+            if (core->rsoffset != 255 && (size_t) core->rsoffset * 2 < limit) limit = (size_t) core->rsoffset * 2;
+            if (new_mp * 2 + map_bytes > limit) return false;
+            memmove(header + new_mp * 2, header + (size_t) core->mpoffset * 2, map_bytes);
+            core->mpoffset = (uint8_t) new_mp;
+            avail = (size_t) core->mpoffset * 2 - (size_t) core->idoffset * 2;
+        }
+        /* a shorter name: MPOFFSET stays and the name field is zero-filled to the end of the ident area, nothing of the old name left (CORPUS 67.5) */
+        ident[ODS5_FI5_CONTROL] = (uint8_t) ((ident[ODS5_FI5_CONTROL] & ~ODS5_FI5_NAMETYPE_MASK) | name_type);
+        ident[ODS5_FI5_NAMELEN] = (uint8_t) name_len;
+        memset(ident + ODS5_FI5_FILENAME, 0, avail - ODS5_FI5_FILENAME);
+        memcpy(ident + ODS5_FI5_FILENAME, name, name_len);
+        return true;
+    } else {
+        size_t n = strlen(ident_name);
+        if (n > 20 && avail < 120) return false;                       /* FILENAMEXT is not there */
+        memset(ident, ' ', 20);
+        memcpy(ident, ident_name, n > 20 ? 20 : n);
+        if (avail >= 120) {
+            size_t ext = n > 20 ? n - 20 : 0;
+            if (ext > 66) return false;
+            memset(ident + 54, ' ', 66);
+            if (ext > 0) memcpy(ident + 54, ident_name + 20, ext);
+        }
+        return true;
+    }
+}
+
 size_t ods2_header_map_offset(const ods2_header_spec_t *spec)
 {
     uint8_t name[2 * ODS5_MAX_LITERAL_NAME + 4];

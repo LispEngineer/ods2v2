@@ -262,6 +262,12 @@ def main():
             h0 = sha(img)
             rc, out = ods2(img, 'COPY %s [D]X.TXT;5' % os.path.join(work, 'X1.txt'))
             check(t('COPY f X.TXT;5 with the limit 3 on X out of order is refused (BAD_VERSORDER, version limit) and the image is unchanged'), (True, True, h0), ('ILLCMD' not in out and refused(out), 'limit' in out, sha(img)))
+            # review 67 recheck: RENAME of another name onto an out-of-order name whose limit would drop a version is refused too (one function for COPY and RENAME: version_limit_drop)
+            for cmd in ('RENAME [D]Z.TXT;1 [D]X.TXT;7', 'RENAME [D]Z.TXT;1 [D]X.TXT'):
+                img = fresh(base, work, 'renlimit')
+                h0 = sha(img)
+                rc, out = ods2(img, cmd)
+                check(t('%s onto the out-of-order X.TXT with the limit 3 is refused and the image is unchanged' % cmd), (True, h0), ('ILLCMD' not in out and refused(out), sha(img)))
             # ods5check names it after VMS
             rc, out = run(['python3', '-I', 'tests/ods5check.py', base])
             lines = [l for l in out.splitlines() if 'BAD_VERSORDER' in l]

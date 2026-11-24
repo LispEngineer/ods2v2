@@ -107,6 +107,12 @@ typedef struct {
  * Map Area (see ods2_header_extents_that_fit()). */
 bool ods2_build_file_header(uint8_t *header_out, const ods2_header_spec_t *spec);
 
+/* Rewrites the NAME of an existing primary header in place (RENAME, PLAN_WRITE_OPS item 5): `ident_name` is "name;version" as the creation path passes it. Level 2: the first 20
+ * bytes of the ident area (space padded) and, when the ident area has them, FILENAMEXT; level 5: the name type, the length (bytes, ";version" included) and the name. Nothing else
+ * changes (no revision, no date, no checksum: the caller sets them). Returns false, the header untouched, when the new name does not fit in the ident area the header has (a level 5
+ * name needing 76 + length bytes, a level 2 name over 20 characters in a header without FILENAMEXT): the map would have to move. */
+bool ods2_header_set_name(uint8_t *header, const char *ident_name);
+
 /* How many of the `count` extents, taken in order from the first,
  * fit in a PRIMARY header's Map Area at level 2 as built by
  * ods2_build_file_header() (310 bytes: from the map offset at byte 200
