@@ -5771,7 +5771,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
                     if (!only_entry) {
                         static char pmsg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
                         free(di.versions);
-                        snprintf(pmsg, sizeof(pmsg), "the version limit of %s would delete version %u, which is a file this command renames: refused to keep it (not renamed)", dst_norm, drop_version);
+                        snprintf(pmsg, sizeof(pmsg), "the version limit of %s would delete version %u, which is a file this command renames: refused to keep it (VMS deletes it without a word, CORPUS 77; not renamed)", dst_norm, drop_version);
                         return fail(pmsg);
                     }
                 }

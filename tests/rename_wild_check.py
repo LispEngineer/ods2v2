@@ -457,6 +457,13 @@ def review77(work, kind, level, hl, base):
         ids = file_ids(im, ('[W]',), '*.TXT;*')
         rc, out = R.ods2(im, cmd)
         check('%s review 77 F1 (%s): %s with a default limit of %d on %s: no file is lost (the whole command is refused, or each file is)' % (kind, tag, cmd, lim, ddir), ([], True), (lost_files(ids, im), 'ODS2-I-DELETED' not in out))
+    # CORPUS 77.4: two versions and a directory default of 2: the renumbering ; makes Q.OLD;1 of the highest and Q.OLD;2 of the lower, nothing is pruned (the new name has the directory's limit 2 and two versions)
+    im = vol('z2a', ['COPY @H [W]Q.TXT', 'COPY @H [W]Q.TXT'])
+    set_dir_default(im, '[W]', 2)
+    ids = file_ids(im, ('[W]',), '*.TXT;*')
+    rc, out = R.ods2(im, 'RENAME [W]Q.TXT;* [W]*.OLD;')
+    check('%s CORPUS 77.4: two versions to a new name with a directory default of 2 (renumbering ;): both arrive, nothing pruned, the order is reversed (Q.TXT;2 becomes Q.OLD;1)' % kind, (0, [], ['Q.OLD;1', 'Q.OLD;2']),
+          (rc, lost_files(ids, im), sorted(e for e in entries(im) if e.startswith('Q.OLD'))))
     if level == 5:
         # F2: Z.DAT;1 is a second name of P1 (a LINK), Z.DAT;2 another file, limit 3: P1 is finished by the existing entry, which becomes its only name: a later file would prune it
         im = vol('f2', ['COPY @H [W]P1.TXT', 'COPY @H [W]P2.TXT', 'COPY @H [W]P3.TXT', 'COPY @H [W]S.DAT', 'LINK [W]Z.DAT [W]P1.TXT', 'RENAME [W]S.DAT [W]Z.DAT', 'SET FILE/VERSION_LIMIT=3 [W]Z.DAT'])
