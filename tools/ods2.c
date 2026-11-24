@@ -2643,6 +2643,9 @@ static bool rename_parse_path(const char *spec, ods2_parsed_path_t *out)
     return ods2_parse_path(spec, out);
 }
 
+static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const ods2_parsed_path_t *dp, const char *src_arg, const char *dst_arg, bool device_only);
+static bool rename_has_wild(const char *filename);
+
 static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const ods2_parsed_path_t *dp, const char *src_arg, const char *dst_arg, bool device_only)
 {
     uint8_t sdir[512], ddir[512];
@@ -2656,9 +2659,8 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
         report_error("%%ODS2-E-BADPATH, RENAME needs the name of the file to rename (a directory is renamed by its name.DIR)\n");
         return;
     }
-    if (ods5_find_unescaped(sp->filename, '*') != NULL || ods5_find_unescaped(sp->filename, '%') != NULL || ods5_find_unescaped(sp->filename, '?') != NULL || sp->version_wildcard ||
-        ods5_find_unescaped(dp->filename, '*') != NULL || ods5_find_unescaped(dp->filename, '%') != NULL || ods5_find_unescaped(dp->filename, '?') != NULL || dp->version_wildcard) {
-        report_error("%%ODS2-E-NOTYET, %s: RENAME with a wildcard is not available yet (step 4)\n", src_arg);
+    if (rename_has_wild(sp->filename) || sp->version_wildcard || rename_has_wild(dp->filename) || dp->version_wildcard) {
+        rename_wild(vol, sp, dp, src_arg, dst_arg, device_only);                    /* step 4: every file the old name matches, each its own transaction */
         return;
     }
     if (dp->filename[0] == '\0' && !dp->had_brackets && !device_only && !dp->has_version) {
@@ -3578,6 +3580,459 @@ static void cmd_delete(ods2_volume_t *vol, const ods2_parsed_path_t *p)
         }
         report_error("%%ODS2-E-DELETEERR, %s: %s\n", spec, r.problem);
     }
+}
+
+static void spec_entry_text(const char *dir_spelling, const char *literal_name, unsigned version, char *out, size_t cap);
+
+/* ---- RENAME with wildcards (step 4; CORPUS 65.4 e1 and e2, 70.8; reviews 75) ----
+   The old name's wildcards (`*`, `%`, `?` in the name and the type; the version `;*`, `;n`, `;-n`, none) pick files in ONE directory. The match list is made FIRST, from the directory as it is before the command: a list of
+   names (as the directory stores them) and version NUMBERS, "highest" and ;-n already turned into numbers. Each file is then renamed by the step 1 to 3 code (one ods2_rename_ex: its own transaction, its own write
+   order), so a failure of one file leaves the others done or untouched, never half done; the command as a whole is not atomic. What is not measured (U1 to U16 of RENAME-STEP4-PROPOSAL.md) is refused, with the volume
+   unchanged: a partial wildcard in the new name, a directory wildcard, several sources for one target name, a target that is also a source, a `;*` source other than the measured shape. */
+static bool rename_has_wild(const char *filename)
+{
+    return ods5_find_unescaped(filename, '*') != NULL || ods5_find_unescaped(filename, '%') != NULL || ods5_find_unescaped(filename, '?') != NULL;
+}
+
+typedef struct {
+    char name[ODS2_DIR_MAX_NAME + 1];       /* as the directory stores it */
+    uint16_t version;
+    ods2_fid_t fid;
+} rw_match_t;
+
+/* a field of the new name: 0 literal (or empty), 1 exactly '*', -1 a partial wildcard */
+static int rw_field_kind(const char *f, size_t n)
+{
+    char buf[ODS2_PATH_MAX];
+    if (n >= sizeof(buf)) return -1;
+    memcpy(buf, f, n);
+    buf[n] = '\0';
+    if (strcmp(buf, "*") == 0) return 1;
+    return rename_has_wild(buf) ? -1 : 0;
+}
+
+/* The new name for a file whose stored name is `sfull`: each field of the typed new name is literal, or exactly '*' (the stored field), or left out (the stored field too: CORPUS 70). Filled field by field
+   from the PARSED name, never as text parsed again (review 75 C5): the stored name may hold ^. ^_ ; * % as name characters. A new name with only a directory keeps the stored name. false: no room or a bad escape. */
+static bool rw_fill(const char *sfull, const ods2_parsed_path_t *dp, char *out, size_t cap)
+{
+    const char *fn = dp->filename, *dot = ods5_rfind_unescaped(fn, '.'), *sdot = strrchr(sfull, '.');
+    size_t sname_len = sdot != NULL ? (size_t) (sdot - sfull) : strlen(sfull), nlen = dot != NULL ? (size_t) (dot - fn) : strlen(fn), k;
+    char name[ODS2_PATH_MAX], type[ODS2_PATH_MAX], tmp[ODS2_PATH_MAX];
+
+    if (fn[0] == '\0') {
+        if (strlen(sfull) >= cap) return false;
+        snprintf(out, cap, "%s", sfull);
+        return true;
+    }
+    if (nlen == 0 || (nlen == 1 && fn[0] == '*')) {
+        if (sname_len >= sizeof(name)) return false;
+        memcpy(name, sfull, sname_len);
+        name[sname_len] = '\0';
+    } else {
+        k = ods5_unescape(fn, nlen, name, sizeof(name));
+        if (k == (size_t) -1) return false;
+    }
+    if (dot == NULL) {
+        snprintf(type, sizeof(type), "%s", sdot != NULL ? sdot : "");                     /* a new name with no type: the stored type */
+    } else if (dot[1] == '\0') {
+        snprintf(type, sizeof(type), ".");                                                /* "name." : the null type */
+    } else if (dot[1] == '*' && dot[2] == '\0') {
+        snprintf(type, sizeof(type), "%s", sdot != NULL ? sdot : ".");
+    } else {
+        k = ods5_unescape(dot + 1, strlen(dot + 1), tmp, sizeof(tmp));
+        if (k == (size_t) -1 || k + 2 > sizeof(type)) return false;
+        snprintf(type, sizeof(type), ".%s", tmp);
+    }
+    if (strlen(name) + strlen(type) >= cap) return false;
+    snprintf(out, cap, "%s%s", name, type);
+    return true;
+}
+
+typedef struct { rw_match_t *v; size_t n, cap; } rw_list_t;
+
+static bool rw_add(rw_list_t *l, const ods2_dir_entry_t *e)
+{
+    if (l->n == l->cap) {
+        size_t nc = l->cap ? l->cap * 2 : 64;
+        rw_match_t *nv = realloc(l->v, nc * sizeof(*nv));
+        if (nv == NULL) return false;
+        l->v = nv;
+        l->cap = nc;
+    }
+    snprintf(l->v[l->n].name, sizeof(l->v[l->n].name), "%s", e->name);
+    l->v[l->n].version = e->version;
+    l->v[l->n].fid = e->fid;
+    l->n++;
+    return true;
+}
+
+/* does the directory `entries` hold an entry of this name (any version)? *fid gets the file of the first one found */
+static bool rw_has_name(const ods2_dir_entry_t *entries, int count, const char *name, ods2_fid_t *fid)
+{
+    int i;
+    for (i = 0; i < count; i++) {
+        if (same_name(entries[i].name, name)) {
+            if (fid != NULL) *fid = entries[i].fid;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool rw_same_file(ods2_fid_t a, ods2_fid_t b)
+{
+    return ods2_fid_number(a) == ods2_fid_number(b) && a.fid_seq == b.fid_seq;
+}
+
+typedef struct { size_t g; const char *key; int kind; } rw_key_t;     /* kind 0: a group's new name, 1: a group's own name (a source name) */
+
+static int rw_key_cmp(const void *x, const void *y)
+{
+    const rw_key_t *a = (const rw_key_t *) x, *b = (const rw_key_t *) y;
+    int c = ods2_dir_name_compare(a->key, strlen(a->key), b->key, strlen(b->key));
+    if (c != 0) return c;
+    if (a->kind != b->kind) return a->kind - b->kind;
+    return a->g < b->g ? -1 : a->g > b->g ? 1 : 0;
+}
+
+typedef enum { RW_FAIL, RW_DONE, RW_SAME } rw_result_t;
+
+/* One file: the step 1 to 3 call and the report (the same lines as the single-file RENAME). */
+static rw_result_t rw_apply(ods2_volume_t *vol, unsigned sdir_num, const rw_match_t *m, unsigned ddir_num, const char *dname, int dver, const ods2_fid_t *via, unsigned nvia,
+                            const char *sdir_path, const char *ddir_path)
+{
+    ods2_rename_info_t info;
+    ods2_result_t r;
+    char src[ODS2_PATH_MAX * 2 + 16], shown[ODS2_PATH_MAX], dst[ODS2_PATH_MAX * 2 + 16];
+
+    memset(&info, 0, sizeof(info));
+    spec_entry_text(sdir_path, m->name, m->version, src, sizeof(src));
+    r = ods2_rename_ex(vol, sdir_num, m->name, (int) m->version, ddir_num, dname, dver, via, nvia, &info);
+    if (!r.ok) {
+        report_error("%%ODS2-E-RENAME, %s: %s\n", src, r.problem);
+        return RW_FAIL;
+    }
+    display_name(dname, shown, sizeof(shown));
+    snprintf(dst, sizeof(dst), "[%s%s]%s", ddir_path[0] == '\0' ? "000000" : "", ddir_path, shown);
+    if (info.same) {
+        printf("%%ODS2-I-RENAMED, %s is already named %s: nothing changed\n", src, dst);
+        return RW_SAME;
+    }
+    if (info.case_only) {
+        printf("%%ODS2-I-RENAMED, %s renamed to %s (the spelling only)\n", src, dst);
+    } else {
+        printf("%%ODS2-I-RENAMED, %s renamed to %s;%u%s%s\n", src, dst, (unsigned) info.version, info.resumed ? " (the target name already named this file: the old entry was removed and the rename finished)" : "",
+               (info.header_changed || info.header_current) ? "" : " (an alias entry: the file's header is not changed)");
+    }
+    if (info.pruned_version != 0) printf("%%ODS2-I-DELETED, deleted %s;%u (the version limit)\n", dst, info.pruned_version);
+    if (info.is_dir && !vol->ods5 && info.deepest_names > ODS2_VAX_V73_MAX_NAMES) {
+        fprintf(stderr, "%%ODS2-W-DEEPDIR, the directory is now %u names deep below [000000]: OpenVMS VAX V7.3 cannot open a path of more than %u names on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and later can\n",
+                info.deepest_names, ODS2_VAX_V73_MAX_NAMES);
+    }
+    return RW_DONE;
+}
+
+static void rename_wild(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const ods2_parsed_path_t *dp, const char *src_arg, const char *dst_arg, bool device_only)
+{
+    uint8_t sdir[512], ddir[512];
+    ods2_fid_t sfid, dfid, *via = NULL;
+    char sdir_path[ODS2_PATH_MAX], ddir_path[ODS2_PATH_MAX], pat_name[ODS2_PATH_MAX + 4], pat_type[ODS2_PATH_MAX + 4], last_refused[ODS2_DIR_MAX_NAME + 1] = "", msg_dir[ODS2_PATH_MAX];
+    ods2_dir_entry_t *entries = NULL, *dentries = NULL;
+    int count = 0, dcount = 0, i, rank = 0, nk, tk, refused_order = 0, skipped = 0, renamed = 0, same = 0, failed = 0;
+    const char *dot;
+    bool dir_type, kept_versions, refuse = false, same_dir, g_ok = true;
+    unsigned nvia = 0;
+    rw_list_t list = { NULL, 0, 0 };
+    ods2_result_t r;
+    size_t gi, ngroups = 0;
+    size_t *gstart = NULL;
+    char (*dnames)[ODS2_DIR_MAX_NAME + 1] = NULL;
+    bool *unchanged = NULL;
+    rw_key_t *keys = NULL;
+    size_t nkeys = 0;
+    (void) device_only;
+
+    if (!vol->writable) {
+        report_error("%%ODS2-E-RENAME, %s: %s\n", src_arg, vol->write_refusal[0] != '\0' ? vol->write_refusal : "the volume is mounted read-only");
+        return;
+    }
+    if (sp->filename[0] == '\0') {
+        report_error("%%ODS2-E-BADPATH, RENAME needs the name of the file to rename (a directory is renamed by its name.DIR)\n");
+        return;
+    }
+    /* what the new name may be: each field literal or exactly '*' (review 75 D1); the version none, ;n, or ;* with a ;* source */
+    {
+        const char *fn = dp->filename;
+        const char *ndot = ods5_rfind_unescaped(fn, '.');
+        nk = rw_field_kind(fn, ndot != NULL ? (size_t) (ndot - fn) : strlen(fn));
+        tk = ndot != NULL ? rw_field_kind(ndot + 1, strlen(ndot + 1)) : 0;
+    }
+    if (nk < 0 || tk < 0) {
+        report_error("%%ODS2-E-RENAME, %s: a wildcard in the new name other than a whole name or type field (*) is not measured on VMS: nothing renamed\n", dst_arg);
+        return;
+    }
+    if ((dp->version_wildcard && !sp->version_wildcard) || (sp->version_wildcard && dp->has_version && !dp->version_wildcard && dp->version != 0) || dp->version < 0) {
+        report_error("%%ODS2-E-RENAME, %s: this combination of versions is not measured on VMS (a ;* source takes a new name with no version or ;*, and ;* is only for a ;* source): nothing renamed\n", dst_arg);
+        return;
+    }
+    if (dp->filename[0] == '\0' && !dp->had_brackets) {
+        report_error("%%ODS2-E-BADPATH, %s: RENAME needs a new name or a directory for the files\n", dst_arg);
+        return;
+    }
+    resolve_effective_path(sp, sdir_path, sizeof(sdir_path));
+    r = resolve_dir(vol, sdir_path, sdir, &sfid);
+    if (!r.ok) {
+        report_error("%%ODS2-E-DIRERR, %s\n", r.problem);
+        return;
+    }
+    if (dp->had_brackets) {
+        resolve_effective_path(dp, ddir_path, sizeof(ddir_path));
+        r = resolve_dir(vol, ddir_path, ddir, &dfid);
+        if (!r.ok) {
+            report_error("%%RENAME-E-OPENOUT, error opening %s as output\n-RMS-E-DNF, directory not found\n-SYSTEM-W-NOSUCHFILE, no such file\n", dst_arg);
+            return;
+        }
+    } else {
+        snprintf(ddir_path, sizeof(ddir_path), "%s", sdir_path);
+        memcpy(ddir, sdir, sizeof(ddir));
+        dfid = sfid;
+    }
+    same_dir = rw_same_file(sfid, dfid);                         /* directories are compared by file ID, not by their typed text (review 75 C4) */
+    snprintf(msg_dir, sizeof(msg_dir), "%s", sdir_path);
+
+    /* the match list: names and version numbers, the directory's own order (names ascending, a name's versions highest first), H1 by the rule of DELETE */
+    dot = ods5_rfind_unescaped(sp->filename, '.');
+    if (dot == NULL) {
+        snprintf(pat_name, sizeof(pat_name), "%s", sp->filename);
+        pat_type[0] = '\0';
+    } else {
+        snprintf(pat_name, sizeof(pat_name), "%.*s", (int) (dot - sp->filename), sp->filename);
+        snprintf(pat_type, sizeof(pat_type), "%s", dot + 1);
+    }
+    dir_type = strcasecmp(pat_type, "DIR") == 0;                  /* directories take part only for a type that is exactly DIR (review 75 D3) */
+    r = ods2_list_directory_alloc(vol, sdir, &entries, &count);
+    if (!r.ok) {
+        report_error("%%ODS2-E-RENAME, %s: %s\n", src_arg, r.problem);
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        bool take;
+        char lit_name[ODS2_DIR_MAX_NAME + 1];
+        const char *ldot = strrchr(entries[i].name, '.');
+        const char *lit_type = ldot != NULL ? ldot + 1 : "";
+        size_t nlen = ldot != NULL ? (size_t) (ldot - entries[i].name) : strlen(entries[i].name);
+        rank = (i > 0 && same_name(entries[i].name, entries[i - 1].name)) ? rank + 1 : 0;
+        if (rank == 0 && !sp->version_wildcard && !(sp->has_version && sp->version > 0)) g_ok = group_in_order(entries, count, i);
+        memcpy(lit_name, entries[i].name, nlen);
+        lit_name[nlen] = '\0';
+        if (!ods2_wildcard_match(pat_name, lit_name) || !ods2_wildcard_match(pat_type, lit_type)) continue;
+        if (sp->version_wildcard) take = true;
+        else if (!sp->has_version || sp->version == 0) take = (rank == 0);
+        else if (sp->version > 0) take = (entries[i].version == (unsigned) sp->version);
+        else take = (rank == -sp->version);
+        if (!take) continue;
+        if (!sp->version_wildcard && !(sp->has_version && sp->version > 0) && !g_ok) {
+            if (strcmp(last_refused, entries[i].name) != 0) {
+                report_version_order(msg_dir, entries[i].name, "renamed");
+                snprintf(last_refused, sizeof(last_refused), "%s", entries[i].name);
+                refused_order++;
+            }
+            continue;
+        }
+        {
+            uint8_t h[512];
+            bool is_dir = ods2_read_header_fid(vol, entries[i].fid, h).ok && ods2_header_is_file(h, entries[i].fid) && (((const ods2_head_core_t *) h)->filechar & 0x2000u) != 0 &&
+                          ((const ods2_head_core_t *) h)->seg_num == 0;
+            if (is_dir && !dir_type) {
+                char t[ODS2_PATH_MAX * 2 + 16];
+                spec_entry_text(sdir_path, entries[i].name, entries[i].version, t, sizeof(t));
+                printf("%%ODS2-I-SKIPDIR, %s is a directory: a wildcard whose type is not exactly DIR does not rename it (RENAME it by its own name)\n", t);
+                skipped++;
+                continue;
+            }
+        }
+        if (!rw_add(&list, &entries[i])) {
+            report_error("%%ODS2-E-NOMEM, out of memory\n");
+            goto out;
+        }
+    }
+    if (list.n == 0) {
+        if (refused_order == 0 && skipped == 0) {
+            char spec[ODS2_PATH_MAX + 16];
+            format_file_spec(sp, spec, sizeof(spec));
+            report_error("%%ODS2-E-RENAME, %s: no files match\n", spec);
+        } else if (skipped > 0) {
+            printf("%%ODS2-I-TOTAL, 0 files renamed, %d director%s skipped\n", skipped, skipped == 1 ? "y" : "ies");
+        }
+        goto out;
+    }
+
+    /* the groups (the versions of one name that follow each other) and their new names */
+    gstart = malloc((list.n + 1) * sizeof(*gstart));
+    dnames = malloc((list.n + 1) * sizeof(*dnames));
+    unchanged = calloc(list.n + 1, sizeof(*unchanged));
+    keys = malloc(2 * (list.n + 1) * sizeof(*keys));
+    if (gstart == NULL || dnames == NULL || unchanged == NULL || keys == NULL) {
+        report_error("%%ODS2-E-NOMEM, out of memory\n");
+        goto out;
+    }
+    for (gi = 0; gi < list.n; gi++) {
+        if (gi == 0 || !same_name(list.v[gi].name, list.v[gi - 1].name)) gstart[ngroups++] = gi;
+    }
+    gstart[ngroups] = list.n;
+    for (gi = 0; gi < ngroups; gi++) {
+        if (!rw_fill(list.v[gstart[gi]].name, dp, dnames[gi], sizeof(dnames[gi]))) {
+            report_error("%%ODS2-E-BADNAME, %s: the new name is malformed or too long\n", dst_arg);
+            goto out;
+        }
+        unchanged[gi] = same_dir && strcmp(dnames[gi], list.v[gstart[gi]].name) == 0;        /* the new name is the file's own name in its own directory: "already named" */
+    }
+    kept_versions = sp->version_wildcard;
+    if (kept_versions) {
+        /* the versions of a name highest first, whatever order the directory stores them in (the last rename of a name is the lowest: a version limit prunes the lowest) */
+        for (gi = 0; gi < ngroups; gi++) {
+            size_t x, y;
+            for (x = gstart[gi] + 1; x < gstart[gi + 1]; x++) {
+                rw_match_t t = list.v[x];
+                for (y = x; y > gstart[gi] && list.v[y - 1].version < t.version; y--) list.v[y] = list.v[y - 1];
+                list.v[y] = t;
+            }
+        }
+    }
+    if (!same_dir) {
+        r = ods2_list_directory_alloc(vol, ddir, &dentries, &dcount);
+        if (!r.ok) {
+            report_error("%%ODS2-E-RENAME, %s: %s\n", dst_arg, r.problem);
+            goto out;
+        }
+    }
+    {
+        const ods2_dir_entry_t *tgt = same_dir ? entries : dentries;
+        int tcount = same_dir ? count : dcount;
+        /* (a) ;*: the measured shape only (CORPUS 65.4 e2): versions 1..n kept, the new name not there yet; the single-version commands that finish a stopped one are named (review 75 C2) */
+        if (kept_versions) {
+            for (gi = 0; gi < ngroups; gi++) {
+                size_t a = gstart[gi], b = gstart[gi + 1], k;
+                bool contiguous = true;
+                char s1[ODS2_PATH_MAX * 2 + 16], d1[ODS2_PATH_MAX * 2 + 16];
+                if (unchanged[gi]) continue;
+                for (k = a; k < b; k++) if (list.v[k].version != (uint16_t) (b - k)) contiguous = false;      /* highest first: n, n-1 ... 1 */
+                spec_entry_text(sdir_path, list.v[a].name, list.v[a].version, s1, sizeof(s1));
+                if (rw_has_name(tgt, tcount, dnames[gi], NULL)) {
+                    char dn[ODS2_PATH_MAX];
+                    display_name(dnames[gi], dn, sizeof(dn));
+                    snprintf(d1, sizeof(d1), "[%s%s]%s", ddir_path[0] == '\0' ? "000000" : "", ddir_path, dn);
+                    {
+                        char *semi = strrchr(s1, ';');
+                        if (semi != NULL) *semi = '\0';                       /* [W]Q.TXT */
+                    }
+                    report_error("%%ODS2-E-RENAME, %s;*: %s exists: ;* onto a name that exists is not measured on VMS; rename one version at a time, highest first, to finish (RENAME %s;%u %s;%u, then the lower versions in turn): nothing renamed\n",
+                                 s1, d1, s1, (unsigned) list.v[a].version, d1, (unsigned) list.v[a].version);
+                    refuse = true;
+                } else if (!contiguous) {
+                    spec_entry_text(sdir_path, list.v[a].name, list.v[a].version, s1, sizeof(s1));
+                    report_error("%%ODS2-E-RENAME, %s: its versions are not 1 to %zu without gaps: ;* onto a new name keeps the version numbers only for that shape on VMS (CORPUS 65.4); other shapes are not measured: nothing renamed\n",
+                                 s1, b - a);
+                    refuse = true;
+                    refuse = true;
+                }
+            }
+        }
+        /* (b) collisions, decided before the first write (review 75 C3, C4): by name, any version, as the directory compares names; an entry that is the same file as its source is no collision */
+        for (gi = 0; gi < ngroups; gi++) {
+            if (!unchanged[gi]) { keys[nkeys].g = gi; keys[nkeys].key = dnames[gi]; keys[nkeys].kind = 0; nkeys++; }
+            if (same_dir) { keys[nkeys].g = gi; keys[nkeys].key = list.v[gstart[gi]].name; keys[nkeys].kind = 1; nkeys++; }
+        }
+        qsort(keys, nkeys, sizeof(*keys), rw_key_cmp);
+        {
+            size_t a = 0;
+            while (a < nkeys) {
+                size_t b = a + 1, x, y;
+                while (b < nkeys && ods2_dir_name_compare(keys[a].key, strlen(keys[a].key), keys[b].key, strlen(keys[b].key)) == 0) b++;
+                for (x = a; x < b; x++) {
+                    for (y = x + 1; y < b; y++) {
+                        char s1[ODS2_PATH_MAX * 2 + 16], s2[ODS2_PATH_MAX * 2 + 16], dn[ODS2_PATH_MAX];
+                        size_t g1 = keys[x].g, g2 = keys[y].g;
+                        if (g1 == g2) continue;
+                        if (rw_same_file(list.v[gstart[g1]].fid, list.v[gstart[g2]].fid)) continue;            /* the same file under two names (the second stopped state, an alias): no collision */
+                        spec_entry_text(sdir_path, list.v[gstart[g1]].name, 0, s1, sizeof(s1));
+                        spec_entry_text(sdir_path, list.v[gstart[g2]].name, 0, s2, sizeof(s2));
+                        s1[strlen(s1) - 2] = '\0';                                                                /* (the ";0" of the helper) */
+                        s2[strlen(s2) - 2] = '\0';
+                        display_name(dnames[keys[x].kind == 0 ? g1 : g2], dn, sizeof(dn));
+                        if (keys[x].kind == 0 && keys[y].kind == 0) report_error("%%ODS2-E-RENAME, %s and %s would both become %s: nothing renamed\n", s1, s2, dn);
+                        else report_error("%%ODS2-E-RENAME, %s would become %s, which this command also renames (%s): nothing renamed\n", keys[x].kind == 0 ? s1 : s2, dn, keys[x].kind == 0 ? s2 : s1);
+                        refuse = true;
+                    }
+                }
+                a = b;
+            }
+        }
+    }
+    if (refuse) goto out;
+
+    /* the directories the typed new directory passes through, by whole file ID (a directory is not moved under itself by a path through a second entry of it: review 71 C1) */
+    if (dp->had_brackets && ddir_path[0] != '\0') {
+        char pre[ODS2_PATH_MAX];
+        const char *d = ddir_path;
+        size_t cap = 0;
+        for (;;) {
+            const char *nx = ods5_find_unescaped(d, '.');
+            size_t len = nx != NULL ? (size_t) (nx - ddir_path) : strlen(ddir_path);
+            ods2_fid_t f;
+            memcpy(pre, ddir_path, len);
+            pre[len] = '\0';
+            if (ods2_lookup_path(vol, pre, &f).ok) {
+                if (nvia == cap) {
+                    ods2_fid_t *nv = realloc(via, (cap ? cap * 2 : 16) * sizeof(*nv));
+                    if (nv == NULL) break;
+                    via = nv;
+                    cap = cap ? cap * 2 : 16;
+                }
+                via[nvia++] = f;
+            }
+            if (nx == NULL) break;
+            d = nx + 1;
+        }
+    }
+
+    /* each file its own transaction, in the list's order (highest version first within a name: a version limit prunes the lowest) */
+    for (gi = 0; gi < ngroups; gi++) {
+        size_t k;
+        for (k = gstart[gi]; k < gstart[gi + 1]; k++) {
+            int dver = (kept_versions && !unchanged[gi]) ? (int) list.v[k].version : (dp->has_version && !dp->version_wildcard ? dp->version : 0);
+            rw_result_t rr;
+            if (unchanged[gi]) dver = 0;
+            rr = rw_apply(vol, ods2_fid_number(sfid), &list.v[k], ods2_fid_number(dfid), dnames[gi], dver, via, nvia, sdir_path, ddir_path);
+            if (rr == RW_DONE) renamed++;
+            else if (rr == RW_SAME) same++;
+            else failed++;
+            if (vol->write_failed) {
+                report_error("%%ODS2-E-WRITEFAIL, a write to the disk image failed; the rest of the command is not run\n");
+                goto total;
+            }
+        }
+    }
+total:
+    if (list.n > 1 || failed > 0 || skipped > 0) {
+        char part[160] = "";
+        size_t l = 0;
+        if (same > 0) l += (size_t) snprintf(part + l, sizeof(part) - l, ", %d already named", same);
+        if (failed > 0) l += (size_t) snprintf(part + l, sizeof(part) - l, ", %d not renamed (see above)", failed);
+        if (skipped > 0) l += (size_t) snprintf(part + l, sizeof(part) - l, ", %d director%s skipped", skipped, skipped == 1 ? "y" : "ies");
+        printf("%%ODS2-I-TOTAL, %d file%s renamed%s\n", renamed, renamed == 1 ? "" : "s", part);
+    }
+out:
+    free(via);
+    free(list.v);
+    free(gstart);
+    free(dnames);
+    free(unchanged);
+    free(keys);
+    free(entries);
+    free(dentries);
+    (void) tk;
+    (void) nk;
 }
 
 /* ---- shared by PURGE, TYPE with wildcards and SET FILE/PROTECTION, /OWNER_UIC (PLAN_WRITE_OPS items 2 to 4; CORPUS 49.2 to 49.4, 49.7 to 49.9) ---- */
