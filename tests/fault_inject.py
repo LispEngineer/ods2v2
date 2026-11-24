@@ -607,8 +607,8 @@ def main():
                         _errs = [l for l in run(CHECK + [_timg])[1].splitlines() if l.startswith('ERROR')]
                         if _okey in _files2 or any(k2 not in _files2 for k2 in files if k2 != _okey):
                             prob.append('DELETE of the old name in the first state (CORPUS 69: VMS removes the entry only) changed more than that entry')
-                        if '%ODS2-I-DELETED' in _out or 'stays allocated in no directory' not in _out:
-                            prob.append('DELETE of the old name in the first state printed a plain deleted, not that the file stays allocated in no directory: %s' % _out.strip()[:120])
+                        if '%ODS2-I-DELETED' in _out or 'no entry left in its directory' not in _out:
+                            prob.append('DELETE of the old name in the first state printed a plain deleted, not that the file stays allocated with no entry left in its directory: %s' % _out.strip()[:120])
                         if not _errs or any('lost file' not in l and 'back link directory' not in l for l in _errs):          # (a file with no entry anywhere: lost; one with an alias elsewhere: its back link directory has no entry)
                             prob.append('DELETE of the old name in the first state: the checker should say a lost file (or a back link directory with no entry for it) and nothing else: %s' % (_errs[:2],))
                         shutil.copyfile(trial, _timg)

@@ -5845,7 +5845,7 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
             ods5_ident_t id;
             const char *why;
             char a[ODS5_MAX_LITERAL_NAME + 8], b[ODS5_MAX_LITERAL_NAME + 8];
-            /* the file's primary entry: the header names it, or names an entry this directory lacks (a RENAME stopped after its header write: entry_is_primary) */
+            /* the file's primary entry, VMS's rule: the back link is this directory and the header names this entry (entry_is_primary). The entry of a RENAME stopped after its header write is NOT primary: it is taken out alone */
             bool primary = entry_is_primary(dir_file_number, target_header, name, target_version, true);
             (void) id; (void) why; (void) a; (void) b;
             r = remove_directory_entry(vol, dir_file_number, dir_header, name, target_version, target_fid);

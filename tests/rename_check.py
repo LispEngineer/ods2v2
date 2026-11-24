@@ -457,7 +457,7 @@ def header_first_states(work, level, hl):
     check('%s: DELETE P.TXT removes the ENTRY only (VMS: an alias): the directory is empty, no blocks came back, the file is allocated in no directory (the checker: a lost file)' % kind,
           ([], True, True), (listing(img, '[D]'), free1 == free0, any('lost file' in e for e in errs)))
     check('%s: DELETE P.TXT does not print a plain "deleted": it says only the entry was removed and the file stays in no directory (ANALYZE/REPAIR on VMS)' % kind,
-          (False, True, True), ('%ODS2-I-DELETED' in out, 'stays allocated in no directory' in out, 'REPAIR' in out))
+          (False, True, True), ('%ODS2-I-DELETED' in out, 'no entry left in its directory' in out, 'REPAIR' in out))
     # RENAME P R in that state: an alias (VMS): the entry only, the header is untouched
     img = state()
     rc, out = ods2(img, 'RENAME [D]P.TXT [D]R.TXT')
