@@ -188,7 +188,8 @@ typedef struct {
     bool same;                 /* the target is the source: nothing changed */
     bool case_only;            /* the record's name bytes were replaced in place */
     bool resumed;              /* an interrupted rename was finished */
-    bool header_changed;       /* the file's header was rewritten (false: an alias entry) */
+    bool header_changed;       /* the file's header was rewritten (false: an alias entry, or a header a stopped RENAME already wrote: header_current) */
+    bool header_current;       /* the file's header already named the new name (the first write of a RENAME that was stopped): not written again */
     bool adopted;              /* the header named no entry: its back link was set */
     unsigned pruned_version;   /* the version the version limit removed, or 0 */
 } ods2_rename_info_t;

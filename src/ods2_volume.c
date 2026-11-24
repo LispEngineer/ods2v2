@@ -5154,6 +5154,15 @@ static bool fid_equal(ods2_fid_t a, ods2_fid_t b)
     return a.fid_num == b.fid_num && a.fid_seq == b.fid_seq && a.fid_rvn == b.fid_rvn && a.fid_nmx == b.fid_nmx;
 }
 
+typedef struct { ods2_fid_t fid; unsigned count; } fid_count_ctx_t;
+
+static bool visit_count_fid(const ods2_dir_entry_t *entry, void *ctx_)
+{
+    fid_count_ctx_t *ctx = (fid_count_ctx_t *) ctx_;
+    if (fid_equal(entry->fid, ctx->fid)) ctx->count++;
+    return true;
+}
+
 /* Is the entry (name;version) of directory `dir_number` the file's PRIMARY entry? The header's back link is this directory and either the header names this entry, or the header names an entry that
    this directory does not have for this file: a RENAME stopped after its header write (header first: the header already names the new name and the new entry is not there yet) leaves exactly that, and the
    one entry the directory has is then the file's own. An entry whose header names another entry that IS there (this file's) is an alias. `with_version`: the header's version must be the entry's too. */
@@ -5170,6 +5179,15 @@ static bool entry_is_primary(ods2_volume_t *vol, unsigned dir_number, const uint
     if (ods2_dir_name_compare(a, strlen(a), b, strlen(b)) == 0 && (!with_version || id.version == version)) return true;
     /* the header names another entry: is it there, and is it this file's? */
     if (ods2_lookup_name_version(vol, dir_header, id.name, (int) id.version, &f, &fv).ok && fid_equal(f, fid)) return false;
+    /* none of the entries is the one the header names: only a file with ONE entry in this directory has an entry that is its own (review 67, third recheck G1: A.TXT renamed to N.TXT and stopped, then
+       LINK X.TXT A.TXT, then DELETE X.TXT freed the file and left A.TXT dangling). Two or more entries and none named by the header: all are aliases, a DELETE removes the entry only (as VMS does) */
+    {
+        fid_count_ctx_t cc;
+        cc.fid = fid;
+        cc.count = 0;
+        if (!walk_directory(vol, dir_header, visit_count_fid, &cc).ok) return false;
+        if (cc.count != 1) return false;
+    }
     return true;
 }
 
@@ -5423,7 +5441,8 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
        out, 4 the link count back (HARDLINKS). A stop after 1 leaves one entry (the old name) and a header that names the new one: entry_is_primary() reads that entry as the file's own, so RENAME and DELETE
        act on the file; VMS's own DELETE of the header-named entry deletes the FILE and leaves the other dangling, which header-last (entry first) would have exposed to the user's intended action (delete the
        old name). An alias entry leaves the header alone: only the link count is written. */
-    if (((primary || adopt) && !header_names_target) || (hardlinks && !resumed)) {
+    if ((primary || adopt) && header_names_target) inf.header_current = true;
+    if (((primary || adopt) && !header_names_target) || (hardlinks && !resumed && !header_names_target)) {
         if ((primary || adopt) && !header_names_target) {
             if (!ods2_header_set_name(h, ident_name)) return fail("the new name does not fit the header's name area (no room to move the map): not renamed");
             if (adopt) core->backlink = dir_fid;
@@ -5431,7 +5450,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             inf.header_changed = true;
             inf.adopted = adopt;
         }
-        if (hardlinks && !resumed) {
+        if (hardlinks && !resumed && !header_names_target) {
             unsigned links = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
             links++;
             h[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);

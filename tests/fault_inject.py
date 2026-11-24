@@ -631,8 +631,11 @@ def main():
                             lcr = int.from_bytes(hr[0][1][74:76], 'little') if hr else None
                             # a stop right after the first write (the link count + 1, before any entry) cannot be told from the start: the run again counts once more, one too high for good
                             # (a leak, never too little; the checker warns about it); every other stop ends with the count as it was
-                            if lc0 is not None and lcr is not None and lcr != lc0 + (1 if k == 1 else 0):
-                                prob.append('after the RENAME run again the link count is %d, it was %d%s' % (lcr, lc0, ' (a stop after the first write may leave one too many)' if k == 1 else ''))
+                            # (third recheck: when the first write also named the file's header, the run again sees the header name the target with no target entry, knows the count was taken, and does not count
+                            # again: the count ends right. An ALIAS entry leaves the header alone, so nothing shows the count was taken: that stop still leaves it one too high.)
+                            leak1 = 1 if (k == 1 and 'primary' not in name) else 0
+                            if lc0 is not None and lcr is not None and lcr != lc0 + leak1:
+                                prob.append('after the RENAME run again the link count is %d, it was %d%s' % (lcr, lc0, ' (a stop after the first write of an alias rename may leave one too many)' if leak1 else ''))
                     else:
                         # the old name is gone: refused, nothing changed
                         if '%ODS2-E' not in outr:

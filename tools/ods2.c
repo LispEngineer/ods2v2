@@ -2669,7 +2669,7 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
             printf("%%ODS2-I-RENAMED, %s renamed to %s (the spelling only)\n", src_arg, dst_arg);
         } else {
             printf("%%ODS2-I-RENAMED, %s renamed to %s;%u%s%s\n", src_arg, shown, (unsigned) info.version, info.resumed ? " (the target name already named this file: the old entry was removed and the rename finished)" : "",
-                   info.header_changed ? "" : " (an alias entry: the file's header is not changed)");
+                   (info.header_changed || info.header_current) ? "" : " (an alias entry: the file's header is not changed)");
         }
         if (info.pruned_version != 0) printf("%%ODS2-I-DELETED, deleted %s;%u (the version limit)\n", shown, info.pruned_version);
     }

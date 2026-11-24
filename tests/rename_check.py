@@ -470,13 +470,61 @@ def header_first_states(work, level, hl):
     h = hdr(img, '[D]Q.TXT;1')
     count = fields(h, level)['linkcount'] if (h is not None and hl) else None
     warns2 = [w for w in run(['python3', '-I', 'tests/ods5check.py', img])[1].splitlines() if w.startswith('WARN')]
-    if hl:
-        # a stop after the first write (which raised the count) cannot be told from a start: the run again counts once more, one too high for good (the README's first position), and the checker says so
-        check('%s: the same RENAME run again finishes it: Q.TXT;1 only, the header named once; the link count stays one too high (2 for 1 entry: the known leak) and the checker warns of exactly that' % kind,
-              (0, ['Q.TXT;1'], 'Q.TXT;1', [], 2, 1), (rc, listing(img, '[D]'), fields(h, level)['name'] if h is not None else None, checker_errors(img), count, len(warns2)))
-    else:
-        check('%s: the same RENAME run again finishes it: Q.TXT;1 only, the header named once, the checker clean' % kind, (0, ['Q.TXT;1'], 'Q.TXT;1', [], []),
-              (rc, listing(img, '[D]'), fields(h, level)['name'] if h is not None else None, checker_errors(img), warns2))
+    # third recheck (item 2): a HARDLINKS re-run does not count again when the header already names the target and there is no target entry (the count was already taken): the count ends at 1
+    check('%s: the same RENAME run again finishes it: Q.TXT;1 only, the header named once, the checker clean%s' % (kind, ', the link count back to 1 (not counted twice)' if hl else ''),
+          (0, ['Q.TXT;1'], 'Q.TXT;1', [], [], 1 if hl else None),
+          (rc, listing(img, '[D]'), fields(h, level)['name'] if h is not None else None, checker_errors(img), warns2, count))
+    # item 3: the message of that re-run does not call the entry an alias (the header was not changed by THIS run: it was already right)
+    check('%s: the re-run of the stopped RENAME does not say "an alias entry"' % kind, (True, True), ('alias entry' not in out, 'renamed to' in out))
+
+
+def g1_aliases(work, level, hl):
+    """third recheck G1: in the state after a stopped RENAME's header write (entry P, the header names N), a second entry X made with LINK makes P and X both aliases (none is named by the header): DELETE of
+    either removes the entry only, the file stays (the other name still enters it); PURGE and the version limit use the same rule. Before: DELETE X freed the file and left P dangling."""
+    kind = 'ODS-%d%s' % (level, ' HARDLINKS' if hl else '')
+    img = os.path.join(work, 'g1_%d%s.img' % (level, 'h' if hl else ''))
+    assert run([INIT, img, '8192', '--structure=%d' % level, '--label=G1'] + (['--hardlinks'] if hl else []))[0] == 0
+    src = os.path.join(work, 'g1.txt')
+    open(src, 'w').write('header first\n')
+    for c in ('CREATE/DIRECTORY [D]', 'COPY %s [D]P.TXT' % src):
+        assert ods2(img, c)[0] == 0
+    time.sleep(1.1)
+    base = os.path.join(work, 'g1_base.img')
+    shutil.copyfile(img, base)
+
+    def state(extra=()):
+        shutil.copyfile(base, img)
+        run(['env', 'ODS2_FAULT_AFTER_WRITES=1', './ods2_fault', img, 'RENAME [D]P.TXT [D]N.TXT'])
+        for c in ('LINK [D]X.TXT [D]P.TXT',) + tuple(extra):
+            assert ods2(img, c)[0] == 0, c
+        return img
+
+    def alive(img, name):
+        out = ods2(img, 'TYPE [D]' + name)[1]
+        return 'header first' in out
+
+    img = state()
+    check('%s: after the stopped RENAME and a LINK the directory has P.TXT and X.TXT' % kind, ['P.TXT;1', 'X.TXT;1'], listing(img, '[D]'))
+    free0 = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
+    for victim, other in (('X.TXT', 'P.TXT'), ('P.TXT', 'X.TXT')):
+        img = state()
+        rc, out = ods2(img, 'DELETE [D]%s' % victim)
+        free1 = int(re.search(r'Free blocks:\s+(\d+)', ods2(img, 'SHOW VOLUME')[1]).group(1))
+        check('%s: DELETE %s (an alias: the header names N.TXT, which is not there) removes the entry only: %s still enters the file, no blocks freed' % (kind, victim, other),
+              ([other + ';1'], True, free1 == free0), (listing(img, '[D]'), alive(img, other), free1 == free0))
+    img = state(('COPY %s [D]P.TXT' % src,))
+    rc, out = ods2(img, 'PURGE [D]P.TXT')
+    check('%s: PURGE P.TXT drops P.TXT;1 as an entry only: X.TXT still enters the file' % kind, (['P.TXT;2', 'X.TXT;1'], True), (listing(img, '[D]'), alive(img, 'X.TXT')))
+    shutil.copyfile(base, img)
+    assert ods2(img, 'SET FILE/VERSION_LIMIT=1 [D]P.TXT')[0] == 0
+    run(['env', 'ODS2_FAULT_AFTER_WRITES=1', './ods2_fault', img, 'RENAME [D]P.TXT [D]N.TXT'])
+    assert ods2(img, 'LINK [D]X.TXT [D]P.TXT')[0] == 0
+    rc, out = ods2(img, 'COPY %s [D]P.TXT' % src)
+    check('%s: COPY over the version limit drops P.TXT;1 as an entry only: X.TXT still enters the file' % kind, (['P.TXT;2', 'X.TXT;1'], True), (listing(img, '[D]'), alive(img, 'X.TXT')))
+    # the single-entry state is still the file's own (no LINK): DELETE frees it (the earlier test); the checker finds no error after the alias deletes
+    img = state()
+    ods2(img, 'DELETE [D]X.TXT')
+    check('%s: the checker finds no error after DELETE X.TXT in that state' % kind, [], [e for e in checker_errors(img) if 'lost file' not in e or not hl])
 
 
 def r1_unusable_number(work, level):
@@ -529,7 +577,9 @@ def main():
             review67_cases(work, level)
             r1_unusable_number(work, level)
             header_first_states(work, level, False)
+            g1_aliases(work, level, False)
         header_first_states(work, 5, True)
+        g1_aliases(work, 5, True)
     finally:
         if not keep:
             shutil.rmtree(work, ignore_errors=True)
