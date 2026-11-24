@@ -73,6 +73,12 @@ CASES = {
                extra_changed=['Back link file identification'], backlink='moved', after='[Y]C3.TXT;1'),
     'k2': dict(vols=('2', '5', '5h'), old='[K]P2_AL.TXT;1', new='[Y]', stored=('P2.TXT;1', 'P2.TXT;1'), dir='[K]', dir2='[Y]', removed=['P2_AL.TXT;1'], added=['P2_AL.TXT;1'], revision=0, header='same',
                status='ok', link=('[K]P2_AL.TXT', '[K]P2.TXT'), file='[K]P2.TXT;1', after='[Y]P2_AL.TXT;1'),
+    # --- CORPUS 65.3 c1 c2: a DIRECTORY renamed (the directory file's own header; its children untouched). dirbase=True: tests/rename_dir_check.py builds the directories of these cases itself (the names
+    # collide with the shared base's [X] and [X2]); c1 within the parent, c2 to another parent (the back link changes) ---
+    'c1': dict(vols=('2', '5', '5h'), old='[000000]X.DIR;1', new='[000000]X2.DIR', stored=('X.DIR;1', 'X2.DIR;1'), dir='[000000]', removed=['X.DIR;1'], added=['X2.DIR;1'], revision=1, header='changed', status='ok',
+               dirbase=True, after='[000000]X2.DIR;1'),
+    'c2': dict(vols=('2', '5', '5h'), old='[X2]SUB.DIR;1', new='[Y]SUB.DIR', stored=('SUB.DIR;1', 'SUB.DIR;1'), dir='[X2]', dir2='[Y]', removed=['SUB.DIR;1'], added=['SUB.DIR;1'], revision=1, header='changed',
+               status='ok', extra_changed=['Back link file identification'], backlink='moved', dirbase=True, after='[Y]SUB.DIR;1'),
     # an alias renamed in the directory of its primary entry: the header is not touched at all
     'k1': dict(vols=('2', '5', '5h'), old='[K]P1_AL.TXT;1', new='[K]P1_AL2.TXT', stored=('P1.TXT;1', 'P1.TXT;1'), dir='[K]', removed=['P1_AL.TXT;1'], added=['P1_AL2.TXT;1'], revision=0, header='same',
                status='ok', link=('[K]P1_AL.TXT', '[K]P1.TXT'), file='[K]P1.TXT;1'),

@@ -5322,7 +5322,7 @@ static ods2_result_t dir_subtree_walk(ods2_volume_t *vol, ods2_fid_t src_fid, od
         if (fid_equal(cf, target_fid)) { *target_inside = true; break; }
         if (fid_set_has(&seen, cf)) {
             static char msg[ODS5_MAX_LITERAL_NAME + 240];       /* static: the message outlives this call */
-            snprintf(msg, sizeof(msg), "the directory %s is entered twice below %s (an unfinished RENAME of it, or an alias): run the RENAME that was stopped again, then this one: not renamed", top->kids.name[idx], src_name);
+            snprintf(msg, sizeof(msg), "the directory %s is entered twice below %s (an unfinished RENAME of it, or an alias): run the RENAME that was stopped again, or DELETE the alias entry, then this one: not renamed", top->kids.name[idx], src_name);
             res = fail(msg);
             break;
         }
@@ -5350,6 +5350,10 @@ static ods2_result_t dir_chain_contains(ods2_volume_t *vol, ods2_fid_t start, od
     for (;;) {
         if (fid_equal(cur, fid)) { *found = true; break; }
         if (ods2_fid_number(cur) == 4) break;
+        if (ods2_fid_number(cur) == 0 || (cur.fid_num == 0xFFFF && cur.fid_nmx == 0xFF)) {
+            res = fail("the target directory (or one of its parents) has no back link (0 or (16777215,0,0): the primary link of a hard-linked directory was removed): nothing can be moved into it until it is adopted: RENAME that directory first (to another name, or into another directory), which writes its name and back link: not renamed");
+            break;
+        }
         if (++steps > ODS2_MAX_DIR_DEPTH + 1u || fid_set_has(&seen, cur) || !fid_set_add(&seen, cur)) { res = fail("the back links of the target directory do not lead to the master directory (a loop or a damaged directory structure): not renamed"); break; }
         if (!ods2_check_fid(cur).ok || !ods2_read_header_fid(vol, cur, hdr).ok || !ods2_header_is_file(hdr, cur) || !(((const ods2_head_core_t *) hdr)->filechar & 0x2000u)) {
             res = fail("the back links of the target directory lead to something that is not a directory (a damaged directory structure): not renamed");
@@ -5631,9 +5635,9 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     if (!resumed) {
         bool exists;
         /* the target name is held by a directory or is a reserved file: no new version of it (review 67 F1; the same two refusals as COPY) */
+        if (is_dir && di.exists) { free(di.versions); return fail("this name exists in the target directory: a directory is not given another version of a name: not renamed"); }
         r = version_target_ok(vol, dst_dir_number, dst_norm, &di);
         if (!r.ok) { free(di.versions); return r; }
-        if (is_dir && di.exists) { free(di.versions); return fail("this name exists in the target directory: a directory is not given another version of a name: not renamed"); }
         r = next_version(&di, dst_version, &v, &exists);               /* the one rule of COPY: 1 for a new name, highest + 1, a typed version kept */
         if (!r.ok) { free(di.versions); return r; }
         if (exists) {
@@ -6209,7 +6213,10 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
             }
             r = ods2_write_header(vol, ods2_fid_number(target_fid), target_header);
             if (!r.ok) return r;
-            if (info != NULL) info->link_removed = true;     /* the file stays for its other links (PURGE does not say it freed blocks) */
+            if (info != NULL) {
+                info->link_removed = true;     /* the file stays for its other links (PURGE does not say it freed blocks) */
+                info->dir_link = (target_core->filechar & 0x2000u) != 0;
+            }
             if (version_out != NULL) *version_out = target_version;
             return ok();
         }

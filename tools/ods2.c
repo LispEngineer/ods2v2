@@ -2643,6 +2643,9 @@ static bool rename_parse_path(const char *spec, ods2_parsed_path_t *out)
     return ods2_parse_path(spec, out);
 }
 
+/* OpenVMS VAX V7.3 opens a path of 8 directory names and fails on the 9th (CORPUS 12.3, 65.3 on the VAX: 8 names worked after a RENAME, the 9th did not: 66.3) */
+#define ODS2_VAX_V73_MAX_NAMES 8u
+
 static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const ods2_parsed_path_t *dp, const char *src_arg, const char *dst_arg, bool device_only)
 {
     uint8_t sdir[512], ddir[512];
@@ -2757,9 +2760,9 @@ static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const o
                    (info.header_changed || info.header_current) ? "" : " (an alias entry: the file's header is not changed)");
         }
         if (info.pruned_version != 0) printf("%%ODS2-I-DELETED, deleted %s;%u (the version limit)\n", shown, info.pruned_version);
-        if (info.is_dir && !vol->ods5 && info.deepest_names > ODS2_VAX_V73_MAX_LEVELS) {
+        if (info.is_dir && !vol->ods5 && info.deepest_names > ODS2_VAX_V73_MAX_NAMES) {
             fprintf(stderr, "%%ODS2-W-DEEPDIR, the directory is now %u names deep below [000000]: OpenVMS VAX V7.3 cannot open a path of more than %u names on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and later can\n",
-                    info.deepest_names, ODS2_VAX_V73_MAX_LEVELS);
+                    info.deepest_names, ODS2_VAX_V73_MAX_NAMES);
         }
     }
 }
@@ -3351,6 +3354,9 @@ static void report_deletion(const char *name, uint16_t version, const ods2_delet
         /* the first state of a stopped RENAME (CORPUS 69): not "deleted": the entry went, the file did not */
         printf("%%ODS2-W-FILEKEPT, removed the entry %s;%u only: the file stays allocated with no entry left in its directory (its header names a name or a directory that has no entry for it: a RENAME that was stopped; another directory may still enter it). "
                "ANALYZE/DISK_STRUCTURE/REPAIR on VMS puts it in SYSLOST; it is not deleted\n", name, version);
+    } else if (info->link_removed && info->dir_link) {
+        /* a directory taken off a HARDLINKS count that was above 1 (review 73 S3): not plainly "deleted": the entry went, the directory file stays; with no other entry it is in no directory */
+        printf("%%ODS2-W-FILEKEPT, removed the entry %s;%u only (the directory's link count was above 1): the directory file stays allocated; if no other entry names it, it is now in no directory (ANALYZE/DISK_STRUCTURE/REPAIR on VMS); it is not deleted\n", name, version);
     } else if (info->kept == 1 && info->name_differs) {
         char shown[ODS2_PATH_MAX];
         display_name(info->primary_name, shown, sizeof(shown));

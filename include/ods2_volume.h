@@ -676,6 +676,7 @@ ods2_result_t ods2_delete_version(ods2_volume_t *vol, unsigned dir_file_number,
 typedef struct {
     int      kept;
     bool     link_removed;    /* a HARDLINKS volume: one link of a file with others was removed, the file stays */
+    bool     dir_link;        /* ... and the file is a directory (an empty one: its count was above 1: if nothing else enters it, it is now in no directory) */
     bool     no_entry_left;   /* the entry removed was not the one the header names, and the directory the header's back link names has no entry for the file now (a RENAME stopped after its header write, CORPUS 69): the file stays allocated in NO directory (VMS: ANALYZE says LOSTHEADER, /REPAIR puts it in SYSLOST) */
     bool     name_differs;
     char     primary_name[ODS5_MAX_LITERAL_NAME + 8];

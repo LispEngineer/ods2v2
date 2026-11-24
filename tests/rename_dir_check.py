@@ -115,6 +115,52 @@ def _remap(spec, new_spec, cmd):
     return spec.replace('[P.X.S]', '[%s.S]' % newdir).replace('[P.X]', '[%s]' % newdir)
 
 
+def table_cases(work, kind, level, hl):
+    """the rows c1 and c2 of tests/rename_expect.py (CORPUS 65.3, checked against VMS's own dumps by ods5-cli's rename_expect_check.py): the same command, the same header changes"""
+    key = {'ODS-2': '2', 'ODS-5': '5', 'ODS-5 HARDLINKS': '5h'}[kind]
+    setup = {'c1': (['CREATE/DIRECTORY [X]', 'COPY {m} [X]M.TXT'], ('[X]M.TXT;1', '[X2]M.TXT;1')),
+             'c2': (['CREATE/DIRECTORY [X2]', 'CREATE/DIRECTORY [X2.SUB]', 'COPY {m} [X2.SUB]S.TXT', 'CREATE/DIRECTORY [Y]'], ('[X2.SUB]S.TXT;1', '[Y.SUB]S.TXT;1'))}
+    for cid in sorted(c for c, t in R.T.CASES.items() if t.get('dirbase')):
+        t = R.T.CASES[cid]
+        if key not in t['vols']:
+            continue
+        img = os.path.join(work, 'tc_%s_%d%s.img' % (cid, level, 'h' if hl else ''))
+        if os.path.exists(img):
+            os.remove(img)
+        assert S.run([S.INIT, img, '8192', '--structure=%d' % level, '--label=TCASE'] + (['--hardlinks'] if hl else []))[0] == 0
+        m = os.path.join(work, 'tc_m.txt')
+        open(m, 'w').write('content of the child\n')
+        for c in setup[cid][0]:
+            rc, out = S.ods2(img, c.format(m=m))
+            assert rc == 0, (c, out)
+        time.sleep(1.1)
+        tag = '%s %s' % (kind, cid)
+        before = R.hdr(img, t['old'])
+        others = {x: R.hdr(img, x) for x in (setup[cid][1][0],)}
+        rc, out = S.ods2(img, 'RENAME %s %s' % (t['old'], t['new']))
+        check('%s: RENAME %s %s succeeds' % (tag, t['old'], t['new']), (0, True), (rc, '%ODS2-E' not in out and '%RENAME-E' not in out))
+        after = R.hdr(img, t['after'])
+        if before is None or after is None:
+            check('%s: the directory is found under %s' % (tag, t['after']), True, after is not None)
+            continue
+        fb, fa = R.fields(before, level), R.fields(after, level)
+        check('%s: the stored name goes %s to %s' % (tag, t['stored'][0], t['stored'][1]), t['stored'], (fb['name'], fa['name']))
+        check('%s: revision number +%d' % (tag, t['revision']), fb['revision'] + t['revision'], fa['revision'])
+        check('%s: no byte outside the name, the revision, the date field and the checksum%s changed' % (tag, ' (and the back link)' if t.get('backlink') == 'moved' else ''), [],
+              R.other_bytes_same(before, after, level, t.get('backlink') == 'moved', ()))
+        if t.get('backlink') == 'moved':
+            check('%s: the back link is %s' % (tag, t['dir2']), S.fnum(img, '[000000]%s.DIR' % t['dir2'].strip('[]')), struct.unpack_from('<H', after, 66)[0])
+        if level == 2:
+            check('%s: ODS-2: the revision date is set' % tag, True, fa['revdate'] > fb['revdate'])
+        else:
+            check('%s: ODS-5: the attribute change date is set, the revision date is not changed' % tag, (True, fb['revdate']), (fa['attdate'] > fb['attdate'], fa['revdate']))
+        lb = R.listing(img, t['dir'])
+        la2 = R.listing(img, t['dir2'] if t.get('dir2') else t['dir'])
+        check('%s: %s loses %s and %s gains %s' % (tag, t['dir'], t['removed'], t.get('dir2') or t['dir'], t['added']), (False, True), (any(x in lb for x in t['removed']) and t['removed'][0] != t['added'][0] or (t['removed'][0] == t['added'][0] and t.get('dir2') is None), all(x in la2 for x in t['added'])))
+        check('%s: the child is untouched (its header is byte for byte the same) and reads under the new path' % tag, (others[setup[cid][1][0]], True), (R.hdr(img, setup[cid][1][1]), 'content of the child' in S.ods2(img, 'TYPE %s' % setup[cid][1][1])[1]))
+        check('%s: the checker finds nothing wrong' % tag, ([], []), checker(img))
+
+
 def cases(work, kind, level, hl):
     base = mk(work, level, hl, 'base')
     # --- success: within the parent, to another parent, moved and renamed, a subdirectory out, into the MFD (CORPUS 65.3 c1 c2 and the deep case)
@@ -183,13 +229,47 @@ def cases(work, kind, level, hl):
     rc, out = S.run(['env', 'ODS2_TEST_MAX_DIR_DEPTH=4', './ods2_fault', im, 'RENAME [P]X.DIR [D1.D2]'])
     check('%s depth: the same into [D1.D2] (level 4) goes through' % kind, (0, True), (rc, 'X.DIR;1' in R.listing(im, '[D1.D2]')))
     if level == 2:
+        # the VAX opens 8 names and fails on the 9th (CORPUS 12.3, 65.3; 66.3 after a RENAME): warn ABOVE 8 (review 73 S5)
         im = fresh(deep, work, 'nine')
         chain = 'D1.D2.D3'
         for i in range(4, 8):
             chain += '.D%d' % i
             assert S.ods2(im, 'CREATE/DIRECTORY [%s]' % chain)[0] == 0
+        rc, out = S.ods2(im, 'RENAME [P]Y.DIR [%s]' % chain)
+        check('%s eight names: the empty directory Y moved to [%s] is the 8th name: succeeds, no warning' % (kind, chain), (0, False), (rc, 'DEEPDIR' in out))
         rc, out = S.ods2(im, 'RENAME [P]X.DIR [%s]' % chain)
-        check('%s nine names: X moved to [%s] (its deepest path S has 10 names) succeeds and WARNS (the VAX cannot open it: CORPUS 66.3)' % (kind, chain), (0, True), (rc, 'DEEPDIR' in out))
+        check('%s nine names: X moved to [%s] (its subdirectory S is the 9th name) succeeds and WARNS (the VAX cannot open the 9th name: CORPUS 66.3)' % (kind, chain), (0, True), (rc, 'DEEPDIR' in out and 'more than 8 names' in out))
+    # review 73 S1: a tree that holds a directory alias cannot be moved; the message says how to go on
+    im = mk(work, level, hl, 'alias')
+    assert S.ods2(im, 'COPY %s [P.X.S]STUBA.TXT' % os.path.join(work, 'rd_b.txt'))[0] == 0
+    if not hl:
+        assert S.ods2(im, 'LINK [P.X.S]Y.DIR [P.X.S]STUBA.TXT')[0] == 0
+        S.entry_fid(im, S.fnum(im, '[P.X]S.DIR'), 'Y.DIR', S.fnum(im, '[P]Y.DIR'))
+        h0 = sha(im)
+        rc, out = S.ods2(im, 'RENAME [000000]P.DIR [R]')
+        check('%s S1: a tree with a directory alias (Y entered in P and inside P.X.S) cannot be moved: IDR-free refusal naming the entry and saying to run the stopped RENAME again OR DELETE the alias entry, the image is unchanged' % kind,
+              (True, True, h0), ('entered twice' in out and 'DELETE the alias entry' in out, '%ODS2-I-RENAMED' not in out, sha(im)))
+    # review 73 S2: moving into a directory whose back link is dead: the message names the way out; renaming that directory first adopts it
+    im = fresh(base, work, 'dead')
+    qnum = S.fnum(im, '[000000]Q.DIR')
+    lbn = S._header_lbn(im, qnum)
+    with open(im, 'r+b') as f:
+        f.seek(lbn * 512)
+        hb = bytearray(f.read(512))
+        struct.pack_into('<HHBB', hb, 66, 0xFFFF, 0, 0, 0xFF)
+        struct.pack_into('<H', hb, 510, sum(struct.unpack_from('<255H', hb, 0)) & 0xffff)
+        f.seek(lbn * 512)
+        f.write(bytes(hb))
+    h0 = sha(im)
+    rc, out = S.ods2(im, 'RENAME [P]X.DIR [Q]')
+    check('%s S2: a move into a directory whose back link is (16777215,0,0) is refused with the way out (RENAME that directory first), the image is unchanged' % kind, (True, True, h0),
+          ('RENAME that directory first' in out, '%ODS2-I-RENAMED' not in out, sha(im)))
+    rc, out = S.ods2(im, 'RENAME [000000]Q.DIR [000000]Q2.DIR')
+    rc2, out2 = S.ods2(im, 'RENAME [P]X.DIR [Q2]')
+    check('%s S2: RENAME of that directory adopts it (name and back link written); then the move into it goes through' % kind, (0, 0, True), (rc, rc2, 'X.DIR;1' in R.listing(im, '[Q2]')))
+    im = fresh(base, work, 'wording')
+    rc, out = S.ods2(im, 'RENAME [P]X.DIR [P]Y.DIR')
+    check('%s review 73: an existing target name answers for a DIRECTORY ("a directory is not given another version"), not the file wording' % kind, (True, False), ('a directory is not given another version' in out, 'a file cannot be made' in out))
 
 
 def main():
@@ -197,6 +277,7 @@ def main():
     try:
         for kind, level, hl in KINDS:
             print('=== %s' % kind)
+            table_cases(work, kind, level, hl)
             cases(work, kind, level, hl)
     finally:
         shutil.rmtree(work, ignore_errors=True)

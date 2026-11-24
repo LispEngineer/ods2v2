@@ -113,6 +113,7 @@ def delete_rule(work, name, level, hl):
                         check('%s: %s: the link count went down with the entry (2 to 1)' % (label, how), 1, (count_and_backlink(im, '[Q]X.DIR;1') or (None,))[0])
                 elif hl:
                     # review 72 S1: an EMPTY directory with a level-5 header and a count above 1 takes the link branch: the entry goes, the count goes down; the file stays
+                    check('%s: %s does not say plainly "deleted": the entry went, the directory file stays (review 73 S3)' % (label, how), (False, True), ('%ODS2-I-DELETED' in out, 'stays allocated' in out or 'is not deleted' in out or 'not deleted' in out))
                     cb = count_and_backlink(im, '[Q]X.DIR;1') if state == 'twin' else None
                     check('%s: %s takes the HARDLINKS link branch (count 2): the entry goes, the directory file STAYS allocated (no blocks come back), the count is 1' % (label, how),
                           (False, True, 1), ('X.DIR;1' in listing(im, '[P]'), free_blocks(im) == f0, count_by_number(im, S.fnum(base, '[P]X.DIR'))))

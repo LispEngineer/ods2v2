@@ -963,8 +963,8 @@ def main():
             bases, done = {}, {}
             for cid in sorted(T.CASES, key=lambda c: (c[0], int(re.sub(r'\D', '', c) or 0))):
                 t = T.CASES[cid]
-                if kind not in t['vols']:
-                    continue
+                if kind not in t['vols'] or t.get('dirbase'):
+                    continue                           # (a directory case: tests/rename_dir_check.py builds its directories)
                 alias = (t.get('link'), bool(t.get('noprimary')))
                 if alias not in bases:
                     bases[alias] = build(work, level, hl, alias[0], alias[1])
