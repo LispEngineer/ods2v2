@@ -1706,13 +1706,13 @@ static void cmd_set_record_sizes(ods2_volume_t *vol, const ods2_parsed_path_t *p
     }
 }
 
-/* Warnings for a directory made deep. The deepest directory OpenVMS VAX V7.3 reaches on an ODS-2 volume is 7 levels below
-   [000000] (measured: deeper ones give %RMS-F-DIR and DIRECTORY [...] silently stops at 7); Alpha V7.3-2 and later create
+/* Warnings for a directory made deep. OpenVMS VAX V7.3 opens a path of 8 directory names on an ODS-2 volume and fails on the 9th (CORPUS 12.3 and 65.3: 8 names work; 66.3: a directory renamed to a 9th
+   name cannot be opened, %RMS-F-DIR); the one constant below serves CREATE/DIRECTORY, IMPORT and RENAME of a directory (it was 7 for the first two, from an earlier measurement). Alpha V7.3-2 and later create
    10,000 levels without refusal. But VMS's own wildcard descent [...] stops at 256 directories on V7.3-2 and 512 on V8.4 and
    V8.4-2L2 (%RMS-F-DIR), and BACKUP cannot save files that deep (FTLNTSAVED). ods2v2 creates up to 2,048 levels (the depth
-   its own DIR [...] and EXPORT read back) and says so past 256, and past 7 on an ODS-2 volume. Counts what it warned
+   its own DIR [...] and EXPORT read back) and says so past 256, and past 8 names on an ODS-2 volume. Counts what it warned
    about in *vax_warned and *deep_warned; prints when `print`. */
-#define ODS2_VAX_V73_MAX_LEVELS 7u
+#define ODS2_VAX_V73_MAX_NAMES 8u
 #define ODS2_VMS_WILDCARD_LEVELS 256u
 static void warn_deep(ods2_volume_t *vol, const uint8_t *parent_header, const char *shown, bool print, int *vax_warned,
                       int *deep_warned)
@@ -1721,12 +1721,12 @@ static void warn_deep(ods2_volume_t *vol, const uint8_t *parent_header, const ch
 
     if (!ods2_directory_depth(vol, parent_header, &depth).ok) return;
     depth += 1;     /* the level of the directory being made */
-    if (!vol->ods5 && depth > ODS2_VAX_V73_MAX_LEVELS) {
+    if (!vol->ods5 && depth > ODS2_VAX_V73_MAX_NAMES) {
         if (vax_warned != NULL) (*vax_warned)++;
         if (print) {
             fprintf(stderr, "%%ODS2-W-DEEPDIR, [%s] is %u levels below [000000]: OpenVMS VAX V7.3 cannot reach a "
                             "directory deeper than %u levels on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
-                            "later can\n", shown, depth, ODS2_VAX_V73_MAX_LEVELS);
+                            "later can\n", shown, depth, ODS2_VAX_V73_MAX_NAMES);
         }
     }
     if (depth > ODS2_VMS_WILDCARD_LEVELS) {
@@ -2643,9 +2643,6 @@ static bool rename_parse_path(const char *spec, ods2_parsed_path_t *out)
     return ods2_parse_path(spec, out);
 }
 
-/* OpenVMS VAX V7.3 opens a path of 8 directory names and fails on the 9th (CORPUS 12.3, 65.3 on the VAX: 8 names worked after a RENAME, the 9th did not: 66.3) */
-#define ODS2_VAX_V73_MAX_NAMES 8u
-
 static void cmd_rename(ods2_volume_t *vol, const ods2_parsed_path_t *sp, const ods2_parsed_path_t *dp, const char *src_arg, const char *dst_arg, bool device_only)
 {
     uint8_t sdir[512], ddir[512];
@@ -3015,7 +3012,7 @@ static void cmd_import_tree(ods2_volume_t *vol, const char *local_dir, const ods
     if (st.deep > 0) {
         fprintf(stderr, "%%ODS2-W-DEEPDIR, %d director%s deeper than %u levels below [000000] created: OpenVMS "
                         "VAX V7.3 cannot reach them on an ODS-2 volume (%%RMS-F-DIR); Alpha V7.3-2 and "
-                        "later can\n", st.deep, st.deep == 1 ? "y" : "ies", ODS2_VAX_V73_MAX_LEVELS);
+                        "later can\n", st.deep, st.deep == 1 ? "y" : "ies", ODS2_VAX_V73_MAX_NAMES);
     }
     if (st.deep256 > 0) {
         fprintf(stderr, "%%ODS2-W-DEEPDIR256, %d director%s deeper than %u levels below [000000] created: VMS's own wildcard "
