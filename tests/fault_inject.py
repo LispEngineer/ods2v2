@@ -85,7 +85,7 @@ RENAME_ALLOWED = []
 HF_NO_WARN_OPS = ('rename_move_limit', 'rename_alias', 'rename_hardlink', 'rename_case', 'rename_move', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_ext')     # the header is not rewritten (an alias), or the spelling only differs (no name differs)
 MOVE_OPS = ['rename_move', 'rename_move_name', 'rename_move_exist', 'rename_move_alias', 'rename_move_primary', 'rename_move_hardlink', 'rename_move_primary_hardlink', 'rename_move_split', 'rename_move_ext', 'rename_move_limit']
 MOVE_ALIAS_OPS = ('rename_move_alias', 'rename_move_hardlink')               # the header is not written: no header-first state
-MOVE_FIRST_STATE_ERROR = r'its back link directory \d+ has no entry for it'     # the ONE error of the checker the first state of a primary move has (the header names the target directory, which has no entry yet)
+MOVE_FIRST_STATE_ERROR = r'its back link directory \d+ has no entry for it'     # the ONE warning of the checker the first state of a primary move has (the header names the target directory, which has no entry yet; VMS: W-BACKLINK)
 RENAME_PAIRS = {'rename_move': ('A1.TXT;1', 'SUB/A1.TXT;1'), 'rename_move_name': ('A1.TXT;1', 'SUB/A9.TXT;1'), 'rename_move_exist': ('A1.TXT;1', 'SUB/D.TXT;2'),
                 'rename_move_alias': ('SUB/LNKA.TXT;1', 'EMPTY/LNKA.TXT;1'), 'rename_move_primary': ('L.TXT;1', 'EMPTY/L.TXT;1'), 'rename_move_hardlink': ('SUB/LNKA.TXT;1', 'EMPTY/LNKA.TXT;1'),
                 'rename_move_primary_hardlink': ('L.TXT;1', 'EMPTY/L.TXT;1'), 'rename_move_split': ('A1.TXT;1', 'FULL/%(next)s;1'), 'rename_move_ext': ('F/A.DAT;1', 'A2.DAT;1'), 'rename_move_limit': ('SUB/D.TXT;1', 'V.TXT;3'),
@@ -571,11 +571,10 @@ def main():
                     _mo, _mn = (x % ctx_op for x in RENAME_PAIRS[name])
                     _first = _mo in files and _mn not in files
                     _mv_first = _first
-                    _bl = [b for b in _bad0 + leaks if re.search(MOVE_FIRST_STATE_ERROR, b)]       # (an operation that allows leak classes files that error under `leaks`)
-                    if _first:
-                        if len(_bl) != 1:
-                            prob.append('the state after the header write of a move should show exactly one "back link directory has no entry" error, it shows %d: not header first?' % len(_bl))
-                        _bad0 = [b for b in _bad0 if b not in _bl]
+                    # (VMS's ANALYZE rates this state a WARNING, W-BACKLINK, CORPUS 70: so does ods5check)
+                    _wl = [l for l in run(CHECK + [trial])[1].splitlines() if l.startswith('WARN') and re.search(MOVE_FIRST_STATE_ERROR, l)]
+                    if len(_wl) != (1 if _first else 0):
+                        prob.append('the %s state of a move should show %d "back link directory has no entry" warning(s), it shows %d%s' % ('first (after the header write)' if _first else 'other', 1 if _first else 0, len(_wl), ': not header first?' if _first else ''))
                 prob += ['checker: ' + b for b in _bad0]
                 for p, h in base_files.items():
                     if p in files and files[p] != h:         # a target may be gone (a removed version), never changed (review 40 F1)
@@ -618,7 +617,7 @@ def main():
                     _okey, _nkey = (x % ctx_op for x in RENAME_PAIRS[name])
                     _w = [l for l in run(CHECK + [trial])[1].splitlines() if l.startswith('WARN') and 'link count' not in l and 'allocated but owned by no file' not in l]        # (a directory moved to a larger area by the insert shows its old area as lost for a moment: every insert does)
                     _first_state = (_okey in files and _nkey not in files and not (_okey.lower() == _nkey.lower()))
-                    _bad_w = [l for l in _w if not (_first_state and re.search(r"header name '.*' differs from its directory entry", l))]
+                    _bad_w = [l for l in _w if not (_first_state and (re.search(r"header name '.*' differs from its directory entry", l) or (name in MOVE_OPS and re.search(MOVE_FIRST_STATE_ERROR, l))))]
                     if _bad_w:
                         prob.append('a warning the stopped state may not have: %s' % _bad_w[0].strip()[:150])
                     if _first_state and name not in HF_NO_WARN_OPS and name not in MOVE_OPS and not any("header name '" in l for l in _w):

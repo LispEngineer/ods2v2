@@ -5445,7 +5445,9 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             /* review 69 F1 (data loss): the version the limit removes may be another entry of THIS file (an alias made with LINK, or the entry a stopped move left in the target directory): that entry is the
                primary one by the rule (no version compared without HARDLINKS), so removing it deletes the file that is being renamed. Refused before any write. */
             ods2_fid_t df;
-            if (ods2_lookup_name_version(vol, dst_header, dst_norm, (int) drop_version, &df, NULL).ok && fid_equal(df, src_fid)) {
+            unsigned links_now = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
+            /* on a HARDLINKS volume with a link count of 2 or more the prune only takes the entry out and lowers the count (VMS too, CORPUS 70): the file stays and the rename goes on */
+            if (!(hardlinks && links_now >= 2) && ods2_lookup_name_version(vol, dst_header, dst_norm, (int) drop_version, &df, NULL).ok && fid_equal(df, src_fid)) {
                 static char msg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
                 free(di.versions);
                 snprintf(msg, sizeof(msg), "the version limit of %s would remove version %u, which is another entry of this same file (renaming onto %s;%u would delete the file): not renamed", dst_norm, drop_version, dst_norm, v);

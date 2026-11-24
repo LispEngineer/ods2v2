@@ -766,6 +766,12 @@ def review69_cases(work, level, hl):
         assert ods2(im, 'SET FILE/VERSION_LIMIT=1 %s' % tgt)[0] == 0
         h0 = sha(im)
         rc, out = ods2(im, cmd)
+        if hl:
+            # a HARDLINKS volume with a link count of 2 or more: the prune only takes the entry out and lowers the count (VMS too, CORPUS 70): the file stays and the rename goes on
+            newname = tgt + ';' + cmd.rsplit(';', 1)[1]
+            check('%s F1 %s: %s goes through (the prune of the other entry of the file lowers the link count only), the file reads under %s, the checker finds nothing wrong' % (kind, where, cmd, newname),
+                  (0, True, True, []), (rc, '%ODS2-I-RENAMED' in out and 'the version limit' in out, reads(im, newname), [e for e in checker_errors(im)]))
+            continue
         check('%s F1 %s: %s is refused (the version the limit would remove is another entry of this same file), the image is unchanged' % (kind, where, cmd),
               (True, True, h0), ('another entry of this same file' in out and '%ODS2-I-RENAMED' not in out, '%ODS2-E' in out, sha(im)))
         check('%s F1 %s: the file still reads under its names' % (kind, where), True, reads(im, name_old) and reads(im, tgt + ';1'))
