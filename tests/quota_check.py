@@ -130,6 +130,33 @@ def review74(work, kind, level, hl):
         check('%s N6: %s (an alias entry of the quota file) is refused by the file number, with the override, the image unchanged' % (kind, what.split()[0]), (True, h0), ('QUOTA.SYS' in out and ('-E-' in out or '-W-' in out), sha(im)))
 
 
+def review75(work, kind, level, hl):
+    host = os.path.join(work, 'host.txt')
+    # R1: a damaged master directory, with the override: the lookup cannot tell the quota file's number, so a file is also the quota file when its header names QUOTA.SYS and its back link is the master directory
+    for what in ('SET FILE/PROTECTION=(W:R) [000000]QUOTA.SYS', 'SET FILE/OWNER_UIC=[1,4] [000000]QUOTA.SYS', 'SET FILE/VERSION_LIMIT=1 [000000]QUOTA.SYS', 'SET FILE/PROTECTION=(W:R) [A]ALIAS.SYS',
+                 'DELETE [A]ALIAS.SYS;1', 'RENAME [A]ALIAS.SYS [A]OTHER.SYS'):
+        im = Q.make(work, level, hl, True, 'r1', top=True, alias=True)
+        Q.damage_record(im, '[000000]', 'TOP.TXT')
+        h0 = sha(im)
+        rc, out = Q.ods2(im, what, ['--ignore-quota'])
+        check('%s R1: damaged master directory, with the override: %s is refused (the file is the quota file by its header: name QUOTA.SYS, back link the master directory), the image unchanged' % (kind, what),
+              (True, h0), ('QUOTA.SYS' in out and ('-E-' in out or '-W-' in out), sha(im)))
+    # a file that is not the quota file keeps working on the damaged volume (G.TXT: its header names G.TXT)
+    im = Q.make(work, level, hl, True, 'r1b', top=True)
+    Q.damage_record(im, '[000000]', 'TOP.TXT')
+    h0 = sha(im)
+    rc, out = Q.ods2(im, 'SET FILE/PROTECTION=(W:R) [A]G.TXT', ['--ignore-quota'])
+    check('%s R1: an ordinary file on that volume takes SET FILE with the override' % kind, True, sha(im) != h0)
+    # R2: an entry named QUOTA.SYS whose file number lies beyond INDEXF.SYS cannot be taken out by DELETE: the volume stays read only without the option (the README says so)
+    im = Q.make(work, level, hl, True, 'r2')
+    Q.set_entry_fid_number(im, '[000000]', 'QUOTA.SYS', 60000)
+    h0 = sha(im)
+    rc, out = Q.ods2(im, 'COPY %s [A]N.TXT' % host)
+    check('%s R2: an entry QUOTA.SYS with a file number beyond INDEXF.SYS still makes the volume read only' % kind, (True, h0), (MSG in out, sha(im)))
+    rc, out = Q.ods2(im, 'DELETE [000000]QUOTA.SYS;1', ['--ignore-quota'])
+    check('%s R2: and DELETE of that entry is refused, even with the override (VMS repairs it): the image unchanged' % kind, (True, h0), ('-E-' in out or 'ODS2-E' in out, sha(im)))
+
+
 def main():
     work = tempfile.mkdtemp(prefix='quota_', dir=os.environ.get('TMPDIR', 'samples'))
     try:
@@ -213,6 +240,7 @@ def main():
                 check('%s: %s: even with --ignore-quota the quota file is protected (message names QUOTA.SYS), the image is unchanged' % (kind, gname), (True, h0),
                       ('QUOTA.SYS' in out and ('%ODS2-E' in out or '-E-' in out or '-W-' in out) or gname == 'PURGE', sha(im)))
             review74(work, kind, level, hl)
+            review75(work, kind, level, hl)
             # a volume with no quotas: nothing may be made under that name either (ods2v2 does not make a quota file)
             im = fresh(plain, work, 'n')
             h0 = sha(im)

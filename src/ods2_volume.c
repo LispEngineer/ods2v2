@@ -104,6 +104,7 @@ static bool quota_name(unsigned dir_file_number, const char *name)
 
 static bool quota_file_protected(ods2_volume_t *vol, unsigned dir_file_number, const char *name, unsigned file_number);
 static int quota_lookup(ods2_volume_t *vol, unsigned *number);
+static bool entry_is_primary(unsigned dir_number, const uint8_t *header, const char *name, unsigned version, bool with_version);
 
 /* Uppercases a string in place. Real VMS always stores filenames and
    directory names uppercase - "create/dir [decus]" on real VMS
@@ -3700,6 +3701,12 @@ static bool quota_file_protected(ods2_volume_t *vol, unsigned dir_file_number, c
 {
     if (name != NULL && quota_name(dir_file_number, name)) return true;
     if (file_number == 0) return false;
+    {
+        /* review 75 R1: by what the file's own header says, too: its name is QUOTA.SYS and its back link is the master directory. This holds when the lookup in a damaged master directory cannot tell
+           the quota file's number (and for any alias entry of it). */
+        uint8_t qh[512];
+        if (ods2_read_header(vol, file_number, qh).ok && entry_is_primary(4, qh, "QUOTA.SYS", 0, false)) return true;
+    }
     if (!vol->quota_known) {
         if (quota_lookup(vol, &vol->quota_number) < 0) vol->quota_number = 0;     /* (a master directory that cannot be read: only the name test above can protect) */
         vol->quota_known = true;

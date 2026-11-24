@@ -94,6 +94,34 @@ def damage_record(img, dir_spec, name):
     raise AssertionError('no record %s in %s' % (name, dir_spec))
 
 
+def set_entry_fid_number(img, dir_spec, name, number):
+    """the first entry of the record `name` of `dir_spec` gets the file number `number` (a number beyond INDEXF.SYS: an entry that names no file the volume can hold)"""
+    num = 4 if dir_spec == '[000000]' else E.D.fnum(img, '[000000]%s.DIR' % dir_spec.strip('[]'))
+    v = O.Vol(img)
+    hdr = v.blk(E.D.lbn(v, num))
+    ext = O.decode_map(hdr, O.Findings(False), 'dir')
+    nm = name.upper().encode('latin-1')
+    with open(img, 'r+b') as f:
+        for lbn, cnt in ext:
+            for b in range(cnt):
+                f.seek((lbn + b) * 512)
+                blk = bytearray(f.read(512))
+                pos = 0
+                while pos + 6 <= 512:
+                    size = struct.unpack_from('<H', blk, pos)[0]
+                    if size == 0xffff or size == 0:
+                        break
+                    namecount = blk[pos + 5]
+                    if bytes(blk[pos + 6:pos + 6 + namecount]) == nm:
+                        first = pos + 6 + namecount + (namecount % 2)
+                        struct.pack_into('<H', blk, first + 2, number)
+                        f.seek((lbn + b) * 512)
+                        f.write(blk)
+                        return
+                    pos += 2 + size
+    raise AssertionError('no record %s in %s' % (name, dir_spec))
+
+
 def dangle_quota(img):
     """the entry [000000]QUOTA.SYS names a file whose header slot is empty (all zeros): an entry that names no file"""
     v = O.Vol(img)
