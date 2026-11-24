@@ -49,7 +49,7 @@ def mk(work, level, hl):
     rc, out = R.run([INIT, img, '8192', '--structure=%d' % level, '--label=RWILD'] + (['--hardlinks'] if hl else []))
     assert rc == 0, out
     cmds = ['CREATE/DIRECTORY [W]', 'CREATE/DIRECTORY [Y]', 'CREATE/DIRECTORY [W.SUB]', 'CREATE/DIRECTORY [W.SUB2]']
-    files = [('P1.TXT', 1), ('P2.TXT', 1), ('P3.TXT', 1), ('Q.TXT', 1), ('Q.TXT', 2), ('Q.TXT', 3), ('QQ.TXT', 1), ('QQ.TXT', 2), ('QQ.TXT', 3), ('R.TXT', 1), ('R.TXT', 2), ('S.DAT', 1), ('A.TXT', 1), ('A.BAK', 1)]
+    files = [('P1.TXT', 1), ('P2.TXT', 1), ('P3.TXT', 1), ('Q.TXT', 1), ('Q.TXT', 2), ('Q.TXT', 3), ('QQ.TXT', 1), ('QQ.TXT', 2), ('QQ.TXT', 3), ('R.TXT', 1), ('R.TXT', 2), ('S.DAT', 1), ('A.TXT', 1), ('A.BAK', 1), ('XX.TXT', 1), ('XX.TXT', 2), ('XX.OLD', 1), ('XX.OLD', 2), ('XX.OLD', 3)]
     for nm, v in files:
         p = os.path.join(work, 'rwh_%s_%d.txt' % (nm.replace('.', '_'), v))
         open(p, 'w').write('text of %s version %d\n' % (nm, v))
@@ -128,31 +128,23 @@ def cases(work, kind, level, hl):
     check('%s accepted: *.* with one file: already named, nothing changes' % kind, (0, sha(base)), (rc, sha(im)) if 'already named' in out else (rc, None))
     # no match
     im, rc, out = run('nomatch', 'RENAME [W]ZZ*.TXT [W]*.OLD')
-    check('%s no file matches: exit 1, "no files match", the image is unchanged' % kind, (1, True, sha(base)), (rc, 'no files match' in out, sha(im)))
+    check('%s no file matches: exit 1, VMS\'s words (CORPUS 76.9: %%RENAME-E-SEARCHFAIL, -RMS-E-FNF), the image is unchanged' % kind, (1, True, True, sha(base)), (rc, 'RENAME-E-SEARCHFAIL' in out, '-RMS-E-FNF' in out, sha(im)))
     # refusals, nothing written
     refusals = [
-        ('partial wildcard in the new name', 'RENAME [W]P*.TXT [W]Q*.OLD', 'not measured'),
-        ('a % in the new name', 'RENAME [W]P*.TXT [W]%.OLD', 'not measured'),
+        ('partial wildcard in the new name', 'RENAME [W]P*.TXT [W]Q*.OLD', 'RMS-F-FNM'),
+        ('a % in the new name', 'RENAME [W]P*.TXT [W]%.OLD', 'RMS-F-FNM'),
         ('a wildcard in the new directory', 'RENAME [W]P*.TXT [*]', 'WILDDIR'),
         ('an ellipsis in the new directory', 'RENAME [W]P*.TXT [Y...]*.TXT', 'WILDDIR'),
         ('an ellipsis in the old directory', 'RENAME [W...]P*.TXT [Y]', 'WILDDIR'),
-        ('many sources, one target name', 'RENAME [W]P*.TXT [W]Z.DAT', 'would all become'),
         ('the target is in the match set', 'RENAME [W]A.* [W]*.BAK', 'also renames'),
-        (';* source, a destination version number', 'RENAME [W]Q.TXT;* [W]*.OLD;5', 'not measured'),
         ('a destination ;* with a one-version selector', 'RENAME [W]P*.TXT [W]*.OLD;*', 'not measured'),
         ('a comma list', 'RENAME [W]P1.TXT,[W]P2.TXT [W]*.OLD', None),
-        (';* with versions that are not 1..n', 'RENAME [W]QQ.TXT;* [W]*.OLD', 'not measured'),
     ]
     for what, cmd, word in refusals:
         im, rc, out = run('ref', cmd)
         check('%s refused (%s): exit 1, the image byte for byte unchanged%s' % (kind, what, ', "%s" in the message' % word if word else ''), (1, sha(base), True if word else True),
               (rc, sha(im), (word in out) if word else True))
-    # ;* when the destination name exists: refused, the message names the single-version commands
-    im = fresh(base, work, 'exists')
-    assert R.ods2(im, 'RENAME [W]Q.TXT;1 [W]Q.OLD;1')[0] == 0
-    h1 = sha(im)
-    rc, out = R.ods2(im, 'RENAME [W]Q.TXT;* [W]*.OLD')
-    check('%s ;* onto a destination name that exists: refused, exit 1, nothing written, the message names the one-version commands to finish it' % kind, (1, h1, True, True), (rc, sha(im), 'one version at a time' in out, 'RENAME [W]Q.TXT;3 [W]Q.OLD;3' in out))
+    lifted(work, kind, level, hl, base)
     # review 76 S1: an explicit new version on the file's own name is renamed, as the single-file command does (CORPUS 67.4), not reported as "already named"
     im = fresh(base, work, 's1w')
     imw = im
@@ -167,20 +159,6 @@ def cases(work, kind, level, hl):
     # review 76 N1: only directories match, nothing is renamed: exit 1 and a "no files renamed" line, the image unchanged
     im, rc, out = run('n1', 'RENAME [W]SUB*.* [Y]')
     check('%s N1: only directories match: SKIPDIR lines, "no files renamed", exit 1, the image unchanged' % kind, (1, True, True, sha(base)), (rc, 'SKIPDIR' in out, 'no files renamed' in out, sha(im)))
-    # review 76 S2: many files to one name: one line for the target name, not one for every pair
-    mw = os.path.join(work, 'many_%d%s.img' % (level, 'h' if hl else ''))
-    rc0, out0 = R.run([INIT, mw, '8192', '--structure=%d' % level, '--label=RMANY'] + (['--hardlinks'] if hl else []))
-    assert rc0 == 0, out0
-    assert R.ods2(mw, 'CREATE/DIRECTORY [M]')[0] == 0
-    hp = os.path.join(work, 'many.txt')
-    open(hp, 'w').write('many\n')
-    for i in range(1, 31):
-        assert R.ods2(mw, 'COPY %s [M]F%02d.TXT' % (hp, i))[0] == 0
-    h0 = sha(mw)
-    rc, out = R.ods2(mw, 'RENAME [M]F*.TXT [M]Z.DAT')
-    lines = [l for l in out.splitlines() if 'would both become' in l or 'would all become' in l]
-    check('%s S2: 30 files to one name: refused, the image unchanged, ONE line for the target name (not 435), it names two sources and the count of the others' % kind, (1, h0, 1, True),
-          (rc, sha(mw), len(lines), bool(lines) and 'and 28 more' in lines[0]))
     # review 76 N3: on ODS-2 the reported new name is the stored (upper case) one
     if level == 2:
         im, rc, out = run('n3', 'RENAME [W]p*.txt [Y]*.old')
@@ -212,7 +190,7 @@ def cases(work, kind, level, hl):
         rc3 = 0
         names = entries(im)
         old = [x for x in names if x.endswith('.OLD;1')]
-        check('%s escapes: FOO^.TAR.GZ and A^_B.TXT become .OLD with their dot and space kept (the type is the only change); no .GZ is left' % kind, (0, 0, 2, 1, 1, []),
+        check('%s escapes: FOO^.TAR.GZ and A^_B.TXT become .OLD with their dot and space kept (the type is the only change); no .GZ is left (XX.OLD;1 was there already: 3 names)' % kind, (0, 0, 3, 1, 1, []),
               (rc, rc2, len(old), sum('FOO' in x and 'TAR.OLD' in x for x in old), sum('_' in x or ' ' in x for x in old), [x for x in names if x.endswith('.GZ;1')]))
     # H1: X.TXT of [D] is stored out of order: refused once without a version, renamed with ;*
     vw = os.path.join(work, 'v_%s' % re.sub(r'\W', '_', kind))
@@ -233,7 +211,7 @@ def cases(work, kind, level, hl):
         rc, out = R.ods2(im, 'RENAME [W]S.* [W]*.BAK')
         ents = entries(im)
         check('%s C3: an alias entry of the same file under the target name is not a collision: the run is not refused as a whole, S.DAT is finished into S.BAK (one entry left)' % kind,
-              (0, True, False, False), (rc, 'S.BAK;1' in ents, 'S.DAT;1' in ents, 'would both become' in out or 'would all become' in out or 'also renames' in out))
+              (0, True, False, False), (rc, 'S.BAK;1' in ents, 'S.DAT;1' in ents, 'also renames' in out))
     fault_wild(work, kind, level, hl)
     print('%s: %d passes, %d fails so far' % (kind, passes, fails))
 
@@ -252,7 +230,7 @@ def fault_wild(work, kind, level, hl):
     rc, out = R.run([INIT, img, '8192', '--structure=%d' % level, '--label=FWILD'] + (['--hardlinks'] if hl else []))
     assert rc == 0, out
     cmds = ['CREATE/DIRECTORY [W]']
-    for nm, v in (('A1.TXT', 1), ('A2.TXT', 1), ('A3.TXT', 1), ('T.TXT', 1), ('T.TXT', 2)):
+    for nm, v in (('A1.TXT', 1), ('A2.TXT', 1), ('A3.TXT', 1), ('T.TXT', 1), ('T.TXT', 2), ('Q.TXT', 1), ('Q.TXT', 2), ('Q.TXT', 3)):
         p = os.path.join(work, 'fwh_%s_%d.txt' % (nm.replace('.', '_'), v))
         open(p, 'w').write('text of %s version %d\n' % (nm, v))
         cmds.append('COPY %s [W]%s' % (p, nm))
@@ -262,7 +240,7 @@ def fault_wild(work, kind, level, hl):
     import time
     time.sleep(1.1)
     allowed = [r"header name '.*' differs from its directory entry", r'link count \d+ but \d+ directory entr', r"its back link directory \d+ has no entry for it"]
-    for tag, cmd in (('names', 'RENAME [W]A*.TXT [W]*.OLD'), ('versions', 'RENAME [W]T.TXT [W]*.OLD')):
+    for tag, cmd in (('names', 'RENAME [W]A*.TXT [W]*.OLD'), ('versions', 'RENAME [W]T.TXT [W]*.OLD'), ('kept', 'RENAME [W]Q.TXT;* [W]*.OLD')):
         trial = os.path.join(work, 'fwt.img')
         shutil.copyfile(img, trial)
         rc, out = R.run(['./ods2_fault', trial, cmd], {**os.environ, 'ODS2_FAULT_COUNT': '1'}) if False else R.run(['env', 'ODS2_FAULT_COUNT=1', './ods2_fault', trial, cmd])
@@ -281,10 +259,10 @@ def fault_wild(work, kind, level, hl):
             warns = [l for l in ch if l.startswith('WARN') and not any(re.search(a, l) for a in allowed)]
             if errs or warns:
                 bad.append('k=%d: checker %s' % (k, (errs + warns)[0][:120]))
-            if tag == 'names':
+            if tag in ('names', 'kept'):
                 states = []
-                for i in (1, 2, 3):
-                    old, new = 'A%d.TXT;1' % i, 'A%d.OLD;1' % i
+                items = [('A%d.TXT;1' % i, 'A%d.OLD;1' % i, 'text of A%d.TXT version 1' % i) for i in (1, 2, 3)] if tag == 'names' else [('Q.TXT;%d' % i, 'Q.OLD;%d' % i, 'text of Q.TXT version %d' % i) for i in (3, 2, 1)]
+                for old, new, want_text in items:
                     oe, ne = old in ents, new in ents
                     h = R.hdr(trial, '[W]' + (old if oe else new))
                     nm = R.fields(h, level)['name'] if h is not None else None
@@ -295,16 +273,21 @@ def fault_wild(work, kind, level, hl):
                     else:
                         states.append('stopped')
                     t = R.ods2(trial, 'TYPE [W]%s' % (old if oe else new))[1].strip()
-                    if t != 'text of A%d.TXT version 1' % i:
-                        bad.append('k=%d: the text of A%d does not read back (%r)' % (k, i, t[:40]))
+                    if t != want_text:
+                        bad.append('k=%d: the text of %s does not read back (%r)' % (k, old, t[:40]))
                 order = ''.join({'done': 'd', 'stopped': 's', 'untouched': 'u'}[x] for x in states)
                 if not re.match(r'^d*s?u*$', order) or order.count('s') > 1:
                     bad.append('k=%d: the files are in states %s (done first, at most one stopped, then untouched)' % (k, order))
                 shutil.copyfile(trial, trial + '.2')
                 R.ods2(trial + '.2', cmd)
                 e2 = entries(trial + '.2')
-                if sorted(e for e in e2 if e.startswith('A')) != ['A1.OLD;1', 'A2.OLD;1', 'A3.OLD;1']:
-                    bad.append('k=%d: the same command run again did not end with the three files renamed: %s' % (k, [e for e in e2 if e.startswith('A')]))
+                want_e = ['A1.OLD;1', 'A2.OLD;1', 'A3.OLD;1'] if tag == 'names' else ['Q.OLD;1', 'Q.OLD;2', 'Q.OLD;3']
+                if sorted(e for e in e2 if e.startswith(want_e[0][0])) != want_e:
+                    bad.append('k=%d: the same command run again did not end with the three files renamed: %s' % (k, [e for e in e2 if e.startswith(want_e[0][0])]))
+                if tag == 'kept':
+                    for ver in (1, 2, 3):
+                        if R.ods2(trial + '.2', 'TYPE [W]Q.OLD;%d' % ver)[1].strip() != 'text of Q.TXT version %d' % ver:
+                            bad.append('k=%d: after the re-run Q.OLD;%d is not the file of Q.TXT;%d' % (k, ver, ver))
                 os.remove(trial + '.2')
             else:
                 shutil.copyfile(trial, trial + '.2')
@@ -317,6 +300,103 @@ def fault_wild(work, kind, level, hl):
                     bad.append('k=%d: after the command was run again T entries %s, T.OLD;1 reads %r, the other %r' % (k, e2, t1[:30], t2[:30]))
                 os.remove(trial + '.2')
         check('%s fault %s: after each of %d writes the volume is in a state step 1 to 3 knows%s' % (kind, tag, n, '; a re-run of a two-version name is the command typed afresh' if tag == 'versions' else ', and the same command run again finishes it'), [], bad[:3])
+
+
+def lifted(work, kind, level, hl, base):
+    """step 4b: what CORPUS 76 lifts (V8.4 and the VAX agree): ;* keeps the version numbers, ;* onto an existing name fails per file, many to one takes consecutive versions, the guard for a version limit that would
+    delete a file this command renamed, the selectors, ODS-5 spellings. Each file its own transaction: a failure writes nothing and the others go on."""
+    def run(tag, cmd, prep=()):
+        im = fresh(base, work, tag)
+        for c in prep:
+            assert R.ods2(im, c)[0] == 0, c
+        rc, out = R.ods2(im, cmd)
+        return im, rc, out
+
+    def vers(im, name):
+        return sorted(e for e in entries(im) if e.startswith(name + ';'))
+
+    def text(im, spec):
+        return R.ods2(im, 'TYPE %s' % spec)[1].strip()
+    # 76.1 U1: ;* keeps the numbers whatever they are (Q.TXT;1,2,3 and QQ.TXT;1,3)
+    im, rc, out = run('u1', 'RENAME [W]QQ.TXT;* [W]*.OLD')
+    check('%s 76.1: ;* keeps the version numbers when they are not 1 to n: QQ.TXT;1 and ;3 become QQ.OLD;1 and ;3, each the same file' % kind, (0, ['QQ.OLD;1', 'QQ.OLD;3'], 'text of QQ.TXT version 1', 'text of QQ.TXT version 3'),
+          (rc, vers(im, 'QQ.OLD'), text(im, '[W]QQ.OLD;1'), text(im, '[W]QQ.OLD;3')))
+    for tag, dst in (('u1b', '[W]*.OLD;*'), ('u1c', '[W]Q.OLD')):
+        im, rc, out = run(tag, 'RENAME [W]Q.TXT;* %s' % dst)
+        check('%s 76.6: ;* to %s keeps the versions: Q.OLD;1, ;2, ;3 (the file of Q.TXT;n is Q.OLD;n)' % (kind, dst), (0, ['Q.OLD;1', 'Q.OLD;2', 'Q.OLD;3'], {n: 'text of Q.TXT version %d' % n for n in (1, 2, 3)}),
+              (rc, vers(im, 'Q.OLD'), {n: text(im, '[W]Q.OLD;%d' % n) for n in (1, 2, 3)}))
+    # 76.6: an empty ; renumbers, the HIGHEST first
+    im, rc, out = run('u6e', 'RENAME [W]Q.TXT;* [W]*.OLD;')
+    check('%s 76.6: an empty version (*.OLD;) renumbers, highest first: Q.TXT;3 becomes Q.OLD;1, ;2 becomes ;2, ;1 becomes ;3' % kind, (0, ['text of Q.TXT version 3', 'text of Q.TXT version 2', 'text of Q.TXT version 1']),
+          (rc, [text(im, '[W]Q.OLD;%d' % n) for n in (1, 2, 3)]))
+    # 76.6: *.OLD;1: the highest takes ;1, the others fail DUPFILENAME per file, the other names go on
+    im, rc, out = run('u6a', 'RENAME [W]R.TXT;* [W]*.OLD;1')
+    check('%s 76.6: ;* to *.OLD;1: R.TXT;2 becomes R.OLD;1, R.TXT;1 fails (the version exists), exit 1, "1 file renamed, 1 not renamed"' % kind, (1, ['R.OLD;1'], ['R.TXT;1'], True),
+          (rc, vers(im, 'R.OLD'), [e for e in vers(im, 'R.TXT')], '%ODS2-I-TOTAL, 1 file renamed, 1 not renamed' in out))
+    # 76.2 U2: ;* onto a name that exists (XX.TXT;1,;2 onto XX.OLD;1,;2,;3): every file fails, nothing is written (VMS raises each revision: a difference), exit 1, the others would go on
+    im, rc, out = run('u2', 'RENAME [W]XX.TXT;* [W]*.OLD')
+    check('%s 76.2: ;* onto XX.OLD;1,;2,;3: both files fail (the versions exist), exit 1, the image is unchanged, "0 files renamed, 2 not renamed"' % kind, (1, sha(base), True), (rc, sha(im), '0 files renamed, 2 not renamed' in out))
+    im, rc, out = run('u2b', 'RENAME [W]Q.TXT;* [W]*.OLD', prep=('RENAME [W]S.DAT [W]Q.OLD;1',))
+    check('%s 76.2: ;* onto Q.OLD;1: Q.TXT;3 and ;2 are renamed, Q.TXT;1 fails (the version exists), the others go on, exit 1' % kind, (1, ['Q.OLD;1', 'Q.OLD;2', 'Q.OLD;3'], ['Q.TXT;1']), (rc, vers(im, 'Q.OLD'), vers(im, 'Q.TXT')))
+    # 76.3 U3: a name that exists: the single-file rule, the next version above the highest
+    im, rc, out = run('u3', 'RENAME [W]XX.TXT [W]*.OLD')
+    check('%s 76.3: no version onto XX.OLD;1,;2,;3: the highest XX.TXT;2 becomes XX.OLD;4' % kind, (0, ['XX.OLD;1', 'XX.OLD;2', 'XX.OLD;3', 'XX.OLD;4'], 'text of XX.TXT version 2'), (rc, vers(im, 'XX.OLD'), text(im, '[W]XX.OLD;4')))
+    # 76.4 U4: many to one: consecutive versions in directory order
+    im, rc, out = run('u4', 'RENAME [W]P*.TXT [W]Z.DAT')
+    check('%s 76.4: P*.TXT to Z.DAT: Z.DAT;1, ;2, ;3 are P1, P2, P3 in directory order, 3 files renamed, exit 0' % kind, (0, ['text of P1.TXT version 1', 'text of P2.TXT version 1', 'text of P3.TXT version 1'], True),
+          (rc, [text(im, '[W]Z.DAT;%d' % n) for n in (1, 2, 3)], '%ODS2-I-TOTAL, 3 files renamed' in out))
+    # 76.4 U4B: a version limit that would delete a file this command renamed: refused before any write (VMS deletes it silently)
+    im = fresh(base, work, 'u4b')
+    assert R.ods2(im, 'RENAME [W]S.DAT [W]Z.DAT')[0] == 0 and R.ods2(im, 'SET FILE/VERSION_LIMIT=2 [W]Z.DAT')[0] == 0
+    h1 = sha(im)
+    rc, out = R.ods2(im, 'RENAME [W]P*.TXT [W]Z.DAT')
+    check('%s 76.4 U4B: P*.TXT to Z.DAT;1 with a version limit of 2: the third file would prune the first one this command renamed: the whole command is refused, nothing written, the message names the file' % kind,
+          (1, h1, True, True), (rc, sha(im), 'version limit' in out, 'P1.TXT' in out))
+    im = fresh(base, work, 'u4c')
+    assert R.ods2(im, 'RENAME [W]S.DAT [W]Z.DAT')[0] == 0 and R.ods2(im, 'SET FILE/VERSION_LIMIT=3 [W]Z.DAT')[0] == 0
+    rc, out = R.ods2(im, 'RENAME [W]P*.TXT [W]Z.DAT')
+    check('%s 76.4: limit 3 and one old version: Z.DAT;2, ;3, ;4 (the old ;1 is pruned by the fourth file: no file of this command is pruned, the guard does not fire)' % kind, (0, ['Z.DAT;2', 'Z.DAT;3', 'Z.DAT;4']), (rc, vers(im, 'Z.DAT')))
+    # 76.10 U14: ;* to a NEW name arrives whole with a version limit of 2 on the source; onto an existing name the per-file rule and the guard
+    im, rc, out = run('u14', 'RENAME [W]Q.TXT;* [W]*.OLD', prep=('SET FILE/VERSION_LIMIT=2 [W]Q.TXT;*',))
+    check('%s 76.10: ;* with a version limit of 2 on three versions, to a new name: all three arrive' % kind, (0, ['Q.OLD;1', 'Q.OLD;2', 'Q.OLD;3']), (rc, vers(im, 'Q.OLD')))
+    im = fresh(base, work, 'u14b')
+    assert R.ods2(im, 'RENAME [W]S.DAT [W]Q.OLD')[0] == 0 and R.ods2(im, 'SET FILE/VERSION_LIMIT=2 [W]Q.OLD')[0] == 0
+    h1 = sha(im)
+    rc, out = R.ods2(im, 'RENAME [W]Q.TXT;* [W]*.OLD;')
+    check('%s 76.10: a renumbering ; onto Q.OLD;1 with a limit of 2: the third file would prune the second one this command made: refused as a whole, nothing written' % kind, (1, h1, True), (rc, sha(im), 'version limit' in out))
+    im = fresh(base, work, 'u14c')
+    assert R.ods2(im, 'RENAME [W]S.DAT [W]Q.OLD;1')[0] == 0 and R.ods2(im, 'SET FILE/VERSION_LIMIT=2 [W]Q.OLD')[0] == 0
+    rc, out = R.ods2(im, 'RENAME [W]Q.TXT;* [W]*.OLD')
+    check('%s 76.10: ;* (versions kept) onto Q.OLD;1 with a limit of 2: ;3 arrives and prunes the old ;1, ;2 arrives, ;1 would be the lowest and is refused (VMS TOOMANYVER): exit 1' % kind, (1, ['Q.OLD;2', 'Q.OLD;3'], ['Q.TXT;1']), (rc, vers(im, 'Q.OLD'), vers(im, 'Q.TXT')))
+    # 76.11 U15 and 76.12 U16: the selectors
+    im, rc, out = run('u15', 'RENAME [W]*.TXT;3 [W]*.OLD')
+    check('%s 76.11: *.TXT;3 renames only the names that have a version 3 (Q.TXT;3), no error for the others' % kind, (0, ['Q.OLD;1', 'QQ.OLD;1'], ['Q.TXT;1', 'Q.TXT;2']),
+          (rc, [e for e in entries(im) if e.endswith('.OLD;1') and e.split('.')[0] in ('Q', 'QQ')], [e for e in vers(im, 'Q.TXT')]))
+    im, rc, out = run('u15b', 'RENAME [W]R*.TXT;-1 [W]*.OLD')
+    check('%s 76.11: ;-1 is one below the highest per name: R.TXT;1 becomes R.OLD;1 (R.TXT has two versions)' % kind, (0, 'text of R.TXT version 1', ['R.TXT;2']), (rc, text(im, '[W]R.OLD;1'), vers(im, 'R.TXT')))
+    im, rc, out = run('u16', 'RENAME [W]R.TXT [W]*.OLD')
+    rc2, out2 = R.ods2(im, 'RENAME [W]R.TXT [W]*.OLD')
+    check('%s 76.12: the default takes the highest each time: the first run makes R.OLD;1 of R.TXT;2, the same command again makes R.OLD;2 of R.TXT;1' % kind, (0, 0, ['text of R.TXT version 2', 'text of R.TXT version 1']),
+          (rc, rc2, [text(im, '[W]R.OLD;1'), text(im, '[W]R.OLD;2')]))
+    # 76.7: a target in the match set stays refused; a file renamed onto itself is "already named"
+    im, rc, out = run('u7', 'RENAME [W]*.A [W]*.B', prep=())
+    check('%s 76.7: *.A to *.B with no .A file: SEARCHFAIL, exit 1' % kind, (1, True), (rc, 'SEARCHFAIL' in out))
+    # 76.5: partial wildcards: VMS refuses too (-RMS-F-FNM)
+    im, rc, out = run('u5', 'RENAME [W]P*.TXT [W]Q*.OLD')
+    check('%s 76.5: a partial wildcard in the new name is refused as VMS refuses it: the message says -RMS-F-FNM, exit 1, nothing changes' % kind, (1, True, sha(base)), (rc, 'RMS-F-FNM' in out, sha(im)))
+    # 76.13 U13 (ODS-5): the typed spelling, FOO.* does not take FOO^.TAR.GZ, F? is one character
+    if level == 5:
+        hp = os.path.join(work, 'u13.txt')
+        open(hp, 'w').write('u13\n')
+        im = fresh(base, work, 'u13')
+        for nm in ('FOO.TXT', 'FOO^.TAR.GZ', 'F1.TXT', 'F2.TXT', 'FAB.TXT'):
+            assert R.ods2(im, 'COPY %s [W]%s' % (hp, nm))[0] == 0, nm
+        rc, out = R.ods2(im, 'RENAME [W]FOO.* [W]*.BAK')
+        rc2, out2 = R.ods2(im, 'RENAME [W]F?.TXT [W]*.OLD')
+        rc3, out3 = R.ods2(im, 'RENAME [W]S.DAT [W]*.old')
+        ents = entries(im)
+        check('%s 76.13: FOO.* takes FOO.TXT and not FOO^.TAR.GZ; F?.TXT takes F1 and F2 and not FAB; *.old keeps the typed spelling' % kind, (0, 0, 0, True, True, True, True),
+              (rc, rc2, rc3, 'FOO.BAK;1' in ents, any('GZ' in e and 'FOO' in e for e in ents) and not any(e.startswith('FOO^.TAR.BAK') for e in ents), 'FAB.TXT;1' in ents and 'F1.OLD;1' in ents and 'F2.OLD;1' in ents, 'S.old;1' in ents))
 
 
 def backlink(img, spec):
