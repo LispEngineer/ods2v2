@@ -682,6 +682,19 @@ def main():
                                 prob.append('the subtree file %s reads back neither under %s nor under %s' % (_p, _old, _new))
                     if not (_o_ent or _n_ent):
                         prob.append('the directory is listed under neither %s nor %s' % (_old, _new))
+                    # CORPUS 72.5: VMS's RENAME of a directory leaves its link count UNCHANGED on HARDLINKS: in every stopped state (and after the end) the directory's count is what the base had
+                    if need_hl:
+                        import ext_headers as _eh
+                        _lcs = {}
+                        for _lbl, _img in (('base', base), ('trial', trial)):
+                            _hh = None
+                            for _pth in (_old, _new):
+                                _hh = _eh.chain(_img, '[%s]%s.DIR;1' % (_pth.rpartition('/')[0].replace('/', '.'), _pth.rpartition('/')[2]))
+                                if _hh:
+                                    break
+                            _lcs[_lbl] = int.from_bytes(_hh[0][1][74:76], 'little') if _hh else None
+                        if _lcs['base'] is None or _lcs['trial'] != _lcs['base']:
+                            prob.append('the directory\'s link count is %s, the base had %s (CORPUS 72.5: a directory RENAME does not write the link count)' % (_lcs['trial'], _lcs['base']))
                     # (2) the checker's warnings: only the ones this state has (the first state: the back link (move) or the header name (rename); the second: the directory entered twice); none after the end
                     _ct = [l for l in run(CHECK + [trial])[1].splitlines() if l.startswith('WARN') and 'allocated but owned by no file' not in l]
                     _first = _o_ent and not _n_ent

@@ -5696,8 +5696,11 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
        header_names_target (the header is not written again: no revision bump), RENAME P R leaves the header alone, and a DELETE of P removes the entry only and leaves the file allocated in no directory (a
        leak that ANALYZE/REPAIR recovers). Header last (entry first) would have left a state in which VMS's DELETE of the old name, the user's natural action, deletes the FILE (CORPUS 67.3) and the new entry
        dangles: header first leaks at worst. An alias entry leaves the header alone: only the link count is written. */
+    /* CORPUS 72.5 (V8.4 and VAX, HARDLINKS): VMS's own RENAME of a DIRECTORY leaves its link count as it was (1 stays 1), so a directory's rename writes no count: no count + 1 in the first write, none
+       to take back, and no state with a count of 2 for one entry. A file's rename keeps counting (CORPUS 67). */
+    const bool count_links = hardlinks && !is_dir;
     if (header_names_target) inf.header_current = true;
-    if (((primary || adopt) && !header_names_target) || (hardlinks && !resumed && !header_names_target)) {
+    if (((primary || adopt) && !header_names_target) || (count_links && !resumed && !header_names_target)) {
         if ((primary || adopt) && !header_names_target) {
             if (!ods2_header_set_name(h, ident_name)) return fail("the new name does not fit the header's name area (no room to move the map): not renamed");
             core->backlink = dst_fid;                    /* a move: the back link goes with the name, in the one header write (CORPUS 65.1: the back link, the name if it changes, revision, date); an adopted header too */
@@ -5705,7 +5708,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
             inf.header_changed = true;
             inf.adopted = adopt;
         }
-        if (hardlinks && !resumed && !header_names_target) {
+        if (count_links && !resumed && !header_names_target) {
             unsigned links = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
             links++;
             h[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);
@@ -5727,7 +5730,7 @@ static ods2_result_t rename_impl(ods2_volume_t *vol, unsigned src_dir_number, co
     if (!r.ok) return r;
     r = remove_directory_entry(vol, src_dir_number, dir_header, src_stored, sv, src_fid);
     if (!r.ok) return r;
-    if (hardlinks) {                       /* also when an interrupted rename is finished: its first run counted the new entry, the old entry goes now */
+    if (count_links) {                     /* also when an interrupted rename is finished: its first run counted the new entry, the old entry goes now */
         unsigned links = h[ODS5_FH2_LINKCOUNT] | (h[ODS5_FH2_LINKCOUNT + 1] << 8);
         if (links > 0) links--;
         h[ODS5_FH2_LINKCOUNT] = (uint8_t) (links & 0xff);

@@ -38,7 +38,7 @@ def _header_lbn(img, num):
 
 
 def move_header(img, num, to_dir_num, hl=False):
-    """the header-first write of a directory move: back link := the target parent (its own sequence), revision +1, the level's date := local now; HARDLINKS: link count + 1"""
+    """the header-first write of a directory move: back link := the target parent (its own sequence), revision +1, the level's date := local now. The link count is NOT touched (CORPUS 72.5: VMS's RENAME of a directory leaves it as it was)"""
     lbn = _header_lbn(img, num)
     dl = _header_lbn(img, to_dir_num)
     with open(img, 'r+b') as f:
@@ -52,8 +52,6 @@ def move_header(img, num, to_dir_num, hl=False):
         if (struct.unpack_from('<H', hb, 6)[0] >> 8) == 5:
             struct.pack_into('<H', hb, ident + 2, struct.unpack_from('<H', hb, ident + 2)[0] + 1)
             struct.pack_into('<Q', hb, ident + 44, now)
-            if hl:
-                struct.pack_into('<H', hb, 74, struct.unpack_from('<H', hb, 74)[0] + 1)
         else:
             struct.pack_into('<H', hb, ident + 20, struct.unpack_from('<H', hb, ident + 20)[0] + 1)
             struct.pack_into('<Q', hb, ident + 30, now)
@@ -104,7 +102,7 @@ def entry_fid(img, dir_num, name, to_num):
 
 def build(work, level, hl, state, empty, tag='ds'):
     """a volume with the old parent [P], the new parent [Q], the directory [P.X] (with F.TXT and a subdirectory S with G.TXT unless `empty`), and the stopped state of RENAME [P]X.DIR [Q]:
-    state 'twin' (the header untouched, a second entry [Q]X.DIR as VMS makes one; HARDLINKS: count 2), 'first' (ONE entry [P]X.DIR, the header names Q: back link Q, revision 2; HARDLINKS: count 2) or 'second' (TWO entries [P]X.DIR and [Q]X.DIR; HARDLINKS: count 2 for 2 entries) or 'none'"""
+    state 'twin' (the header untouched, a second entry [Q]X.DIR as VMS makes one; HARDLINKS: count 2), 'first' (ONE entry [P]X.DIR, the header names Q: back link Q, revision 2; HARDLINKS: count 1, CORPUS 72.5) or 'second' (TWO entries [P]X.DIR and [Q]X.DIR; HARDLINKS: count 1, CORPUS 72.5) or 'none'"""
     img = os.path.join(work, '%s_%d%s_%s_%s.img' % (tag, level, 'h' if hl else '', state, 'e' if empty else 'n'))
     if os.path.exists(img):
         os.remove(img)

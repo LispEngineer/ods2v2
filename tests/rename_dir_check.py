@@ -249,6 +249,20 @@ def cases(work, kind, level, hl):
         rc, out = S.ods2(im, 'RENAME [000000]P.DIR [R]')
         check('%s S1: a tree with a directory alias (Y entered in P and inside P.X.S) cannot be moved: IDR-free refusal naming the entry and saying to run the stopped RENAME again OR DELETE the alias entry, the image is unchanged' % kind,
               (True, True, h0), ('entered twice' in out and 'DELETE the alias entry' in out, '%ODS2-I-RENAMED' not in out, sha(im)))
+    # CORPUS 72 (pair 4 of the b2-d3 images): DD (of DB4) is ALSO entered as DD.DIR inside SUB4 (an alias entry; its back link names DB4). VMS's IDR follows only the typed path, so
+    # RENAME [DA4]SUB4.DIR [DB4.DD] (the typed path never names SUB4) makes a CYCLE on VMS; ods2v2 also walks the directories below the source (DD is one of them) and refuses.
+    if not hl:
+        im = mk(work, level, hl, 'da4')
+        for c in ('CREATE/DIRECTORY [DA4]', 'CREATE/DIRECTORY [DA4.SUB4]', 'CREATE/DIRECTORY [DB4]', 'CREATE/DIRECTORY [DB4.DD]', 'COPY %s [DA4.SUB4]STUB.TXT' % os.path.join(work, 'rd_b.txt')):
+            assert S.ods2(im, c)[0] == 0, c
+        assert S.ods2(im, 'LINK [DA4.SUB4]DD.DIR [DA4.SUB4]STUB.TXT')[0] == 0
+        S.entry_fid(im, S.fnum(im, '[DA4]SUB4.DIR'), 'DD.DIR', S.fnum(im, '[DB4]DD.DIR'))
+        h0 = sha(im)
+        rc, out = S.ods2(im, 'RENAME [DA4]SUB4.DIR [DB4.DD]')
+        check('%s CORPUS 72: RENAME [DA4]SUB4.DIR [DB4.DD] (DD is also entered inside SUB4: VMS makes a cycle) is refused, IDR, the image is unchanged, the checker finds no cycle' % kind,
+              (True, h0, []), ('-RMS-E-IDR' in out, sha(im), [e for e in checker(im)[0] if 'cycle' in e]))
+        rc, out = S.ods2(im, 'RENAME [DA4]SUB4.DIR [DA4.SUB4.DD]')
+        check('%s CORPUS 72: RENAME [DA4]SUB4.DIR [DA4.SUB4.DD] (the typed path goes through SUB4) is refused as well, the image is unchanged' % kind, (True, h0), ('-RMS-E-IDR' in out, sha(im)))
     # review 73 S2: moving into a directory whose back link is dead: the message names the way out; renaming that directory first adopts it
     im = fresh(base, work, 'dead')
     qnum = S.fnum(im, '[000000]Q.DIR')

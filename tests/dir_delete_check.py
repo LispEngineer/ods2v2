@@ -110,9 +110,9 @@ def delete_rule(work, name, level, hl):
                           (False, True, True, [], free_blocks(im) == f0), ('X.DIR;1' in listing(im, '[P]'), 'X.DIR;1' in listing(im, '[Q]'), 'DIRERR' not in S.ods2(im, 'DIR [Q.X]')[1],
                                                                           [w for w in checker(im)[1] if 'not in use' in w or 'dangling' in w], True))
                     if hl:
-                        check('%s: %s: the link count went down with the entry (2 to 1)' % (label, how), 1, (count_and_backlink(im, '[Q]X.DIR;1') or (None,))[0])
-                elif hl:
-                    # review 72 S1: an EMPTY directory with a level-5 header and a count above 1 takes the link branch: the entry goes, the count goes down; the file stays
+                        check('%s: %s: the link count stays 1 (CORPUS 72.5: a directory RENAME writes no count, so the second state has count 1 for two entries; nothing goes below 1)' % (label, how), 1, (count_and_backlink(im, '[Q]X.DIR;1') or (None,))[0])
+                elif hl and state == 'twin':
+                    # review 72 S1: an EMPTY directory with a level-5 header and a count above 1 takes the link branch: the entry goes, the count goes down; the file stays (the twin: a directory VMS entered twice, count 2)
                     check('%s: %s does not say plainly "deleted": the entry went, the directory file stays (review 73 S3)' % (label, how), (False, True), ('%ODS2-I-DELETED' in out, 'stays allocated' in out or 'is not deleted' in out or 'not deleted' in out))
                     cb = count_and_backlink(im, '[Q]X.DIR;1') if state == 'twin' else None
                     check('%s: %s takes the HARDLINKS link branch (count 2): the entry goes, the directory file STAYS allocated (no blocks come back), the count is 1' % (label, how),
@@ -130,10 +130,9 @@ def delete_rule(work, name, level, hl):
                 f1 = free_blocks(im)
                 rc, out = S.ods2(im, 'DELETE [Q]X.DIR')
                 if empty and hl:
-                    cb = count_and_backlink(im, '[P]X.DIR;1')
-                    check('%s: DELETE [Q]X.DIR of an EMPTY directory with a count of 2 takes the link branch: the entry and one off the count, the back link becomes (16777215,0,0), [P]X.DIR stays a valid directory' % label,
-                          (False, True, 1, 0xFFFFFF, True, True), ('X.DIR;1' in listing(im, '[Q]'), 'X.DIR;1' in listing(im, '[P]'), cb[0] if cb else None, cb[1] if cb else None, 'DIRERR' not in S.ods2(im, 'DIR [P.X]')[1],
-                                                                  free_blocks(im) == f1))
+                    # CORPUS 72.5: count 1 (a directory RENAME writes none): not the link branch; the directory file is deleted with the last entry known, [P]X.DIR dangles, as for a file's two names on a plain volume
+                    check('%s: DELETE [Q]X.DIR of an EMPTY directory with a count of 1: the directory FILE is deleted (its blocks come back), as before' % label, (True, True),
+                          ('X.DIR;1' not in listing(im, '[Q]'), free_blocks(im) > f1))
                 elif empty:
                     check('%s: DELETE [Q]X.DIR of an EMPTY directory deletes the directory FILE (its header is freed and its blocks come back), as before' % label, (True, True, True),
                           ('X.DIR;1' not in listing(im, '[Q]'), free_blocks(im) > f1, header_of(im, '[Q]X.DIR;1') is None))
