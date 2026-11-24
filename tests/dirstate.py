@@ -104,7 +104,7 @@ def entry_fid(img, dir_num, name, to_num):
 
 def build(work, level, hl, state, empty, tag='ds'):
     """a volume with the old parent [P], the new parent [Q], the directory [P.X] (with F.TXT and a subdirectory S with G.TXT unless `empty`), and the stopped state of RENAME [P]X.DIR [Q]:
-    state 'first' (ONE entry [P]X.DIR, the header names Q: back link Q, revision 2; HARDLINKS: count 2) or 'second' (TWO entries [P]X.DIR and [Q]X.DIR; HARDLINKS: count 2 for 2 entries) or 'none'"""
+    state 'twin' (the header untouched, a second entry [Q]X.DIR as VMS makes one; HARDLINKS: count 2), 'first' (ONE entry [P]X.DIR, the header names Q: back link Q, revision 2; HARDLINKS: count 2) or 'second' (TWO entries [P]X.DIR and [Q]X.DIR; HARDLINKS: count 2 for 2 entries) or 'none'"""
     img = os.path.join(work, '%s_%d%s_%s_%s.img' % (tag, level, 'h' if hl else '', state, 'e' if empty else 'n'))
     if os.path.exists(img):
         os.remove(img)
@@ -119,7 +119,7 @@ def build(work, level, hl, state, empty, tag='ds'):
     cmds = ['CREATE/DIRECTORY [P]', 'CREATE/DIRECTORY [Q]', 'CREATE/DIRECTORY [P.X]', 'COPY %s [P]B1.TXT' % stub, 'COPY %s [Q]B2.TXT' % stub]
     if not empty:
         cmds += ['COPY %s [P.X]F.TXT' % f1, 'CREATE/DIRECTORY [P.X.S]', 'COPY %s [P.X.S]G.TXT' % f2]
-    if state == 'second':
+    if state in ('second', 'twin'):
         cmds += ['COPY %s [Q]STUB.TXT' % stub, 'LINK [Q]X.DIR [Q]STUB.TXT']
     for c in cmds:
         rc, out = ods2(img, c)
@@ -132,6 +132,13 @@ def build(work, level, hl, state, empty, tag='ds'):
         entry_fid(img, q, 'X.DIR', x)
         if hl:
             set_count(img, fnum(img, '[Q]STUB.TXT'), 1)
+    if state == 'twin':
+        # a directory entered twice as VMS makes one (SET FILE/ENTER on a directory: [CORPUS.TREE]SUB.DIR and [CORPUS.ALIASES]TWIN.DIR of the battery images): the header untouched (back link [P]), a second entry in [Q];
+        # HARDLINKS: the count is 2 for the two entries
+        entry_fid(img, q, 'X.DIR', x)
+        if hl:
+            set_count(img, fnum(img, '[Q]STUB.TXT'), 1)
+            set_count(img, x, 2)
     return img
 
 

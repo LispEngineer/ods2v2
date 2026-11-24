@@ -6011,6 +6011,19 @@ typedef struct {
     unsigned *ext_numbers;
 } delete_scratch_t;
 
+/* the refusal of a directory that is not empty; when the header names another directory the message says which RENAME finishes the interrupted move */
+static const char *dir_not_empty_message(const ods2_head_core_t *core, unsigned dir_file_number)
+{
+    static char dmsg[360];       /* static: the message outlives this call */
+    unsigned bn2 = ods2_fid_number(core->backlink);
+    if (bn2 != 0 && bn2 != dir_file_number && bn2 != 0xFFFF)
+        snprintf(dmsg, sizeof(dmsg), "directory is not empty - refusing to delete (matches VMS's own DELETE/DIRECTORY behavior); this entry is the directory's only one, and its header names another "
+                 "directory (file number %u): a RENAME of this directory that was stopped is finished by running the same RENAME again", bn2);
+    else
+        snprintf(dmsg, sizeof(dmsg), "directory is not empty - refusing to delete (matches VMS's own DELETE/DIRECTORY behavior)");
+    return dmsg;
+}
+
 static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_number,
                                          const char *name, int version, uint16_t *version_out,
                                          ods2_delete_info_t *info, delete_scratch_t *sc);
@@ -6148,9 +6161,16 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
             }
             return ok();
         }
+        /* the last entry known: a directory that is not empty is refused here, so that the HARDLINKS link branch below is reached by an EMPTY directory only (review 72 S1) */
+        {
+            int sub_count = 0;
+            r = ods2_count_directory_entries(vol, target_header, &sub_count);
+            if (!r.ok) return r;
+            if (sub_count > 0) return fail(dir_not_empty_message(target_core, dir_file_number));
+        }
     }
 
-    if (vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS) && !(target_core->filechar & 0x2000u) &&
+    if (vol->ods5 && (vol->home.volchar & ODS5_VC_HARDLINKS) &&
         (target_core->struclev >> 8) == ODS5_LEVEL_5 && target_core->seg_num == 0) {
         /* A file with several links: deleting one link takes its directory
            entry and one off the count; the file goes with the last. The
@@ -6235,14 +6255,7 @@ static ods2_result_t delete_version_body(ods2_volume_t *vol, unsigned dir_file_n
         r = ods2_count_directory_entries(vol, target_header, &sub_count);
         if (!r.ok) return r;
         if (sub_count > 0) {
-            static char dmsg[320];       /* static: the message outlives this call */
-            unsigned bn2 = ods2_fid_number(target_core->backlink);
-            if (bn2 != 0 && bn2 != dir_file_number && bn2 != 0xFFFF)
-                snprintf(dmsg, sizeof(dmsg), "directory is not empty - refusing to delete (matches VMS's own DELETE/DIRECTORY behavior); this entry is the directory's only one, and its header names another "
-                         "directory (file number %u): a RENAME of this directory that was stopped is finished by running the same RENAME again", bn2);
-            else
-                snprintf(dmsg, sizeof(dmsg), "directory is not empty - refusing to delete (matches VMS's own DELETE/DIRECTORY behavior)");
-            return fail(dmsg);
+            return fail(dir_not_empty_message(target_core, dir_file_number));
         }
     }
 
