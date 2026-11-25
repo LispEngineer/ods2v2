@@ -3864,7 +3864,7 @@ static ods2_result_t choose_version(ods2_volume_t *vol, const uint8_t *parent_he
                 if (ods2_fid_number(vol->create_protect[pi]) == ods2_fid_number(vf) && vol->create_protect[pi].fid_seq == vf.fid_seq) {
                     static char pmsg[ODS5_MAX_LITERAL_NAME + 200];       /* static: the message outlives this call */
                     free(info.versions);
-                    snprintf(pmsg, sizeof(pmsg), "the version limit of %s would delete version %u, which a file this command made: refused to keep it (not made)", name, *drop_out);
+                    snprintf(pmsg, sizeof(pmsg), "the version limit of %s would delete version %u, which is a file this command made: refused to keep it (not made)", name, *drop_out);
                     *drop_out = 0;
                     return fail(pmsg);
                 }

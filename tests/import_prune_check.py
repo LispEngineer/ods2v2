@@ -99,6 +99,28 @@ def main():
             ck = R.run(['python3', '-I', 'tests/ods5check.py', im])[1].splitlines()
             check('%s O1: ods5check finds the volume sound after the refused imports (no error; the only warning is the limit of 1 it always gives)' % kind, ([], []),
                   ([l for l in ck if l.startswith('ERROR')], [l for l in ck if l.startswith('WARN') and 'version limit 1' not in l]))
+            # review 78 F1: a symbolic link made by the same IMPORT/NEW_VERSION is protected too (A.TXT -> a.txt is made first, the file a.txt would prune it with a default limit of 1)
+            if level == 5:
+                lt = os.path.join(work, 'linktree')
+                shutil.rmtree(lt, ignore_errors=True)
+                os.makedirs(lt)
+                open(os.path.join(lt, 'a.txt'), 'w').write('host file a.txt\n')
+                os.symlink('a.txt', os.path.join(lt, 'A.TXT'))
+                im = mkvol(work, level, hl, 'o7', 1)
+                rc, out = R.ods2(im, 'IMPORT/NEW_VERSION %s [W]' % lt)
+                check('%s review 78 F1: a symbolic link made by this IMPORT is not pruned by a later file: A.TXT;1 (the link) stays, the file is refused, exit 1, 1 error' % kind,
+                      (1, ['A.TXT;1'], 1, True), (rc, entries(im), out.count('ODS2-E-COPYERR'), '1 error' in out))
+            # review 78 N3: two host directories (x and X) with f.txt and F.TXT: the list is the command's, not one directory's: one file is made in [W.X], two are refused
+            tw = os.path.join(work, 'twodirs')
+            shutil.rmtree(tw, ignore_errors=True)
+            for d in ('x', 'X'):
+                os.makedirs(os.path.join(tw, d))
+            open(os.path.join(tw, 'x', 'f.txt'), 'w').write('x f\n')
+            open(os.path.join(tw, 'x', 'F.TXT'), 'w').write('x F\n')
+            open(os.path.join(tw, 'X', 'f.txt'), 'w').write('X f\n')
+            im = mkvol(work, level, hl, 'o8', 1)
+            rc, out = R.ods2(im, 'IMPORT/NEW_VERSION %s [W]' % tw)
+            check('%s review 78 N3: host directories x and X (the same VMS name) with f.txt, F.TXT: one F.TXT;1 in [W.X], two refused, exit 1' % kind, (1, ['F.TXT;1'], 2), (rc, sorted(e.upper() for e in R.listing(im, '[W.X]')), out.count('ODS2-E-COPYERR')))
             # COPY of one file cannot meet it: three COPY commands to one name, default limit 2: the single-file rule (CORPUS 66.1): ;3 and ;2 remain
             im = mkvol(work, level, hl, 'o6', 2)
             hp = os.path.join(tree, 'A.TXT')

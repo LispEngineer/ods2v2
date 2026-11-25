@@ -2820,6 +2820,7 @@ typedef struct {
     const ods2_record_attrs_t *attrs_in; /* the /ATTRIBUTES given */
     ods2_fid_t *made;                    /* the files this IMPORT created (review 77 O1): none of them may be deleted by a version limit's prune of a later file */
     size_t nmade, cap_made;
+    bool stop;                           /* the list of made files could not grow: the command stops (review 78 N2: fail closed, never a file left unprotected) */
 } import_stats_t;
 
 static int import_name_cmp(const struct dirent **a, const struct dirent **b)
@@ -2834,6 +2835,27 @@ static void import_decode_name(const char *linux_name, char *out, size_t cap)
 }
 
 #define IMPORT_MAX_DEPTH 2048   /* the creation cap; the host's 4,096-character path limit stops a tree sooner */
+
+/* the files this IMPORT/NEW_VERSION made: the library refuses a version-limit prune of any of them (review 77 O1, 78 F1). A list that cannot grow stops the command: a file left unprotected would be pruned
+   in silence (review 78 N2). */
+static void import_protect_add(import_stats_t *st, ods2_fid_t fid)
+{
+    if (!st->opts->new_version) return;
+    if (st->nmade == st->cap_made) {
+        size_t nc = st->cap_made ? st->cap_made * 2 : 64;
+        ods2_fid_t *nm = realloc(st->made, nc * sizeof(*nm));
+        if (nm == NULL) {
+            report_error("%%ODS2-E-NOMEM, out of memory: the list of imported files cannot grow, the rest of the IMPORT is not run (the files made so far stay)\n");
+            st->errors++;
+            st->stop = true;
+            return;
+        }
+        st->made = nm;
+        st->cap_made = nc;
+    }
+    st->made[st->nmade++] = fid;
+    ods2_set_create_protect(st->vol, st->made, (unsigned) st->nmade);
+}
 
 static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_file_number, int depth)
 {
@@ -2866,7 +2888,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
         st->errors++;
         return;
     }
-    for (i = 0; i < count; i++) {
+    for (i = 0; i < count && !st->stop; i++) {
         const char *entry = list[i]->d_name;
         char *path = b->path, *literal = b->literal, *shown = b->shown;
         uint8_t *dir_header = b->dir_header;
@@ -2967,17 +2989,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
             }
             st->files++;
             st->bytes += in.length;
-            if (st->opts->new_version) {
-                if (st->nmade == st->cap_made) {
-                    size_t nc = st->cap_made ? st->cap_made * 2 : 64;
-                    ods2_fid_t *nm = realloc(st->made, nc * sizeof(*nm));
-                    if (nm != NULL) { st->made = nm; st->cap_made = nc; }
-                }
-                if (st->nmade < st->cap_made) {
-                    st->made[st->nmade++] = fid;
-                    ods2_set_create_protect(st->vol, st->made, (unsigned) st->nmade);
-                }
-            }
+            import_protect_add(st, fid);
         } else if (S_ISLNK(sb.st_mode)) {
             char *target = b->target;
             ssize_t n = readlink(path, target, sizeof(b->target) - 1);
@@ -2994,6 +3006,7 @@ static void import_tree(import_stats_t *st, const char *local_dir, unsigned dir_
                 continue;
             }
             st->links++;
+            import_protect_add(st, fid);                    /* review 78 F1: a link made by this IMPORT is protected too (a later file of the name would prune it) */
         } else {
             fprintf(stderr, "%%ODS2-W-SPECIAL, %s is not a regular file, directory or link: skipped\n", shown);
             st->skipped++;
